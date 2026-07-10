@@ -46,7 +46,11 @@ export default function Header() {
                 <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-green-500" />
               </span>
               {user.project.name}
-              {user.project.tenantName && <span className="text-indigo-400 font-normal">· {user.project.tenantName}</span>}
+              {/* Suffix only when it adds information - a project named after
+                  its tenant would otherwise read "x.onmicrosoft.com · x.onmicrosoft.com" */}
+              {user.project.tenantName && user.project.tenantName.toLowerCase() !== user.project.name?.toLowerCase() && (
+                <span className="text-indigo-400 font-normal">· {user.project.tenantName}</span>
+              )}
             </span>
           )}
           <nav className="flex gap-1">

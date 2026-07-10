@@ -348,9 +348,18 @@ $newEncryptionKey = {
     [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
     [Convert]::ToBase64String($bytes)
 }
+# The signed-in tenant's real default domain - used as the display name of
+# the default project a fresh database creates. A literal placeholder here
+# used to leak all the way into the UI header ("yourtenant.sharepoint.com ·
+# <real tenant>") on every fresh install.
+$tenantDefaultDomain = ''
+try {
+    $org = (Invoke-MgGraphRequest -Method GET -Uri 'v1.0/organization?$select=verifiedDomains').value | Select-Object -First 1
+    $tenantDefaultDomain = ($org.verifiedDomains | Where-Object { $_.isDefault } | Select-Object -First 1).name
+} catch {}
 $managed = [ordered]@{
     TENANT_ID                    = $tenantId
-    TENANT_NAME                  = (& $keep 'TENANT_NAME' 'yourtenant.sharepoint.com')
+    TENANT_NAME                  = (& $keep 'TENANT_NAME' $tenantDefaultDomain)
     CLIENT_ID                    = $app.AppId
     CLIENT_SECRET                = $clientSecret
     REDIRECT_URI                 = $RedirectUri

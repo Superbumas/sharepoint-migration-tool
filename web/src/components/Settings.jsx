@@ -217,7 +217,7 @@ export default function Settings() {
   if (!settings) return <div className="text-slate-500">Loading settings...</div>;
 
   const rows = [
-    ['Tenant', settings.tenantName],
+    ['Tenant', settings.tenantName || '—'],
     ['Default per-job concurrency', settings.defaultJobConcurrency],
     ['Global max concurrency (all jobs combined)', settings.globalMaxConcurrency],
     ['Adaptive throttle trigger (retry rate)', `${(settings.retryRateBackoffThreshold * 100).toFixed(0)}%`],

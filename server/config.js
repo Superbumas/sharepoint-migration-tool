@@ -34,7 +34,10 @@ module.exports = {
   nodeEnv: process.env.NODE_ENV || 'development',
 
   tenantId: required('TENANT_ID', ''),
-  tenantName: required('TENANT_NAME', 'yourtenant.sharepoint.com'),
+  // Display-only; '' is fine (the default project is then named "Default
+  // project" and the Settings page shows a dash). The old placeholder
+  // default leaked into the UI header as a literal project name.
+  tenantName: required('TENANT_NAME', ''),
   clientId: required('CLIENT_ID', ''),
   clientSecret: required('CLIENT_SECRET', ''),
   redirectUri: required('REDIRECT_URI', 'http://localhost:3000/auth/redirect'),
