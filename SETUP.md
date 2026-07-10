@@ -8,14 +8,37 @@ setting this up.
 If you just want the architecture overview, see [README.md](README.md). This document
 is the operational "how do I actually get this working" guide.
 
+## The identity model in one minute (read this first)
+
+The tool uses two kinds of Azure AD apps, and mixing them up is the #1 setup mistake:
+
+- **One front-door app, in YOUR OWN company tenant.** Created once by the setup script
+  below. It only handles web sign-in, site browsing (as the signed-in person), and the
+  one-time bootstrap of each client. It never copies files. Your company tenant is its
+  home purely because a multi-tenant Azure AD app has to be registered somewhere.
+- **One engine app PER CLIENT TENANT, created automatically.** The first time a
+  client's Global Admin signs into their new Project, the tool creates a dedicated app
+  registration *inside the client's own tenant* (certificate auth, `Sites.Selected`,
+  per-site grants). This is what actually reads and writes SharePoint. No script, no
+  Portal visit, nothing to install on the client side - ever.
+
+The rule that follows: **the setup script is run once, signed into your own company
+tenant - never a client's.** Clients are onboarded exclusively through the Projects
+page (Part 2). If you run the setup script signed into a client's tenant, that client
+becomes the tool's "home" tenant: their project then skips the automatic engine-app
+provisioning and expects the shared certificate instead - which shows up later as jobs
+failing with certificate errors, and as a stray "Content Migration Tool" app
+registration polluting the client's Entra ID (see Troubleshooting: "I ran the setup
+script signed into the wrong tenant").
+
 ---
 
 ## Part 1: One-time setup (do this once, ever)
 
 You need: Node.js 20+, PowerShell 7 (`pwsh`), and an account with rights to create app
-registrations in **your own** tenant (the one that will own this tool - not any client's
-tenant). Application Administrator, Cloud Application Administrator, or Global
-Administrator all work.
+registrations in **your own company's** tenant - Application Administrator, Cloud
+Application Administrator, or Global Administrator all work. Not a client account: see
+"The identity model in one minute" above for why this matters.
 
 ### 1. Install dependencies
 
@@ -31,8 +54,10 @@ pwsh -File setup/New-AppRegistration.ps1
 ```
 (or `npm run setup:app-registration`)
 
-This prompts an interactive Microsoft Graph login (`Connect-MgGraph`) - sign in with
-your own tenant's admin account. It's idempotent (safe to re-run) - it:
+This prompts an interactive Microsoft Graph login (`Connect-MgGraph`) - **sign in with
+your own company tenant's admin account, never a client's** (the tenant you sign into
+here becomes the tool's home tenant - see the identity model section at the top).
+It's idempotent (safe to re-run) - it:
 - Creates (or finds and updates) an Azure AD app registration named "SharePoint
   Migration Tool", configured as **multi-tenant** (`SignInAudience: AzureADMultipleOrgs`)
   so any client tenant can use it once their admin consents.
@@ -202,6 +227,18 @@ You should never need those: `git pull` (the repo pins a better-sqlite3 with pre
 binaries for current Node LTS and newer), delete `node_modules`, and run `npm install`
 again. If it still tries to compile, your Node version is probably brand-new or EOL -
 install the current LTS from nodejs.org and retry.
+
+**I ran the setup script signed into the wrong (a client's) tenant**
+Symptoms: that client's project fails jobs with certificate errors instead of
+auto-provisioning its own engine app, and the client's Entra ID has a "Content
+Migration Tool" app registration it shouldn't. Fix: re-run
+`pwsh -File setup/New-AppRegistration.ps1` on the server machine signed in with your
+own company tenant's admin account (it rewrites `TENANT_ID` in `.env` to the tenant
+you signed into), restart the server, then have the client's GA sign out and back into
+their project - it now auto-provisions its dedicated engine app like any other client,
+and the pre-run auto-grant re-points site grants on the next job run. Optionally, the
+client's admin can delete the stray "Content Migration Tool"/"SharePoint Migration
+Tool" app registration from their Entra ID afterwards.
 
 **A job fails immediately with "Cannot find certificate with this thumbprint in the certificate store"**
 Only the project bound to the operator's own tenant (`TENANT_ID` in `.env`) uses the

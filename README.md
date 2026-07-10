@@ -89,6 +89,8 @@ The short version:
 ```bash
 npm install
 pwsh -File setup/New-AppRegistration.ps1   # one-time: app registration + cert + .env
+                                            # sign in with YOUR OWN tenant's admin -
+                                            # never a client's (see SETUP.md, top)
 npm run dev                                 # dev: http://localhost:5173
 # production: npm run build && npm run start:server-only
 ```
