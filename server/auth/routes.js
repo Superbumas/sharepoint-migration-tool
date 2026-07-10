@@ -61,10 +61,12 @@ router.get('/auth/login', async (req, res, next) => {
       // client-secret era (engine_client_id but no certificate - unusable by
       // the engine, must be re-provisioned; see /auth/redirect below).
       // Request the extra scopes needed to (re)try provisioning this time.
-      // Never for the legacy/backfilled tenant (config.tenantId) - that one
-      // intentionally keeps using the original global cert-based identity
-      // forever and must never get a dedicated app auto-created on top of it.
-      if (project && project.tenant_id !== config.tenantId && (!project.tenant_id || !engineCredentialUsable(project))) {
+      // The operator's own tenant is deliberately NOT special-cased anymore:
+      // every tenant - home included - gets its own dedicated engine app.
+      // Projects grandfathered on the original shared certificate keep
+      // working via resolveEngineIdentity's fallback until their next
+      // sign-in provisions them.
+      if (project && (!project.tenant_id || !engineCredentialUsable(project))) {
         needsProvisionScopes = true;
       }
     } else {
@@ -134,8 +136,10 @@ router.get('/auth/redirect', async (req, res, next) => {
     }
     // Must match whatever /auth/login actually requested for this same
     // sign-in - MSAL's token exchange is against the code's own granted
-    // scopes, not an independent request.
-    const scopes = req.session.pendingProvisionScopes ? PROJECT_PROVISION_SCOPES : config.delegatedScopes;
+    // scopes, not an independent request. wasProvisionLeg also guards the
+    // provisioning bounce below against redirect loops.
+    const wasProvisionLeg = !!req.session.pendingProvisionScopes;
+    const scopes = wasProvisionLeg ? PROJECT_PROVISION_SCOPES : config.delegatedScopes;
     delete req.session.pendingProvisionScopes;
     const client = getMsalClient(req.session, { authority: ORGANIZATIONS_AUTHORITY });
     const result = await client.acquireTokenByCode({
@@ -206,19 +210,30 @@ router.get('/auth/redirect', async (req, res, next) => {
     // (server/jobs/orchestrator.js), with a clear "sign in again to retry"
     // message - not by leaving the user stuck on an error page mid-login.
     //
-    // Excludes the legacy/backfilled tenant (config.tenantId) unconditionally
-    // - that project keeps using the original global cert-based identity
-    // forever (see resolveEngineIdentity in server/jobs/orchestrator.js) and
-    // must never get a dedicated app auto-created on top of it, even though
-    // its engine_client_id is also NULL.
+    // EVERY tenant provisions - including the operator's own. The old
+    // home-tenant exclusion (kept on the shared certificate forever) is
+    // gone; existing unprovisioned home-tenant projects are grandfathered
+    // via resolveEngineIdentity's shared-cert fallback until a sign-in
+    // like this one gives them a dedicated app.
     //
     // "Not provisioned" covers three broken states (see engineCredentialUsable):
     // never provisioned, half-provisioned (client-secret era), and stored but
     // undecryptable because CREDENTIAL_ENCRYPTION_KEY changed. All three
     // re-provision here exactly like a failed first attempt.
-    if (!engineCredentialUsable(project) && req.session.tenantId !== config.tenantId) {
+    if (!engineCredentialUsable(project)) {
       if (!config.credentialEncryptionKey) {
         console.error('[auth] Skipping engine app provisioning for project', project.id, '- CREDENTIAL_ENCRYPTION_KEY is not set.');
+      } else if (!wasProvisionLeg) {
+        // A bare "Sign in with Microsoft" (no ?project=) can't provision -
+        // its token wasn't requested with the app-creation scopes, because
+        // the tenant (and whether its project even needs provisioning)
+        // wasn't known until this moment. Bounce through the project-scoped
+        // login once: SSO makes it a silent redirect (no password re-entry;
+        // at most a one-time consent prompt for a brand-new tenant's GA),
+        // and that leg carries the scopes and provisions. wasProvisionLeg
+        // guarantees a provisioning failure exits to '/' instead of looping.
+        await hydrateUserProfile(req);
+        return res.redirect(`/auth/login?project=${project.id}`);
       } else {
         try {
           const provisioned = await provisionTenantApp(result.accessToken, project.name);

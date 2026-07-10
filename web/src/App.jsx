@@ -3,6 +3,7 @@ import { Routes, Route } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import Header from './components/Header';
 import ProjectPicker from './components/ProjectPicker';
+import SignIn from './components/SignIn';
 import Dashboard from './components/Dashboard';
 import JobQueue from './components/JobQueue';
 import JobDetail from './components/JobDetail';
@@ -16,7 +17,10 @@ function Gate({ children }) {
     return <div className="max-w-7xl mx-auto p-8 text-slate-500">Loading...</div>;
   }
   if (!user) {
-    return <ProjectPicker />;
+    // One button, no decisions: the server lands the account in its own
+    // tenant's project (creating it on first sign-in). /projects remains
+    // the explicit multi-tenant switcher.
+    return <SignIn />;
   }
   return children;
 }

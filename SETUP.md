@@ -14,22 +14,22 @@ The tool uses two kinds of Azure AD apps, and mixing them up is the #1 setup mis
 
 - **One front-door app, in YOUR OWN company tenant.** Created once by the setup script
   below. It only handles web sign-in, site browsing (as the signed-in person), and the
-  one-time bootstrap of each client. It never copies files. Your company tenant is its
+  one-time bootstrap of each tenant. It never copies files. Your company tenant is its
   home purely because a multi-tenant Azure AD app has to be registered somewhere.
-- **One engine app PER CLIENT TENANT, created automatically.** The first time a
-  client's Global Admin signs into their new Project, the tool creates a dedicated app
-  registration *inside the client's own tenant* (certificate auth, `Sites.Selected`,
-  per-site grants). This is what actually reads and writes SharePoint. No script, no
-  Portal visit, nothing to install on the client side - ever.
+- **One engine app PER TENANT - yours included - created automatically.** The first
+  time a tenant's Global Admin signs in, the tool creates a dedicated app registration
+  *inside that tenant* (certificate auth, `Sites.Selected`, per-site grants). This is
+  what actually reads and writes SharePoint. No script, no Portal visit, nothing to
+  install per tenant - ever. (Installs from before July 2026 may have a home-tenant
+  project still on the setup script's shared certificate - it keeps working via a
+  fallback and upgrades itself to a dedicated app on its next admin sign-in.)
 
 The rule that follows: **the setup script is run once, signed into your own company
-tenant - never a client's.** Clients are onboarded exclusively through the Projects
-page (Part 2). If you run the setup script signed into a client's tenant, that client
-becomes the tool's "home" tenant: their project then skips the automatic engine-app
-provisioning and expects the shared certificate instead - which shows up later as jobs
-failing with certificate errors, and as a stray "Content Migration Tool" app
-registration polluting the client's Entra ID (see Troubleshooting: "I ran the setup
-script signed into the wrong tenant").
+tenant - never a client's.** Tenants are onboarded just by signing in (Part 2).
+Running the setup script signed into a client's tenant no longer breaks anything
+operationally, but it registers the tool's front-door app (and `.env`) against the
+wrong tenant and leaves a stray app registration in the client's Entra ID - see
+Troubleshooting: "I ran the setup script signed into the wrong tenant".
 
 ---
 
@@ -126,32 +126,34 @@ Open `http://localhost:<PORT>` (default 3000).
 
 ---
 
-## Part 2: Onboarding a new client tenant (repeatable - do this per client)
+## Part 2: Onboarding a tenant (repeatable - takes one sign-in)
 
 This is the part that's genuinely just clicking through the browser - no scripts, no
 Azure Portal, nothing outside the app.
 
-1. Open the tool. If you're not signed in yet, you land on the project picker
-   directly; if you're already signed into another project, click **Projects** in the
-   nav bar to reach the same picker without signing out.
-2. Click **+ New project**, type a name for this client (e.g. "Contoso Ltd"), submit.
-3. You're redirected into a Microsoft sign-in. **Sign in with that specific client's
-   own Global Admin account** - not your own tenant's account.
-4. Because this project isn't provisioned yet, Azure AD will ask that GA to consent to
-   a few permissions. Most Global Admins see this as a single "Accept" click (their
-   tenant's own sign-in auto-offers "consent on behalf of your organization" for
-   admin-restricted scopes). If their tenant's policy blocks that, you'll instead land
-   on a page saying "your organization hasn't approved this tool yet" with a link -
-   click it, consent once, then sign in normally.
-5. Behind the scenes, the tool automatically creates a **brand-new, dedicated Azure AD
-   app registration inside that client's own tenant** (you can see it afterward in
-   *their* Entra ID → Enterprise Applications, named "Content Migration Tool -
-   Contoso Ltd" or similar) with its own certificate, generated on the fly and consented
-   using that GA's own rights. It's a certificate, not a client secret, because SharePoint
-   Online's app-only authentication rejects client secrets outright regardless of
-   permissions. This app belongs entirely to their tenant - your tool's shared app
-   registration is never used for their SharePoint access.
-6. You're signed in, the project is active.
+1. Open the tool and click **Sign in with Microsoft**, using the tenant's **Global
+   Admin account** (for a client migration, that means the client's GA - not your own
+   tenant's account). That's it: the tool finds that tenant's project or creates one
+   automatically (named after the sign-in domain), and switching between tenants later
+   is the **Projects** page in the nav bar - every project has its own "Sign in" link.
+2. Prefer a friendlier project name than the domain? Create it first: **Projects →
+   + New project**, type the name (e.g. "Contoso Ltd"), then sign in with the tenant's
+   GA when redirected - the project binds to whatever tenant signs into it first.
+3. On a tenant's first sign-in, Azure AD asks the GA to consent to a few permissions.
+   Most Global Admins see this as a single "Accept" click (their tenant's own sign-in
+   auto-offers "consent on behalf of your organization" for admin-restricted scopes).
+   If their tenant's policy blocks that, you'll instead land on a page saying "your
+   organization hasn't approved this tool yet" with a link - click it, consent once,
+   then sign in normally.
+4. Behind the scenes, the tool automatically creates a **brand-new, dedicated Azure AD
+   app registration inside that tenant** (visible afterward in *their* Entra ID →
+   Enterprise Applications, named "Content Migration Tool - Contoso Ltd" or similar)
+   with its own certificate, generated on the fly and consented using that GA's own
+   rights. It's a certificate, not a client secret, because SharePoint Online's
+   app-only authentication rejects client secrets outright regardless of permissions.
+   This app belongs entirely to that tenant - the tool's shared front-door app is
+   never used for SharePoint content access.
+5. You're signed in, the project is active.
 
 ### Granting access to specific sites
 
@@ -229,15 +231,13 @@ again. If it still tries to compile, your Node version is probably brand-new or 
 install the current LTS from nodejs.org and retry.
 
 **I ran the setup script signed into the wrong (a client's) tenant**
-Symptoms: that client's project fails jobs with certificate errors instead of
-auto-provisioning its own engine app, and the client's Entra ID has a "Content
-Migration Tool" app registration it shouldn't. Fix: re-run
-`pwsh -File setup/New-AppRegistration.ps1` on the server machine signed in with your
-own company tenant's admin account (it rewrites `TENANT_ID` in `.env` to the tenant
-you signed into), restart the server, then have the client's GA sign out and back into
-their project - it now auto-provisions its dedicated engine app like any other client,
-and the pre-run auto-grant re-points site grants on the next job run. Optionally, the
-client's admin can delete the stray "Content Migration Tool"/"SharePoint Migration
+Since every tenant now provisions its own engine app at sign-in, this no longer
+breaks migrations - but the tool's front-door app registration (and `.env`) is living
+in the client's tenant instead of yours, and their Entra ID has a stray app it
+shouldn't. Fix: re-run `pwsh -File setup/New-AppRegistration.ps1` on the server
+machine signed in with your own company tenant's admin account (it rewrites
+`TENANT_ID` in `.env` to the tenant you signed into), restart the server. Optionally,
+the client's admin deletes the stray "Content Migration Tool"/"SharePoint Migration
 Tool" app registration from their Entra ID afterwards.
 
 **A job fails immediately with "Cannot find certificate with this thumbprint in the certificate store"**

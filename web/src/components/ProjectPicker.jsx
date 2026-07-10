@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 
-const AUTH_ERROR_MESSAGES = {
+export const AUTH_ERROR_MESSAGES = {
   // Set by the server (server/auth/routes.js) when Azure AD couldn't
   // complete sign-in because this client tenant hasn't consented to the app
   // yet - most Global Admins won't ever see this (an ordinary sign-in
@@ -55,7 +55,11 @@ export default function ProjectPicker() {
         ⇥
       </div>
       <h1 className="text-lg font-semibold text-slate-800 mb-1 text-center">Projects</h1>
-      <p className="text-sm text-slate-500 mb-6 text-center">Pick a project to sign into, or start a new one.</p>
+      <p className="text-sm text-slate-500 mb-6 text-center">
+        One project per tenant. Pick one to sign into — or just{' '}
+        <a href="/auth/login" className="text-blue-600 hover:underline">sign in with Microsoft</a>{' '}
+        and land in your account's tenant automatically (new tenants get their project created on first sign-in).
+      </p>
 
       {authError && AUTH_ERROR_MESSAGES[authError] && (
         <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-3 mb-4 text-left">
