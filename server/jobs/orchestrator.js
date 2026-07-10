@@ -677,7 +677,10 @@ function handleEngineEvent(jobId, event, state) {
       // still be set when copying begins - the first file starting is the
       // real "pre-copy phases are over" signal.
       if (job.phase_json) db.prepare('UPDATE jobs SET phase_json = NULL WHERE id = ?').run(jobId);
-      upsertItem(jobId, event, { status: 'pending' });
+      // Size captured from the very first event so the row has one no matter
+      // how the item ends - a failed-then-reconciled row otherwise counts
+      // zero bytes and the "Bytes done" tile undercounts forever.
+      upsertItem(jobId, event, { status: 'pending', size_bytes: event.bytes });
       insertLog(jobId, { event_type: 'item_start', source_path: event.sourcePath, target_path: event.targetPath, action: job.action });
       break;
     }
@@ -745,7 +748,7 @@ function handleEngineEvent(jobId, event, state) {
       // "Skipped because already present" after an earlier successful copy is
       // still a success - keep the row's status so the completion-time
       // recompute below counts it where it belongs.
-      if (prior !== 'success') upsertItem(jobId, event, { status: 'skipped', completed_at: true });
+      if (prior !== 'success') upsertItem(jobId, event, { status: 'skipped', size_bytes: event.bytes, completed_at: true });
       if (prior !== 'success' && prior !== 'skipped') {
         db.prepare('UPDATE jobs SET items_skipped = items_skipped + 1, items_failed = MAX(items_failed - ?, 0) WHERE id = ?')
           .run(prior === 'failed' ? 1 : 0, jobId);
@@ -840,6 +843,14 @@ function handleEngineEvent(jobId, event, state) {
             error_message: `${healed.changes} item(s) previously marked failed verified hash-identical at the target - reclassified as copied.`,
           });
         }
+        // Every source file verified hash-identical at the target = every
+        // enumerated byte is there. Rows from before sizes were captured on
+        // item_start have NULL size_bytes and undercount the SUM above -
+        // the enumeration total is the honest number for a clean tree.
+        db.prepare(
+          `UPDATE jobs SET bytes_done = total_bytes
+           WHERE id = ? AND total_bytes IS NOT NULL AND bytes_done < total_bytes`
+        ).run(jobId);
       }
       insertLog(jobId, { event_type: 'verification_summary', raw_json: event.verification });
       break;

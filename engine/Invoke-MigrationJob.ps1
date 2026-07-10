@@ -847,7 +847,7 @@ try {
             $targetFileServerRel = "$targetFolderServerRel/$($item.Name)"
 
             $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_start' -Data @{
-                sourcePath = $sourceFileServerRel; targetPath = $targetFileServerRel; itemType = 'file'
+                sourcePath = $sourceFileServerRel; targetPath = $targetFileServerRel; itemType = 'file'; bytes = [long]$item.Size
             }))
 
             # Skip/delta check: prefer the prefetched target index (memory
@@ -864,7 +864,7 @@ try {
             }
             if ($alreadyDone) {
                 $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_skipped' -Data @{
-                    sourcePath = $sourceFileServerRel; targetPath = $targetFileServerRel
+                    sourcePath = $sourceFileServerRel; targetPath = $targetFileServerRel; bytes = [long]$item.Size
                     reason     = 'target already has a file of the same name and size'
                 }))
             } else {
@@ -985,7 +985,7 @@ try {
             $targetDisplayPath = "$Container/$blobKey"
 
             $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_start' -Data @{
-                sourcePath = $sourceFileServerRel; targetPath = $targetDisplayPath; itemType = 'file'
+                sourcePath = $sourceFileServerRel; targetPath = $targetDisplayPath; itemType = 'file'; bytes = [long]$item.Size
             }))
 
             # Skip/delta check: prefer the prefetched target index (memory
@@ -1004,7 +1004,7 @@ try {
 
             if ($alreadyDone) {
                 $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_skipped' -Data @{
-                    sourcePath = $sourceFileServerRel; targetPath = $targetDisplayPath
+                    sourcePath = $sourceFileServerRel; targetPath = $targetDisplayPath; bytes = [long]$item.Size
                     reason     = 'target already has a blob of the same name and size'
                 }))
             } else {
@@ -1112,7 +1112,7 @@ try {
             $targetFileServerRel = "$targetFolderServerRel/$($item.TargetName)"
 
             $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_start' -Data @{
-                sourcePath = $sourceFilePath; targetPath = $targetFileServerRel; itemType = 'file'
+                sourcePath = $sourceFilePath; targetPath = $targetFileServerRel; itemType = 'file'; bytes = [long]$item.Size
             }))
             if ($item.Renamed) {
                 $ResultQueue.Enqueue((New-EngineEventJson -Type 'log' -Data @{
@@ -1134,7 +1134,7 @@ try {
             }
             if ($alreadyDone) {
                 $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_skipped' -Data @{
-                    sourcePath = $sourceFilePath; targetPath = $targetFileServerRel
+                    sourcePath = $sourceFilePath; targetPath = $targetFileServerRel; bytes = [long]$item.Size
                     reason     = 'target already has a file of the same name and size'
                 }))
             } else {
