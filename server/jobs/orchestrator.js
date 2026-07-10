@@ -818,6 +818,29 @@ function handleEngineEvent(jobId, event, state) {
       db.prepare(`UPDATE jobs SET verification_json = ?, verified_at = datetime('now') WHERE id = ?`).run(
         JSON.stringify(event.verification || {}), jobId
       );
+      // A clean verification is ground truth for the whole tree: every
+      // source file has a hash-identical copy at the target. Item rows
+      // still marked 'failed' from upload-time errors that in fact
+      // committed (PnP can throw after the content landed) are factually
+      // copied - reconcile them, or the KPI tiles show "2 failed" forever
+      // right next to a "verified 4 of 4 byte-identical" banner.
+      if (event.verification?.ok) {
+        const healed = db.prepare(`UPDATE job_items SET status = 'success', error_message = NULL WHERE job_id = ? AND status = 'failed'`).run(jobId);
+        if (healed.changes > 0) {
+          db.prepare(
+            `UPDATE jobs SET
+               items_done = (SELECT COUNT(*) FROM job_items WHERE job_id = jobs.id AND status = 'success'),
+               items_failed = (SELECT COUNT(*) FROM job_items WHERE job_id = jobs.id AND status = 'failed'),
+               items_skipped = (SELECT COUNT(*) FROM job_items WHERE job_id = jobs.id AND status = 'skipped'),
+               bytes_done = (SELECT COALESCE(SUM(size_bytes), 0) FROM job_items WHERE job_id = jobs.id AND status = 'success')
+             WHERE id = ?`
+          ).run(jobId);
+          insertLog(jobId, {
+            event_type: 'log', level: 'info',
+            error_message: `${healed.changes} item(s) previously marked failed verified hash-identical at the target - reclassified as copied.`,
+          });
+        }
+      }
       insertLog(jobId, { event_type: 'verification_summary', raw_json: event.verification });
       break;
     }
@@ -989,6 +1012,10 @@ function verifyJob(jobId, actor, tenantId) {
   });
   child.on('close', () => {
     verifyRuns.delete(jobId);
+    // A verify-only run emits phase heartbeats (hashing_source etc.) but no
+    // lifecycle events - without this, the last heartbeat sticks as a frozen
+    // "Hashing source files - N files" banner on the completed job forever.
+    getDb().prepare('UPDATE jobs SET phase_json = NULL WHERE id = ?').run(jobId);
     const updated = getJob(jobId);
     emitJob(jobId, { type: 'job_updated', job: updated });
     emitDashboard({ type: 'job_updated', job: updated }, updated?.tenant_id);
@@ -1079,6 +1106,10 @@ function cleanupSourceJob(jobId, actor, tenantId) {
   });
   child.on('close', () => {
     cleanupRuns.delete(jobId);
+    // Same stuck-banner guard as the verify close handler: if the run died
+    // without emitting its summary event, the last phase heartbeat would
+    // freeze on the job page forever.
+    getDb().prepare('UPDATE jobs SET phase_json = NULL WHERE id = ?').run(jobId);
     const updated = getJob(jobId);
     emitJob(jobId, { type: 'job_updated', job: updated });
     emitDashboard({ type: 'job_updated', job: updated }, updated?.tenant_id);
@@ -1149,6 +1180,10 @@ function purgeRecycleBinJob(jobId, actor, tenantId) {
   });
   child.on('close', () => {
     cleanupRuns.delete(jobId);
+    // Same stuck-banner guard as the verify close handler: if the run died
+    // without emitting its summary event, the last phase heartbeat would
+    // freeze on the job page forever.
+    getDb().prepare('UPDATE jobs SET phase_json = NULL WHERE id = ?').run(jobId);
     const updated = getJob(jobId);
     emitJob(jobId, { type: 'job_updated', job: updated });
     emitDashboard({ type: 'job_updated', job: updated }, updated?.tenant_id);
