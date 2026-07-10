@@ -61,6 +61,22 @@ if (fs.existsSync(webDist)) {
   app.get(/^(?!\/api|\/auth|\/socket\.io).*/, (req, res) => {
     res.sendFile(path.join(webDist, 'index.html'));
   });
+} else {
+  // Fresh clone, server started without building the SPA first (web/dist is
+  // build output and never committed). Express's bare "Cannot GET /" told
+  // people nothing - say exactly what to do instead.
+  app.get(/^(?!\/api|\/auth|\/socket\.io).*/, (req, res) => {
+    res.status(503).send(
+      '<body style="font-family:system-ui;max-width:40rem;margin:4rem auto;line-height:1.6">' +
+      '<h2>The web UI has not been built yet</h2>' +
+      '<p>This server is running, but <code>web/dist</code> does not exist, so there is no UI to serve.</p>' +
+      '<p>Either run the dev setup (UI on its own port with hot reload):</p>' +
+      '<pre>npm run dev &nbsp;&nbsp;# then open http://localhost:5173</pre>' +
+      '<p>or build the UI once and restart this server (UI served right here):</p>' +
+      '<pre>npm run build\nnpm run start:server-only</pre>' +
+      '</body>'
+    );
+  });
 }
 
 app.use((err, req, res, next) => {
