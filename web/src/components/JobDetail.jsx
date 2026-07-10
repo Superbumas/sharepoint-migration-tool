@@ -91,6 +91,17 @@ function formatTime(ts) {
   return isNaN(d) ? ts : d.toLocaleTimeString('en-GB', { hour12: false });
 }
 
+// "Hub" from "https://tenant.sharepoint.com/sites/Hub" - jobs store only the
+// site URL, and a bare library/path never says WHICH site is involved.
+function siteFromUrl(u) {
+  if (!u) return '';
+  try {
+    return decodeURIComponent(new URL(u).pathname.split('/').filter(Boolean).pop() || '');
+  } catch {
+    return '';
+  }
+}
+
 // Long server-relative paths dominate the log visually; show the filename
 // bright and the folder dim, keep the full path in the hover title.
 function PathLabel({ path }) {
@@ -252,8 +263,23 @@ export default function JobDetail() {
         </div>
         <div className="text-sm text-slate-500 mt-1">
           {job.source.provider === 'filesystem' && <span className="text-xs rounded bg-violet-100 text-violet-700 px-1.5 py-0.5 font-medium mr-1.5">file share</span>}
-          {job.source.path} <span className="text-slate-300">&rarr;</span>{' '}
-          {job.target.provider === 'azure_blob' ? `azure-blob://${job.target.container}/${job.target.blobPrefix || ''}` : job.target.path} · {job.action}
+          <span title={job.source.siteUrl || undefined}>
+            {job.source.provider !== 'filesystem' && siteFromUrl(job.source.siteUrl) && (
+              <span className="text-slate-400">{siteFromUrl(job.source.siteUrl)} <span className="text-slate-300">›</span> </span>
+            )}
+            {job.source.path}
+          </span>
+          {' '}<span className="text-slate-300">&rarr;</span>{' '}
+          {job.target.provider === 'azure_blob'
+            ? `azure-blob://${job.target.container}/${job.target.blobPrefix || ''}`
+            : (
+              <span title={job.target.siteUrl || undefined}>
+                {siteFromUrl(job.target.siteUrl) && (
+                  <span className="font-medium text-slate-600">{siteFromUrl(job.target.siteUrl)} <span className="text-slate-300 font-normal">›</span> </span>
+                )}
+                {job.target.library}/{job.target.path}
+              </span>
+            )} · {job.action}
         </div>
         {job.verification && (
           <div className={`mt-2 text-sm rounded-md p-2 border ${job.verification.ok ? 'text-green-800 bg-green-50 border-green-200' : 'text-red-700 bg-red-50 border-red-200'}`}>

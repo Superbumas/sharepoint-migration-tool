@@ -5,6 +5,19 @@ import SharePointPicker from './SharePointPicker';
 import BlobTargetPicker from './BlobTargetPicker';
 import FileSharePicker from './FileSharePicker';
 
+// Human label for a mapping's SharePoint site: the picker-provided display
+// name when there is one, else the last URL segment ("/sites/Hub" -> "Hub").
+// Crosswalk-imported rows only have the URL, so the fallback matters.
+function siteLabel(siteName, siteUrl) {
+  if (siteName) return siteName;
+  if (!siteUrl) return '';
+  try {
+    return decodeURIComponent(new URL(siteUrl).pathname.split('/').filter(Boolean).pop() || siteUrl);
+  } catch {
+    return siteUrl;
+  }
+}
+
 // Status badge for a mapping's most recent job. Completed jobs distinguish
 // verified-clean from completed-with-issues so "done" actually means done.
 function MappingStatus({ job }) {
@@ -249,13 +262,27 @@ export default function MappingsPage() {
                 <td className="px-4 py-2 text-slate-700">
                   {m.sourceProvider === 'filesystem'
                     ? <span className="inline-flex items-center gap-1"><span className="text-xs rounded bg-violet-100 text-violet-700 px-1.5 py-0.5 font-medium">share</span>{m.sourcePath}</span>
-                    : <>{m.sourceLibrary}/{m.sourcePath}</>}
+                    : (
+                      <span title={m.sourceSiteUrl || undefined}>
+                        {siteLabel(m.sourceSiteName, m.sourceSiteUrl) && (
+                          <span className="text-slate-400">{siteLabel(m.sourceSiteName, m.sourceSiteUrl)} <span className="text-slate-300">›</span> </span>
+                        )}
+                        {m.sourceLibrary}/{m.sourcePath}
+                      </span>
+                    )}
                 </td>
                 <td className="px-4 py-2 text-slate-700">
                   <span className="text-slate-300 mr-1.5">→</span>
                   {m.targetProvider === 'azure_blob'
                     ? <span className="inline-flex items-center gap-1"><span className="text-xs rounded bg-sky-100 text-sky-700 px-1.5 py-0.5 font-medium">blob</span>{m.targetContainer}/{m.targetBlobPrefix || ''}</span>
-                    : `${m.targetLibrary}/${m.targetPath}`}
+                    : (
+                      <span title={m.targetSiteUrl || undefined}>
+                        {siteLabel(m.targetSiteName, m.targetSiteUrl) && (
+                          <span className="text-slate-500 font-medium">{siteLabel(m.targetSiteName, m.targetSiteUrl)} <span className="text-slate-300 font-normal">›</span> </span>
+                        )}
+                        {m.targetLibrary}/{m.targetPath}
+                      </span>
+                    )}
                 </td>
                 <td className="px-4 py-2"><MappingStatus job={m.latestJob} /></td>
                 <td className="px-4 py-2 text-slate-400 text-xs">{m.origin}{m.confidence ? ` (${m.confidence})` : ''}</td>
