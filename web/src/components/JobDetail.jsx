@@ -368,55 +368,6 @@ export default function JobDetail() {
         );
       })()}
 
-      {/* Live per-file transfer progress - only files that live long enough
-          between engine heartbeats appear here, which is exactly when a row
-          is needed (a 370MB file otherwise "disappears" for minutes between
-          item_start and item_success). Byte-accurate for uploads/downloads;
-          SharePoint-to-SharePoint is a server-side copy with no measurable
-          bytes, so it shows an indeterminate "copying" row with elapsed time. */}
-      {job.status === 'running' && Object.keys(uploads).length > 0 && (
-        <div className="rounded-lg border border-slate-200 bg-white p-3 space-y-2.5">
-          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Transferring now</div>
-          {Object.entries(uploads).map(([lane, u]) => {
-            const isCopy = u.phase === 'copying' || u.bytesDone == null;
-            const pct = !isCopy && u.bytesTotal > 0 ? Math.min(100, (u.bytesDone / u.bytesTotal) * 100) : 0;
-            const name = (u.sourcePath || '').split(/[\\/]/).pop();
-            const etaSec = !isCopy && u.rate > 1 && u.bytesTotal > u.bytesDone ? (u.bytesTotal - u.bytesDone) / u.rate : null;
-            const elapsedSec = u.firstSeen ? Math.max(0, Math.round((u.ts - u.firstSeen) / 1000)) : 0;
-            const phaseLabelText = u.phase === 'downloading' ? 'downloading from source'
-              : isCopy ? 'server-side copy' : 'uploading';
-            return (
-              <div key={lane}>
-                <div className="flex items-baseline justify-between gap-2 text-xs mb-1">
-                  <span className="min-w-0 truncate">
-                    <span className="font-medium text-slate-700" title={u.sourcePath}>{name}</span>
-                    <span className="text-slate-400"> · {phaseLabelText}</span>
-                  </span>
-                  <span className="text-slate-500 tabular-nums shrink-0">
-                    {isCopy ? (
-                      <>{formatBytes(u.bytesTotal)}{elapsedSec >= 5 && <> · {elapsedSec >= 90 ? `${Math.round(elapsedSec / 60)} min` : `${elapsedSec}s`} elapsed</>}</>
-                    ) : (
-                      <>
-                        {formatBytes(u.bytesDone)} / {formatBytes(u.bytesTotal)} · {pct.toFixed(0)}%
-                        {u.rate > 1 && <> · {formatBytes(u.rate)}/s</>}
-                        {etaSec != null && <> · ~{etaSec >= 90 ? `${Math.round(etaSec / 60)} min` : `${Math.round(etaSec)}s`} left</>}
-                      </>
-                    )}
-                  </span>
-                </div>
-                <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                  {isCopy ? (
-                    <div className="h-full w-full rounded-full bg-gradient-to-r from-blue-300 to-indigo-400 animate-pulse" />
-                  ) : (
-                    <div className="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-1000" style={{ width: `${pct}%` }} />
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
       {kpis && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <StatCard label="Files done / total" value={`${kpis.files.done.toLocaleString()} / ${(kpis.files.total ?? 0).toLocaleString()}`} />
@@ -429,26 +380,6 @@ export default function JobDetail() {
           <StatCard label="Retries (3+ / total items)" value={`${kpis.retryDistribution['3+']}`} />
         </div>
       )}
-
-      <div className="grid md:grid-cols-2 gap-4">
-        <div className="bg-white border border-slate-200 rounded-lg p-4">
-          <h2 className="text-sm font-semibold text-slate-700 mb-2">Largest files</h2>
-          <ul className="text-xs text-slate-600 space-y-1">
-            {kpis?.largestFiles.map((f, i) => (
-              <li key={i} className="flex justify-between gap-2"><span className="truncate">{f.source_path}</span><span className="text-slate-400 shrink-0">{formatBytes(f.size_bytes)}</span></li>
-            ))}
-          </ul>
-        </div>
-        <div className="bg-white border border-slate-200 rounded-lg p-4">
-          <h2 className="text-sm font-semibold text-slate-700 mb-2">Slow transfers (&gt; {Math.round((kpis?.slowThresholdMs || 0) / 1000)}s)</h2>
-          <ul className="text-xs text-slate-600 space-y-1">
-            {kpis?.slowItems.map((f, i) => (
-              <li key={i} className="flex justify-between gap-2"><span className="truncate">{f.source_path}</span><span className="text-slate-400 shrink-0">{(f.duration_ms / 1000).toFixed(1)}s</span></li>
-            ))}
-            {kpis && kpis.slowItems.length === 0 && <li className="text-slate-400">None</li>}
-          </ul>
-        </div>
-      </div>
 
       <div className="bg-white border border-slate-200 rounded-lg p-4">
         <div className="flex items-center justify-between mb-2">
@@ -467,25 +398,94 @@ export default function JobDetail() {
             <a className="text-blue-600 hover:underline" href={`/api/export/audit?jobId=${id}&format=json`}>Export JSON</a>
           </div>
         </div>
-        <div ref={logRef} onScroll={onLogScroll} className="h-80 overflow-y-auto font-mono text-xs bg-slate-900 text-slate-100 rounded-md p-3 leading-5">
-          {log.map((l, i) => {
-            const s = styleFor(l);
-            return (
-              <div key={i} className={`flex gap-2 items-baseline rounded px-1 -mx-1 ${s.rowClass} ${s.rowBg || ''}`}>
-                <span className="text-slate-600 shrink-0 tabular-nums">{formatTime(l.ts)}</span>
-                <span className={`shrink-0 w-24 rounded px-1 text-center ${s.badgeClass}`}>{s.badge}</span>
-                <span className="flex-1 min-w-0 whitespace-normal break-words">
-                  {l.source_path && <PathLabel path={l.source_path} />}
-                  {l.source_path && l.error_message && <span className="opacity-40"> — </span>}
-                  {l.error_message}
-                  {l.actor_name && l.actor_name !== 'system' && <span className="opacity-40"> · by {l.actor_name}</span>}
-                </span>
-                {l.bytes != null && l.bytes > 0 && <span className="text-slate-500 shrink-0 tabular-nums">{formatBytes(l.bytes)}</span>}
-                {l.duration_ms != null && l.duration_ms > 0 && <span className="text-slate-600 shrink-0 tabular-nums">{(l.duration_ms / 1000).toFixed(1)}s</span>}
-              </div>
-            );
-          })}
-          {log.length === 0 && <div className="text-slate-500">No log entries yet.</div>}
+        {/* Fixed-height box: the log list and the in-flight transfer strip
+            share it, so transfers appearing/finishing resize the list INSIDE
+            the box instead of shoving the whole page around (the old
+            standalone "Transferring now" card did exactly that). */}
+        <div className="h-80 flex flex-col bg-slate-900 rounded-md overflow-hidden font-mono text-xs leading-5">
+          <div ref={logRef} onScroll={onLogScroll} className="flex-1 overflow-y-auto text-slate-100 p-3">
+            {log.map((l, i) => {
+              const s = styleFor(l);
+              return (
+                <div key={i} className={`flex gap-2 items-baseline rounded px-1 -mx-1 ${s.rowClass} ${s.rowBg || ''}`}>
+                  <span className="text-slate-600 shrink-0 tabular-nums">{formatTime(l.ts)}</span>
+                  <span className={`shrink-0 w-24 rounded px-1 text-center ${s.badgeClass}`}>{s.badge}</span>
+                  <span className="flex-1 min-w-0 whitespace-normal break-words">
+                    {l.source_path && <PathLabel path={l.source_path} />}
+                    {l.source_path && l.error_message && <span className="opacity-40"> — </span>}
+                    {l.error_message}
+                    {l.actor_name && l.actor_name !== 'system' && <span className="opacity-40"> · by {l.actor_name}</span>}
+                  </span>
+                  {l.bytes != null && l.bytes > 0 && <span className="text-slate-500 shrink-0 tabular-nums">{formatBytes(l.bytes)}</span>}
+                  {l.duration_ms != null && l.duration_ms > 0 && <span className="text-slate-600 shrink-0 tabular-nums">{(l.duration_ms / 1000).toFixed(1)}s</span>}
+                </div>
+              );
+            })}
+            {log.length === 0 && <div className="text-slate-500">No log entries yet.</div>}
+          </div>
+          {/* In-flight transfers, pinned under the log like a status line.
+              Byte-accurate for uploads/downloads; SharePoint-to-SharePoint is
+              a server-side copy with no measurable bytes, so it shows an
+              indeterminate pulse with elapsed time instead. */}
+          {job.status === 'running' && Object.keys(uploads).length > 0 && (
+            <div className="shrink-0 border-t border-slate-700/70 px-3 py-1.5 space-y-1.5">
+              {Object.entries(uploads).map(([lane, u]) => {
+                const isCopy = u.phase === 'copying' || u.bytesDone == null;
+                const pct = !isCopy && u.bytesTotal > 0 ? Math.min(100, (u.bytesDone / u.bytesTotal) * 100) : 0;
+                const name = (u.sourcePath || '').split(/[\\/]/).pop();
+                const etaSec = !isCopy && u.rate > 1 && u.bytesTotal > u.bytesDone ? (u.bytesTotal - u.bytesDone) / u.rate : null;
+                const elapsedSec = u.firstSeen ? Math.max(0, Math.round((u.ts - u.firstSeen) / 1000)) : 0;
+                const phaseLabelText = u.phase === 'downloading' ? 'downloading' : isCopy ? 'server-side copy' : 'uploading';
+                return (
+                  <div key={lane}>
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="min-w-0 truncate text-slate-300" title={u.sourcePath}>
+                        {name} <span className="text-slate-500">· {phaseLabelText}</span>
+                      </span>
+                      <span className="text-slate-400 tabular-nums shrink-0">
+                        {isCopy ? (
+                          <>{formatBytes(u.bytesTotal)}{elapsedSec >= 5 && <> · {elapsedSec >= 90 ? `${Math.round(elapsedSec / 60)} min` : `${elapsedSec}s`}</>}</>
+                        ) : (
+                          <>
+                            {formatBytes(u.bytesDone)} / {formatBytes(u.bytesTotal)} · {pct.toFixed(0)}%
+                            {u.rate > 1 && <> · {formatBytes(u.rate)}/s</>}
+                            {etaSec != null && <> · ~{etaSec >= 90 ? `${Math.round(etaSec / 60)} min` : `${Math.round(etaSec)}s`}</>}
+                          </>
+                        )}
+                      </span>
+                    </div>
+                    <div className="h-0.5 mt-0.5 bg-slate-700 rounded-full overflow-hidden">
+                      {isCopy ? (
+                        <div className="h-full w-full bg-indigo-400/70 animate-pulse" />
+                      ) : (
+                        <div className="h-full bg-gradient-to-r from-violet-400 to-fuchsia-400 transition-all duration-1000" style={{ width: `${pct}%` }} />
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="grid md:grid-cols-2 gap-4">
+        <div className="bg-white border border-slate-200 rounded-lg p-4">
+          <h2 className="text-sm font-semibold text-slate-700 mb-2">Largest files</h2>
+          <ul className="text-xs text-slate-600 space-y-1">
+            {kpis?.largestFiles.map((f, i) => (
+              <li key={i} className="flex justify-between gap-2"><span className="truncate">{f.source_path}</span><span className="text-slate-400 shrink-0">{formatBytes(f.size_bytes)}</span></li>
+            ))}
+          </ul>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-lg p-4">
+          <h2 className="text-sm font-semibold text-slate-700 mb-2">Slow transfers (&gt; {Math.round((kpis?.slowThresholdMs || 0) / 1000)}s)</h2>
+          <ul className="text-xs text-slate-600 space-y-1">
+            {kpis?.slowItems.map((f, i) => (
+              <li key={i} className="flex justify-between gap-2"><span className="truncate">{f.source_path}</span><span className="text-slate-400 shrink-0">{(f.duration_ms / 1000).toFixed(1)}s</span></li>
+            ))}
+            {kpis && kpis.slowItems.length === 0 && <li className="text-slate-400">None</li>}
+          </ul>
         </div>
       </div>
     </div>
