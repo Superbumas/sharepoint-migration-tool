@@ -182,6 +182,14 @@ variable only if you deliberately want instance-wide roots.
 
 ## Troubleshooting
 
+**`npm install` fails building `better-sqlite3` (node-gyp, "find Python", "No prebuilt binaries found")**
+The one native module in the stack found no prebuilt binary for your Node version and
+fell back to compiling from source, which needs Python + Visual Studio Build Tools.
+You should never need those: `git pull` (the repo pins a better-sqlite3 with prebuilt
+binaries for current Node LTS and newer), delete `node_modules`, and run `npm install`
+again. If it still tries to compile, your Node version is probably brand-new or EOL -
+install the current LTS from nodejs.org and retry.
+
 **`AADSTS700016: Application ... was not found in the directory '<tenant>'`**
 The app registration isn't multi-tenant yet (still `AzureADMyOrg`), or Azure AD's
 directory change hasn't finished propagating. Run Part 1, step 4's verification
