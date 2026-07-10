@@ -203,6 +203,18 @@ binaries for current Node LTS and newer), delete `node_modules`, and run `npm in
 again. If it still tries to compile, your Node version is probably brand-new or EOL -
 install the current LTS from nodejs.org and retry.
 
+**A job fails immediately with "Cannot find certificate with this thumbprint in the certificate store"**
+Only the project bound to the operator's own tenant (`TENANT_ID` in `.env`) uses the
+shared engine certificate - and this error means that certificate isn't available on
+the machine running the server. Since the fix in July 2026 the server prefers the
+exported certificate FILE (`setup/certs/migration-engine.pfx` + `pfx-password.txt`),
+which needs no import step: either re-run `pwsh -File setup/New-AppRegistration.ps1`
+on this machine (it recreates the certificate and registers it on the app), or copy
+the whole `setup/certs/` folder from the machine where the script originally ran
+(transfer it securely - it contains a private key; it is deliberately never in git).
+Client-tenant projects are unaffected - their engine apps are auto-provisioned at
+sign-in and live in the database, not the certificate store.
+
 **`AADSTS700016: Application ... was not found in the directory '<tenant>'`**
 The app registration isn't multi-tenant yet (still `AzureADMyOrg`), or Azure AD's
 directory change hasn't finished propagating. Run Part 1, step 4's verification

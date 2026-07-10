@@ -1,4 +1,6 @@
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
 const { v4: uuid } = require('uuid');
 const { getDb } = require('../db');
 const config = require('../config');
@@ -47,7 +49,33 @@ function resolveEngineIdentity(tenantId) {
   if (tenantId && tenantId !== config.tenantId) {
     throw httpError(409, "This project's engine app couldn't be provisioned yet. Sign out and back in to retry.");
   }
+  // Legacy/shared identity. Prefer the PFX FILE the setup script exported -
+  // it works on any machine the repo (plus setup/certs) was copied to. The
+  // cert-store thumbprint only resolves where the setup script originally
+  // ran (or where someone imported the PFX by hand), which cost a fresh
+  // install a "Cannot find certificate with this thumbprint" job failure.
+  const pfx = readSharedEnginePfx();
+  if (pfx) {
+    return { clientId: config.clientId, certBase64: pfx.base64, certPassword: pfx.password, certThumbprint: null };
+  }
+  if (!config.engineCertThumbprint) {
+    throw httpError(409, `No engine credential is configured on this server: neither the certificate file (${config.engineCertPath} + pfx-password.txt) nor ENGINE_CERT_THUMBPRINT exists. Run setup/New-AppRegistration.ps1 on this machine, or copy the setup/certs folder from the machine where it was run.`);
+  }
   return { clientId: config.clientId, certBase64: null, certPassword: null, certThumbprint: config.engineCertThumbprint };
+}
+
+// setup/New-AppRegistration.ps1 writes migration-engine.pfx and
+// pfx-password.txt side by side; both must be present and readable.
+function readSharedEnginePfx() {
+  try {
+    const passwordPath = path.join(path.dirname(config.engineCertPath), 'pfx-password.txt');
+    if (!fs.existsSync(config.engineCertPath) || !fs.existsSync(passwordPath)) return null;
+    const password = fs.readFileSync(passwordPath, 'utf8').trim();
+    if (!password) return null;
+    return { base64: fs.readFileSync(config.engineCertPath).toString('base64'), password };
+  } catch {
+    return null;
+  }
 }
 
 // A file-share job re-validates against the CURRENT allowlist right before

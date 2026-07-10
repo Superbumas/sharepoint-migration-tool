@@ -58,6 +58,12 @@ module.exports = {
   pwshExecutable: required('PWSH_EXECUTABLE', 'pwsh'),
   engineScriptPath: resolvedEngineScriptPath,
   engineCertThumbprint: required('ENGINE_CERT_THUMBPRINT', ''),
+  // The shared engine identity's PFX file (written by setup/New-AppRegistration.ps1
+  // together with pfx-password.txt beside it). Preferred over the thumbprint:
+  // a file travels with the install, while a cert-store thumbprint only works
+  // on the exact machine+account where the setup script ran or where someone
+  // remembered to Import-PfxCertificate.
+  engineCertPath: path.resolve(__dirname, '..', required('ENGINE_CERT_PATH', './setup/certs/migration-engine.pfx')),
   enginePermissionMode: required('ENGINE_PERMISSION_MODE', 'Sites.Selected'),
 
   // Optional: archive-to-Azure-Blob target. Empty disables the feature
