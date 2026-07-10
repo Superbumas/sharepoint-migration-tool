@@ -417,8 +417,12 @@ function runJob(jobId, actor, tenantId) {
   const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'], ...(spawnEnv ? { env: spawnEnv } : {}) });
 
   const db = getDb();
+  // run_seq: every engine start (fresh run AND resume) is a new run. Item
+  // rows stamp last_run_seq as they're touched, which is what lets the
+  // counters and completion recomputes count exactly this run's outcomes
+  // instead of accumulating across runs (see 014_run_scoped_counters.sql).
   db.prepare(
-    `UPDATE jobs SET status = 'running', pid = ?, started_at = COALESCE(started_at, datetime('now')), pause_requested = 0, cancel_requested = 0, phase_json = NULL,
+    `UPDATE jobs SET status = 'running', pid = ?, run_seq = run_seq + 1, started_at = COALESCE(started_at, datetime('now')), pause_requested = 0, cancel_requested = 0, phase_json = NULL,
      verification_json = NULL, verified_at = NULL WHERE id = ?`
   ).run(child.pid, jobId);
 
@@ -657,9 +661,15 @@ function handleEngineEvent(jobId, event, state) {
     case 'job_started': {
       // phase_json cleared: the copy phase has begun, so the phase banner
       // hands over to the regular items_done/total_items progress bar.
-      db.prepare('UPDATE jobs SET total_items = ?, total_bytes = ?, phase_json = NULL WHERE id = ?').run(
-        event.totalItems ?? job.total_items, event.totalBytes ?? job.total_bytes, jobId
-      );
+      // Counters reset to zero for THIS run: totals come from this run's
+      // enumeration, so the counts compared against them must too. A resume
+      // rebuilds them within seconds - every already-present file streams
+      // back as an item_skipped - and the old accumulate-forever behaviour
+      // produced "3,717 of 3,164 files" after a stop/restart.
+      db.prepare(
+        `UPDATE jobs SET total_items = ?, total_bytes = ?, phase_json = NULL,
+         items_done = 0, bytes_done = 0, items_failed = 0, items_skipped = 0 WHERE id = ?`
+      ).run(event.totalItems ?? job.total_items, event.totalBytes ?? job.total_bytes, jobId);
       insertLog(jobId, { event_type: 'job_started', raw_json: event });
       break;
     }
@@ -686,20 +696,21 @@ function handleEngineEvent(jobId, event, state) {
       // Size captured from the very first event so the row has one no matter
       // how the item ends - a failed-then-reconciled row otherwise counts
       // zero bytes and the "Bytes done" tile undercounts forever.
-      upsertItem(jobId, event, { status: 'pending', size_bytes: event.bytes });
+      upsertItem(job, event, { status: 'pending', size_bytes: event.bytes });
       insertLog(jobId, { event_type: 'item_start', source_path: event.sourcePath, target_path: event.targetPath, action: job.action });
       break;
     }
     case 'item_success': {
-      // Counters reconcile against the item's previous state so resumes and
-      // verification re-copies never inflate them: a file that failed on an
-      // earlier attempt and now succeeded moves from "failed" to "done"
-      // (decrementing the failure count - it synced in the end, so showing
-      // the old failure would be a lie), a re-copy of an already-counted
-      // file counts nothing extra, and a previously-skipped file that got
-      // re-copied moves from "skipped" to "done".
-      const prior = db.prepare('SELECT status FROM job_items WHERE job_id = ? AND source_path = ?').get(jobId, event.sourcePath)?.status;
-      upsertItem(jobId, event, {
+      // Counters reconcile against the item's state AS SEEN BY THIS RUN
+      // (priorStatusThisRun) - a row last touched by a previous run counts
+      // like a fresh file, because the counters were zeroed at job_started
+      // and totals describe only this run's enumeration. Within a run, the
+      // old reconciliation still applies: failed-then-repaired moves from
+      // "failed" to "done", re-copies count nothing extra, and a skipped-
+      // then-recopied file moves from "skipped" to "done" (its bytes were
+      // already counted by the skip - not added twice).
+      const prior = priorStatusThisRun(db, job, event.sourcePath);
+      upsertItem(job, event, {
         status: 'success', size_bytes: event.bytes, duration_ms: event.durationMs,
         http_status: event.httpStatus, completed_at: true,
       });
@@ -707,7 +718,7 @@ function handleEngineEvent(jobId, event, state) {
         db.prepare(
           `UPDATE jobs SET items_done = items_done + 1, bytes_done = bytes_done + ?,
            items_failed = MAX(items_failed - ?, 0), items_skipped = MAX(items_skipped - ?, 0) WHERE id = ?`
-        ).run(event.bytes || 0, prior === 'failed' ? 1 : 0, prior === 'skipped' ? 1 : 0, jobId);
+        ).run(prior === 'skipped' ? 0 : (event.bytes || 0), prior === 'failed' ? 1 : 0, prior === 'skipped' ? 1 : 0, jobId);
       }
       insertLog(jobId, {
         event_type: 'item_success', source_path: event.sourcePath, target_path: event.targetPath, action: job.action,
@@ -717,7 +728,7 @@ function handleEngineEvent(jobId, event, state) {
       break;
     }
     case 'item_retry': {
-      upsertItem(jobId, event, { status: 'retried' });
+      upsertItem(job, event, { status: 'retried' });
       db.prepare('UPDATE jobs SET retries_total = retries_total + 1 WHERE id = ?').run(jobId);
       insertLog(jobId, {
         event_type: 'item_retry', source_path: event.sourcePath, target_path: event.targetPath, action: job.action,
@@ -729,11 +740,11 @@ function handleEngineEvent(jobId, event, state) {
       break;
     }
     case 'item_failed': {
-      // A file that already counted as failed on a previous attempt of this
-      // job doesn't count twice - this is what turned 4 genuinely-failing
+      // A file that already counted as failed on a previous attempt of THIS
+      // run doesn't count twice - this is what turned 4 genuinely-failing
       // files into "12 failed" across three resumes.
-      const prior = db.prepare('SELECT status FROM job_items WHERE job_id = ? AND source_path = ?').get(jobId, event.sourcePath)?.status;
-      upsertItem(jobId, event, {
+      const prior = priorStatusThisRun(db, job, event.sourcePath);
+      upsertItem(job, event, {
         status: 'failed', http_status: event.httpStatus, error_message: event.error, completed_at: true,
       });
       if (prior !== 'failed') {
@@ -746,18 +757,19 @@ function handleEngineEvent(jobId, event, state) {
       break;
     }
     case 'item_skipped': {
-      // Same reconciliation as item_success: a resume re-walking files that
-      // were copied (and counted) on a previous attempt reports them as
-      // skipped - counting those again would make done+skipped exceed the
-      // total. Only genuinely new outcomes move the counters.
-      const prior = db.prepare('SELECT status FROM job_items WHERE job_id = ? AND source_path = ?').get(jobId, event.sourcePath)?.status;
-      // "Skipped because already present" after an earlier successful copy is
-      // still a success - keep the row's status so the completion-time
-      // recompute below counts it where it belongs.
-      if (prior !== 'success') upsertItem(jobId, event, { status: 'skipped', size_bytes: event.bytes, completed_at: true });
+      // Per-run semantics: the first skip THIS RUN counts (counters were
+      // zeroed at job_started - on a resume this is exactly how the bar
+      // refills), repeats within the run don't. A skipped file's bytes ARE
+      // at the target, so they count toward bytes_done - without this a
+      // resumed job's byte counter stayed near zero while the file counter
+      // showed nearly complete.
+      const prior = priorStatusThisRun(db, job, event.sourcePath);
+      if (prior !== 'success') upsertItem(job, event, { status: 'skipped', size_bytes: event.bytes, completed_at: true });
       if (prior !== 'success' && prior !== 'skipped') {
-        db.prepare('UPDATE jobs SET items_skipped = items_skipped + 1, items_failed = MAX(items_failed - ?, 0) WHERE id = ?')
-          .run(prior === 'failed' ? 1 : 0, jobId);
+        db.prepare(
+          `UPDATE jobs SET items_skipped = items_skipped + 1, bytes_done = bytes_done + ?,
+           items_failed = MAX(items_failed - ?, 0) WHERE id = ?`
+        ).run(event.bytes || 0, prior === 'failed' ? 1 : 0, jobId);
       }
       insertLog(jobId, {
         event_type: 'item_skipped', source_path: event.sourcePath, target_path: event.targetPath,
@@ -789,16 +801,17 @@ function handleEngineEvent(jobId, event, state) {
     }
     case 'job_completed': {
       // Counters are event-driven approximations that can drift across
-      // resumes and repairs (this job's "12 failed" was 4 files × 3
-      // attempts); at completion the per-item rows are the truth, so
-      // recompute from them. A file that failed earlier but synced in the
-      // end simply is not a failure.
+      // repairs; at completion the per-item rows are the truth, so recompute
+      // from them - but ONLY rows this run touched (last_run_seq): rows for
+      // files that vanished from the source between runs would otherwise
+      // push the counts past this run's totals. Skipped rows count toward
+      // bytes_done - their bytes are at the target.
       db.prepare(
         `UPDATE jobs SET
-           items_done = (SELECT COUNT(*) FROM job_items WHERE job_id = jobs.id AND status = 'success'),
-           items_failed = (SELECT COUNT(*) FROM job_items WHERE job_id = jobs.id AND status = 'failed'),
-           items_skipped = (SELECT COUNT(*) FROM job_items WHERE job_id = jobs.id AND status = 'skipped'),
-           bytes_done = (SELECT COALESCE(SUM(size_bytes), 0) FROM job_items WHERE job_id = jobs.id AND status = 'success')
+           items_done = (SELECT COUNT(*) FROM job_items WHERE job_id = jobs.id AND status = 'success' AND last_run_seq = jobs.run_seq),
+           items_failed = (SELECT COUNT(*) FROM job_items WHERE job_id = jobs.id AND status = 'failed' AND last_run_seq = jobs.run_seq),
+           items_skipped = (SELECT COUNT(*) FROM job_items WHERE job_id = jobs.id AND status = 'skipped' AND last_run_seq = jobs.run_seq),
+           bytes_done = (SELECT COALESCE(SUM(size_bytes), 0) FROM job_items WHERE job_id = jobs.id AND status IN ('success', 'skipped') AND last_run_seq = jobs.run_seq)
          WHERE id = ?`
       ).run(jobId);
       db.prepare(`UPDATE jobs SET status = 'completed', completed_at = datetime('now'), phase_json = NULL WHERE id = ?`).run(jobId);
@@ -838,10 +851,10 @@ function handleEngineEvent(jobId, event, state) {
         if (healed.changes > 0) {
           db.prepare(
             `UPDATE jobs SET
-               items_done = (SELECT COUNT(*) FROM job_items WHERE job_id = jobs.id AND status = 'success'),
-               items_failed = (SELECT COUNT(*) FROM job_items WHERE job_id = jobs.id AND status = 'failed'),
-               items_skipped = (SELECT COUNT(*) FROM job_items WHERE job_id = jobs.id AND status = 'skipped'),
-               bytes_done = (SELECT COALESCE(SUM(size_bytes), 0) FROM job_items WHERE job_id = jobs.id AND status = 'success')
+               items_done = (SELECT COUNT(*) FROM job_items WHERE job_id = jobs.id AND status = 'success' AND last_run_seq = jobs.run_seq),
+               items_failed = (SELECT COUNT(*) FROM job_items WHERE job_id = jobs.id AND status = 'failed' AND last_run_seq = jobs.run_seq),
+               items_skipped = (SELECT COUNT(*) FROM job_items WHERE job_id = jobs.id AND status = 'skipped' AND last_run_seq = jobs.run_seq),
+               bytes_done = (SELECT COALESCE(SUM(size_bytes), 0) FROM job_items WHERE job_id = jobs.id AND status IN ('success', 'skipped') AND last_run_seq = jobs.run_seq)
              WHERE id = ?`
           ).run(jobId);
           insertLog(jobId, {
@@ -903,9 +916,17 @@ function handleEngineEvent(jobId, event, state) {
   emitDashboard({ type: 'engine_event', jobId, eventType: event.type, job: updated }, updated?.tenant_id);
 }
 
-function upsertItem(jobId, event, fields) {
+// Row status as seen by THIS run: a row last touched by a previous run reads
+// as "not seen yet" (null), so the per-run counters - zeroed at job_started -
+// count every file exactly once per run regardless of earlier runs' history.
+function priorStatusThisRun(db, job, sourcePath) {
+  const row = db.prepare('SELECT status, last_run_seq FROM job_items WHERE job_id = ? AND source_path = ?').get(job.id, sourcePath);
+  return row && row.last_run_seq === job.run_seq ? row.status : null;
+}
+
+function upsertItem(job, event, fields) {
   const db = getDb();
-  const existing = db.prepare('SELECT * FROM job_items WHERE job_id = ? AND source_path = ?').get(jobId, event.sourcePath);
+  const existing = db.prepare('SELECT * FROM job_items WHERE job_id = ? AND source_path = ?').get(job.id, event.sourcePath);
   if (existing) {
     // attempt_count counts actual retries (a new attempt beginning), not every
     // status transition - the success/failed event that follows a retry is
@@ -914,21 +935,21 @@ function upsertItem(jobId, event, fields) {
     db.prepare(
       `UPDATE job_items SET status = ?, size_bytes = COALESCE(?, size_bytes), duration_ms = COALESCE(?, duration_ms),
        http_status = COALESCE(?, http_status), error_message = COALESCE(?, error_message),
-       attempt_count = attempt_count + ?, completed_at = CASE WHEN ? THEN datetime('now') ELSE completed_at END
+       attempt_count = attempt_count + ?, last_run_seq = ?, completed_at = CASE WHEN ? THEN datetime('now') ELSE completed_at END
        WHERE id = ?`
     ).run(
       fields.status, fields.size_bytes ?? null, fields.duration_ms ?? null,
       fields.http_status ?? null, fields.error_message ?? null,
-      bumpAttempt ? 1 : 0, fields.completed_at ? 1 : 0, existing.id
+      bumpAttempt ? 1 : 0, job.run_seq, fields.completed_at ? 1 : 0, existing.id
     );
   } else {
     db.prepare(
-      `INSERT INTO job_items (id, job_id, item_type, source_path, target_path, size_bytes, status, attempt_count, duration_ms, http_status, error_message, started_at, completed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, datetime('now'), CASE WHEN ? THEN datetime('now') ELSE NULL END)`
+      `INSERT INTO job_items (id, job_id, item_type, source_path, target_path, size_bytes, status, attempt_count, duration_ms, http_status, error_message, last_run_seq, started_at, completed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'), CASE WHEN ? THEN datetime('now') ELSE NULL END)`
     ).run(
-      uuid(), jobId, event.itemType || 'file', event.sourcePath, event.targetPath || '',
+      uuid(), job.id, event.itemType || 'file', event.sourcePath, event.targetPath || '',
       fields.size_bytes ?? null, fields.status, fields.duration_ms ?? null, fields.http_status ?? null,
-      fields.error_message ?? null, fields.completed_at ? 1 : 0
+      fields.error_message ?? null, job.run_seq, fields.completed_at ? 1 : 0
     );
   }
 }
@@ -1322,6 +1343,9 @@ function httpError(status, message) {
 
 module.exports = {
   init,
+  // Exported for tests: drives the exact counter/reconciliation logic the
+  // engine's NDJSON stream drives in production.
+  handleEngineEvent,
   createJobFromMapping,
   approveJob,
   runJob,

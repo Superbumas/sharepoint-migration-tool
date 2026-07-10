@@ -220,6 +220,60 @@ variable only if you deliberately want instance-wide roots.
 
 ---
 
+## Part 4: Hosting it on a VM for the whole team
+
+A **Windows Server VM** is the recommended host - the file-share (DFS) source works
+natively there (UNC paths, per-share `net use` credentials), which a Linux container
+can't do without mount gymnastics. One VM, one service, everyone uses the browser.
+
+1. **Install prerequisites** on the VM: [Node.js LTS](https://nodejs.org),
+   [PowerShell 7](https://aka.ms/powershell) (`winget install Microsoft.PowerShell`),
+   git, and the PnP module:
+   ```powershell
+   pwsh -Command "Install-Module PnP.PowerShell -Scope AllUsers -Force"
+   ```
+2. **Clone and build:**
+   ```powershell
+   git clone <your repo url> C:\migrator ; cd C:\migrator
+   npm install
+   npm run build
+   ```
+3. **Configuration:** either run Part 1's setup script here (signed into your own
+   tenant), or copy `.env` *and* `setup\certs\` from the machine where it was run.
+   Then point the sign-in redirect at the VM instead of localhost - re-run the setup
+   script with the URL your team will use:
+   ```powershell
+   pwsh -File setup/New-AppRegistration.ps1 -RedirectUri "http://YOUR-VM-NAME:3000/auth/redirect" -PostLogoutRedirectUri "http://YOUR-VM-NAME:3000"
+   ```
+   (it updates both the app registration's reply URLs and `.env`).
+4. **Open the firewall:**
+   ```powershell
+   New-NetFirewallRule -DisplayName "SharePoint Migration Tool" -Direction Inbound -LocalPort 3000 -Protocol TCP -Action Allow
+   ```
+5. **Run it as a service** so it survives reboots and sign-outs. Simplest is
+   [NSSM](https://nssm.cc):
+   ```powershell
+   nssm install SPMigrator "C:\Program Files\nodejs\node.exe" "C:\migrator\server\index.js"
+   nssm set SPMigrator AppDirectory C:\migrator
+   nssm set SPMigrator AppStdout C:\migrator\logs\service.log
+   nssm set SPMigrator AppStderr C:\migrator\logs\service-err.log
+   nssm start SPMigrator
+   ```
+   (A Task Scheduler "At startup" task running `node server\index.js` in `C:\migrator`
+   works too.) Team members browse to `http://YOUR-VM-NAME:3000` and sign in.
+
+Two service-account notes:
+- File-share sources are read by the account the service runs under - either give
+  that account read access to the shares, or (usually easier) use the per-share
+  username/password fields in Settings and it won't matter.
+- The tool is plain HTTP out of the box, fine for an internal LAN. If you ever expose
+  it further, put an HTTPS reverse proxy (IIS ARR/Caddy/nginx) in front and update
+  the redirect URIs to the https address.
+
+To update the tool later: `git pull ; npm install ; npm run build ; nssm restart SPMigrator`.
+
+---
+
 ## Troubleshooting
 
 **`npm install` fails building `better-sqlite3` (node-gyp, "find Python", "No prebuilt binaries found")**

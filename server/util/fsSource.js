@@ -28,12 +28,17 @@ const { encrypt, decrypt } = require('./secretCrypto');
 // {path, username, passwordEncrypted}; the pre-credentials format (plain
 // semicolon-separated paths) still parses so existing rows keep working.
 
+// Path semantics follow the HOST, not the dev machine: a Windows server
+// addresses shares as UNC paths (\\server\share), while a Linux/Docker
+// deployment reaches SMB shares through mount points (/mnt/fastdata) and
+// must keep '/' separators - path.win32.normalize would rewrite them to
+// backslashes, which the PowerShell engine on Linux can't open.
+const fsPathImpl = process.platform === 'win32' ? path.win32 : path.posix;
+
 function normalizeFsPath(p) {
-  // path.win32 explicitly: UNC semantics must hold even if this server ever
-  // runs under a POSIX Node for development. normalize() collapses '..'
-  // segments so a crafted "\\allowed\root\..\..\secret" can't escape the
-  // prefix check below.
-  const normalized = path.win32.normalize(String(p || '').trim());
+  // normalize() collapses '..' segments so a crafted
+  // "\\allowed\root\..\..\secret" can't escape the prefix check below.
+  const normalized = fsPathImpl.normalize(String(p || '').trim());
   return normalized.replace(/[\\/]+$/, '');
 }
 
@@ -100,7 +105,7 @@ function findFsRootEntry(p, tenantId) {
   const lower = candidate.toLowerCase();
   return resolveFsRootEntries(tenantId).find((e) => {
     const rootLower = e.path.toLowerCase();
-    return lower === rootLower || lower.startsWith(rootLower + path.win32.sep);
+    return lower === rootLower || lower.startsWith(rootLower + fsPathImpl.sep);
   }) || null;
 }
 
