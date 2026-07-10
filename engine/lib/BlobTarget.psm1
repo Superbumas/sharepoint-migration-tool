@@ -26,6 +26,30 @@ Import-Module "$PSScriptRoot/Retry.psm1"
 $script:BlobApiVersion = '2019-12-12'
 $script:SingleUploadThresholdBytes = 32MB
 $script:BlockSizeBytes = 4MB
+# Every transiting file lands in this dedicated folder, never loose in %TEMP%:
+# blob copies stage customer content on local disk for the duration of one
+# file's transfer, and a force-killed engine (pause grace timer, server
+# restart) can orphan the in-flight one. A known folder makes those
+# identifiable and cleanable - see Clear-StaleBlobTempFiles, called at the
+# start of every blob-target run.
+$script:BlobTempRoot = Join-Path ([System.IO.Path]::GetTempPath()) 'spmigrator-tmp'
+
+# Removes leftovers from previous force-killed runs. Only files older than an
+# hour: a concurrent job's actively-transferring temp files are always
+# younger than that... unless a single file takes over an hour to move, in
+# which case it is re-copied anyway when its run resumes.
+function Clear-StaleBlobTempFiles {
+    $removed = 0
+    try {
+        if (Test-Path $script:BlobTempRoot) {
+            $cutoff = (Get-Date).AddHours(-1)
+            foreach ($f in (Get-ChildItem -Path $script:BlobTempRoot -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cutoff })) {
+                try { Remove-Item -Path $f.FullName -Force -ErrorAction Stop; $removed++ } catch {}
+            }
+        }
+    } catch {}
+    return $removed
+}
 
 # Parses 'Key=Value;Key=Value;...' - either an account-key connection string
 # (AccountName/AccountKey, as copy-pasted from the Azure Portal's "Access
@@ -381,7 +405,8 @@ function Save-BlobFromSharePointFile {
         #   ('uploading', <cumulative bytes>) during the block upload.
         [scriptblock]$OnProgress
     )
-    $tempDir = [System.IO.Path]::GetTempPath()
+    $tempDir = $script:BlobTempRoot
+    if (-not (Test-Path $tempDir)) { New-Item -ItemType Directory -Path $tempDir -Force | Out-Null }
     $tempName = "$([guid]::NewGuid()).tmp"
     $tempPath = [System.IO.Path]::Combine($tempDir, $tempName)
     try {
@@ -416,4 +441,5 @@ function Save-BlobFromSharePointFile {
 
 Export-ModuleMember -Function `
     ConvertFrom-BlobConnectionString, New-BlobSasToken, Get-BlobKey, ConvertTo-BlobEscapedKey, `
-    Confirm-BlobContainerExists, Get-BlobKeyMap, Test-BlobTargetMatches, Send-BlobFile, Save-BlobFromSharePointFile
+    Confirm-BlobContainerExists, Get-BlobKeyMap, Test-BlobTargetMatches, Send-BlobFile, Save-BlobFromSharePointFile, `
+    Clear-StaleBlobTempFiles

@@ -1,5 +1,6 @@
 const express = require('express');
-const { requireAuth, getTenantId } = require('../auth/middleware');
+const { requireAuth, getTenantId, getActor } = require('../auth/middleware');
+const clog = require('../util/consoleLog');
 const { getDb } = require('../db');
 const { encrypt } = require('../util/secretCrypto');
 const { resolveBlobConnectionString } = require('../util/blobCredential');
@@ -96,6 +97,10 @@ router.post('/settings/fs-source-roots', (req, res, next) => {
       }
     }
     const saved = saveProjectRoots(getTenantId(req), roots);
+    // Config changes to what the service account may read are security-
+    // relevant - always visible in the server log with the actor.
+    const actor = getActor(req);
+    clog.warn('settings', `${actor.name} (${actor.upn || 'no upn'}) set file-share roots for tenant ${getTenantId(req)}: ${saved.map((e) => e.path + (e.username ? ` (as ${e.username})` : '')).join('; ') || '(none - feature disabled)'}`);
     const status = saved.map((entry) => {
       const conn = ensureShareConnection(entry);
       if (!conn.ok) return { path: entry.path, ok: false, error: conn.error };

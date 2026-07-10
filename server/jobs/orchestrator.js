@@ -99,11 +99,28 @@ function fsSourceSpawnEnv(job) {
   const entry = findFsRootEntry(job.source_path, job.tenant_id || config.tenantId);
   if (!entry?.username || !entry.passwordEncrypted) return null;
   return {
-    ...process.env,
     FS_SOURCE_SHARE: shareBaseOf(entry.path),
     FS_SOURCE_USERNAME: entry.username,
     FS_SOURCE_PASSWORD: decryptRootPassword(entry),
   };
+}
+
+// EVERY secret the engine needs travels in its child ENVIRONMENT, never in
+// argv: on Windows, any local process can read any other process's command
+// line (WMI Win32_Process), and the engine's used to carry the app
+// certificate (base64 PFX + password) and the storage account key there.
+// The engine's parameters default from these variables when the args are
+// absent (see the param block in engine/Invoke-MigrationJob.ps1).
+function buildEngineSpawnEnv(job, engineIdentity, blobConnectionString) {
+  const env = { ...process.env, ...(fsSourceSpawnEnv(job) || {}) };
+  if (engineIdentity?.certBase64) {
+    env.ENGINE_CERT_BASE64_ENCODED = engineIdentity.certBase64;
+    env.ENGINE_CERT_PASSWORD = engineIdentity.certPassword;
+  }
+  if (blobConnectionString) {
+    env.ENGINE_BLOB_CONNECTION_STRING = blobConnectionString;
+  }
+  return env;
 }
 
 // jobId -> { child, actorOnPause, cancelTimer, recentOutcomes: [{ ok, ts }] }
@@ -391,16 +408,15 @@ function runJob(jobId, actor, tenantId) {
     '-ClientId', engineIdentity.clientId,
     '-TenantId', job.tenant_id || config.tenantId,
   ];
-  if (engineIdentity.certBase64) {
-    args.push('-CertificateBase64Encoded', engineIdentity.certBase64, '-CertificatePassword', engineIdentity.certPassword);
-  } else {
+  // Certificate secrets travel via buildEngineSpawnEnv, not argv; the
+  // thumbprint is a public identifier, so it may stay an argument.
+  if (!engineIdentity.certBase64) {
     args.push('-CertThumbprint', engineIdentity.certThumbprint);
   }
   if (job.target_provider === 'azure_blob') {
     args.push(
       '-TargetContainer', job.target_container || '',
-      '-TargetBlobPrefix', job.target_blob_prefix || '',
-      '-BlobConnectionString', blobConnectionString
+      '-TargetBlobPrefix', job.target_blob_prefix || ''
     );
   } else {
     args.push(
@@ -413,8 +429,7 @@ function runJob(jobId, actor, tenantId) {
     args.push('-CheckpointJson', job.checkpoint_json);
   }
 
-  const spawnEnv = fsSourceSpawnEnv(job);
-  const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'], ...(spawnEnv ? { env: spawnEnv } : {}) });
+  const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'], env: buildEngineSpawnEnv(job, engineIdentity, blobConnectionString) });
 
   const db = getDb();
   // run_seq: every engine start (fresh run AND resume) is a new run. Item
@@ -1016,16 +1031,15 @@ function verifyJob(jobId, actor, tenantId) {
     '-TenantId', job.tenant_id || config.tenantId,
     '-VerifyOnly',
   ];
-  if (engineIdentity.certBase64) {
-    args.push('-CertificateBase64Encoded', engineIdentity.certBase64, '-CertificatePassword', engineIdentity.certPassword);
-  } else {
+  // Certificate secrets travel via buildEngineSpawnEnv, not argv; the
+  // thumbprint is a public identifier, so it may stay an argument.
+  if (!engineIdentity.certBase64) {
     args.push('-CertThumbprint', engineIdentity.certThumbprint);
   }
   if (job.target_provider === 'azure_blob') {
     args.push(
       '-TargetContainer', job.target_container || '',
-      '-TargetBlobPrefix', job.target_blob_prefix || '',
-      '-BlobConnectionString', blobConnectionString
+      '-TargetBlobPrefix', job.target_blob_prefix || ''
     );
   } else {
     args.push(
@@ -1034,8 +1048,7 @@ function verifyJob(jobId, actor, tenantId) {
       '-TargetPath', job.target_path
     );
   }
-  const verifySpawnEnv = fsSourceSpawnEnv(job);
-  const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'], ...(verifySpawnEnv ? { env: verifySpawnEnv } : {}) });
+  const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'], env: buildEngineSpawnEnv(job, engineIdentity, blobConnectionString) });
   verifyRuns.set(jobId, child);
   insertLog(jobId, { event_type: 'verify_started', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
 
@@ -1110,16 +1123,15 @@ function cleanupSourceJob(jobId, actor, tenantId) {
     '-TenantId', job.tenant_id || config.tenantId,
     '-CleanupSource',
   ];
-  if (engineIdentity.certBase64) {
-    args.push('-CertificateBase64Encoded', engineIdentity.certBase64, '-CertificatePassword', engineIdentity.certPassword);
-  } else {
+  // Certificate secrets travel via buildEngineSpawnEnv, not argv; the
+  // thumbprint is a public identifier, so it may stay an argument.
+  if (!engineIdentity.certBase64) {
     args.push('-CertThumbprint', engineIdentity.certThumbprint);
   }
   if (job.target_provider === 'azure_blob') {
     args.push(
       '-TargetContainer', job.target_container || '',
-      '-TargetBlobPrefix', job.target_blob_prefix || '',
-      '-BlobConnectionString', blobConnectionString
+      '-TargetBlobPrefix', job.target_blob_prefix || ''
     );
   } else {
     args.push(
@@ -1128,7 +1140,7 @@ function cleanupSourceJob(jobId, actor, tenantId) {
       '-TargetPath', job.target_path
     );
   }
-  const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'], env: buildEngineSpawnEnv(job, engineIdentity, blobConnectionString) });
   cleanupRuns.set(jobId, child);
   insertLog(jobId, { event_type: 'cleanup_started', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
   clog.warn('cleanup', `${job.name}: source cleanup started by ${actor.name} - verified files are being moved to the source recycle bin`);
@@ -1190,19 +1202,24 @@ function purgeRecycleBinJob(jobId, actor, tenantId) {
     '-TenantId', job.tenant_id || config.tenantId,
     '-PurgeRecycleBin',
   ];
-  if (engineIdentity.certBase64) {
-    args.push('-CertificateBase64Encoded', engineIdentity.certBase64, '-CertificatePassword', engineIdentity.certPassword);
-  } else {
+  // Certificate secrets travel via buildEngineSpawnEnv, not argv; the
+  // thumbprint is a public identifier, so it may stay an argument.
+  if (!engineIdentity.certBase64) {
     args.push('-CertThumbprint', engineIdentity.certThumbprint);
   }
   // Target params are irrelevant to a purge but the engine requires a valid
   // target shape - pass the job's own.
   if (job.target_provider === 'azure_blob') {
-    args.push('-TargetContainer', job.target_container || '', '-TargetBlobPrefix', job.target_blob_prefix || '', '-BlobConnectionString', 'unused=1;AccountName=unused;AccountKey=dW51c2Vk');
+    args.push('-TargetContainer', job.target_container || '', '-TargetBlobPrefix', job.target_blob_prefix || '');
   } else {
     args.push('-TargetSiteUrl', job.target_site_url || '', '-TargetLibrary', job.target_library || '', '-TargetPath', job.target_path);
   }
-  const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  // A purge never touches the blob target, but the engine requires a valid
+  // target shape - satisfy the blob branch with a placeholder via env.
+  const child = spawn(config.pwshExecutable, args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: buildEngineSpawnEnv(job, engineIdentity, job.target_provider === 'azure_blob' ? 'unused=1;AccountName=unused;AccountKey=dW51c2Vk' : null),
+  });
   cleanupRuns.set(jobId, child);
   insertLog(jobId, { event_type: 'purge_started', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
   clog.warn('purge', `${job.name}: recycle-bin purge started by ${actor.name}`);

@@ -98,6 +98,10 @@ npm run dev                                 # dev: http://localhost:5173
 Requirements: Node.js 20+, PowerShell 7 (`pwsh`), and the PnP.PowerShell module.
 For file-share sources, the account running the server needs read access to the shares.
 
+Running this under an ISO 27001 (or similar) ISMS? **[COMPLIANCE.md](COMPLIANCE.md)**
+inventories exactly what data the tool touches, where it flows and rests, the
+controls in place, and the handful of things left to the operator.
+
 ## The safety model, briefly
 
 - The engine authenticates app-only with a certificate under Microsoft's

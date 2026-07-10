@@ -1,15 +1,18 @@
 const express = require('express');
 const { v4: uuid } = require('uuid');
 const { getDb } = require('../db');
+const { requireAuth } = require('../auth/middleware');
 
 const router = express.Router();
 
-// Deliberately NOT behind requireAuth: both of these are used from the
-// unauthenticated landing page (web/src/App.jsx's Gate) - a colleague needs
-// to see the project list and be able to start a new one BEFORE signing in
-// to any specific client tenant. Neither route exposes anything sensitive -
-// just project names/status, never mapping/job data (that's all behind
-// requireAuth + tenant_id scoping elsewhere, unchanged by this file).
+// Both routes require a signed-in session. They used to be open so the
+// pre-login landing page could list projects, but project names are client
+// names - an information leak to anyone who can reach the port - and since
+// sign-in now auto-resolves (or auto-creates) the account's own tenant
+// project, nothing pre-login needs this list anymore. Switching projects is
+// done signed-in, from the /projects page.
+router.use(requireAuth);
+
 router.get('/projects', (req, res) => {
   const db = getDb();
   const rows = db.prepare(

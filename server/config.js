@@ -82,6 +82,16 @@ module.exports = {
   fsSourceRoots: (process.env.FS_SOURCE_ROOTS || '')
     .split(';').map((r) => r.trim()).filter(Boolean),
 
+  // Optional server-side BOUND on the per-project file-share allowlists:
+  // when set (semicolon-separated), every root added on any project's
+  // Settings page must live under one of these parents. This is the control
+  // that stops a signed-in project user pointing the tool's service account
+  // at arbitrary server/network paths (C:\, \\dc01\c$, ...) - set it to the
+  // migration share(s), e.g. FS_SOURCE_ALLOWED_PARENTS=\\10.5.92.10\Fastdata$.
+  // Empty = no bound (the pre-existing behaviour).
+  fsSourceAllowedParents: (process.env.FS_SOURCE_ALLOWED_PARENTS || '')
+    .split(';').map((r) => r.trim()).filter(Boolean),
+
   // Encrypts each Project's auto-provisioned engine client secret at rest
   // in SQLite (see server/util/secretCrypto.js) - a 32-byte base64 value,
   // e.g. `openssl rand -base64 32`. Generate once and never change it

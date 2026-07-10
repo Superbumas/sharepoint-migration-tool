@@ -179,6 +179,21 @@ function saveProjectRoots(tenantId, roots) {
     if (!p || seen.has(p.toLowerCase())) continue;
     seen.add(p.toLowerCase());
 
+    // Server-side bound (FS_SOURCE_ALLOWED_PARENTS): project allowlists are
+    // self-service, so without this any signed-in project user could point
+    // the service account at arbitrary paths. When the bound is set, roots
+    // must live under one of the operator-configured parents.
+    if (config.fsSourceAllowedParents.length > 0) {
+      const lower = p.toLowerCase();
+      const inBounds = config.fsSourceAllowedParents.map(normalizeFsPath).some((parent) => {
+        const parentLower = parent.toLowerCase();
+        return lower === parentLower || lower.startsWith(parentLower + fsPathImpl.sep);
+      });
+      if (!inBounds) {
+        throw httpError(403, `"${p}" is outside the shares this server allows as migration sources (FS_SOURCE_ALLOWED_PARENTS). Ask the operator to extend the bound if this share is in scope.`);
+      }
+    }
+
     const username = String(entry.username || '').trim();
     let passwordEncrypted = null;
     if (username) {

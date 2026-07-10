@@ -59,7 +59,11 @@ param(
     [AllowEmptyString()][string]$TargetPath = '',
     [string]$TargetContainer,
     [string]$TargetBlobPrefix,
-    [string]$BlobConnectionString,
+    # Secret: defaults from the environment - the orchestrator passes it
+    # there (buildEngineSpawnEnv) because command lines are readable by any
+    # local process on Windows. The parameter form still works for manual
+    # invocations.
+    [string]$BlobConnectionString = $env:ENGINE_BLOB_CONNECTION_STRING,
     [Parameter(Mandatory)][ValidateSet('Migrate', 'Migrate-selective', 'Archive')][string]$Action,
     [int]$Concurrency = 4,
     [Parameter(Mandatory)][string]$ControlFilePath,
@@ -82,8 +86,9 @@ param(
     # locally. Never a client secret: SharePoint Online's app-only auth
     # rejects client-secret-based tokens outright regardless of permissions.
     [string]$CertThumbprint,
-    [string]$CertificateBase64Encoded,
-    [string]$CertificatePassword,
+    # Secrets: default from the environment (see -BlobConnectionString above).
+    [string]$CertificateBase64Encoded = $env:ENGINE_CERT_BASE64_ENCODED,
+    [string]$CertificatePassword = $env:ENGINE_CERT_PASSWORD,
     [string]$CheckpointJson,
     # Verify-only mode: skips all copying and runs just the post-migration
     # verification (Graph size + QuickXorHash comparison, or the blob-target
@@ -343,6 +348,13 @@ try {
 
     if ($isBlobTarget) {
         Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Target: Azure Blob container '$TargetContainer'" }
+        # Client content stages on local disk for the duration of one file's
+        # transfer - sweep leftovers a force-killed previous run may have
+        # orphaned before this run creates new ones.
+        $staleTemp = Clear-StaleBlobTempFiles
+        if ($staleTemp -gt 0) {
+            Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Removed $staleTemp stale temp file(s) left by a previously interrupted run." }
+        }
         $blobAccount = ConvertFrom-BlobConnectionString -ConnectionString $BlobConnectionString
         # A SAS connection string (Portal's "Shared access signature" blade)
         # already carries a signed token - use it as-is. An account-key

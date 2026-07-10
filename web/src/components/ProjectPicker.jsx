@@ -25,12 +25,19 @@ export const AUTH_ERROR_MESSAGES = {
 export default function ProjectPicker() {
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [signedOut, setSignedOut] = useState(false);
   const [newName, setNewName] = useState('');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    api.get('/api/projects').then((r) => setProjects(r.items || [])).finally(() => setLoading(false));
+    // The list requires a session now (project names are client names).
+    // Reached signed-out, this page just offers the sign-in button - the
+    // account lands in its own tenant's project automatically anyway.
+    api.get('/api/projects')
+      .then((r) => setProjects(r.items || []))
+      .catch(() => setSignedOut(true))
+      .finally(() => setLoading(false));
   }, []);
 
   async function createProject(e) {
@@ -69,6 +76,11 @@ export default function ProjectPicker() {
 
       {loading ? (
         <div className="text-sm text-slate-400 text-center">Loading projects...</div>
+      ) : signedOut ? (
+        <div className="text-center space-y-3 mb-2">
+          <p className="text-sm text-slate-500">Sign in first — you'll land in your account's tenant automatically, and can switch projects from here afterwards.</p>
+          <a href="/auth/login" className="btn-primary inline-block">Sign in with Microsoft</a>
+        </div>
       ) : projects.length > 0 ? (
         <ul className="space-y-1.5 mb-6">
           {projects.map((p) => (
@@ -97,7 +109,7 @@ export default function ProjectPicker() {
         <div className="text-sm text-slate-400 text-center mb-6">No projects yet - create the first one below.</div>
       )}
 
-      <form onSubmit={createProject} className="flex items-center gap-2 border-t border-slate-100 pt-4">
+      {!signedOut && <form onSubmit={createProject} className="flex items-center gap-2 border-t border-slate-100 pt-4">
         <input
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
@@ -107,7 +119,7 @@ export default function ProjectPicker() {
         <button type="submit" disabled={creating || !newName.trim()} className="btn-primary disabled:opacity-40">
           {creating ? 'Creating...' : '+ New project'}
         </button>
-      </form>
+      </form>}
       {error && <div className="text-xs text-red-600 mt-2">{error}</div>}
     </div>
   );
