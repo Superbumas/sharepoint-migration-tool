@@ -159,12 +159,25 @@ live-tests each root and shows a ✓ readable / ✗ unreadable chip per share.
 
 Two things to know:
 
-- **It's the server's account doing the reading**, not the signed-in user. The account
-  running the Node server needs read access to every root you add.
+- **By default it's the server's account doing the reading**, not the signed-in user.
+  Either give the account running the Node server read access to the roots, or give a
+  root its own **username + password** when adding it — the tool then connects to that
+  share's server over SMB as that user (standard `net use` semantics), so the migration
+  server only needs network reachability to the file server, nothing more. The password
+  is encrypted at rest with `CREDENTIAL_ENCRYPTION_KEY`, tested live on save, handed to
+  the engine via its process environment (never a command line), and re-saving the list
+  never requires retyping it. Credentials apply to UNC roots only — a local drive path
+  is always read as the server's own account.
 - **The roots are an allowlist with teeth**: the picker, mapping creation, and every
   engine start re-validate against the current list, and everyone signed into the
   project can browse everything under the roots — so list the folders actually being
   migrated, not a whole drive.
+
+One Windows quirk worth knowing: SMB allows only one set of credentials per file server
+per logon session. If the save check fails with **error 1219**, the server's session
+already holds a connection to that file server under a different user — run
+`net use \\server\share /delete` on the machine running the tool (as the account the
+tool runs under), or use the same user for every root on that server.
 
 File-share jobs upload with live per-file progress bars, sanitize names SharePoint
 would reject (reported per file, deterministic so resume still works), skip

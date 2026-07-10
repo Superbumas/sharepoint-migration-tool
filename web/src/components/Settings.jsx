@@ -60,9 +60,14 @@ function ConnectionStringInfo({ info, label }) {
 // a wrong path or missing share permission is visible here immediately
 // instead of as an empty picker.
 function FsSourceRootsEditor({ settings, onSaved }) {
+  // Entries: { path, username, hasCredential, password? } - password exists
+  // only in memory for rows the user just typed it into; the server keeps a
+  // stored secret when the list is re-saved without retyping it.
   const [roots, setRoots] = useState(settings.fsSourceRoots || []);
   const [newRoot, setNewRoot] = useState('');
-  const [status, setStatus] = useState(null); // save response: [{path, ok, error}]
+  const [newUser, setNewUser] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [status, setStatus] = useState(null); // save response: [{path, ok, as?, error?}]
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
   const [dirty, setDirty] = useState(false);
@@ -70,14 +75,16 @@ function FsSourceRootsEditor({ settings, onSaved }) {
   function addRoot() {
     const p = newRoot.trim();
     if (!p) return;
-    if (roots.some((r) => r.toLowerCase() === p.toLowerCase())) { setNewRoot(''); return; }
-    setRoots([...roots, p]);
-    setNewRoot('');
+    if (newUser.trim() && !newPassword) { setMessage({ type: 'error', text: 'Enter the password for that user (or clear the username to connect as the server\'s own account).' }); return; }
+    if (roots.some((r) => r.path.toLowerCase() === p.toLowerCase())) { setNewRoot(''); return; }
+    setRoots([...roots, { path: p, username: newUser.trim() || null, password: newPassword || undefined, hasCredential: !!newPassword }]);
+    setNewRoot(''); setNewUser(''); setNewPassword('');
+    setMessage(null);
     setDirty(true);
   }
 
   function removeRoot(p) {
-    setRoots(roots.filter((r) => r !== p));
+    setRoots(roots.filter((r) => r.path !== p));
     setDirty(true);
   }
 
@@ -85,14 +92,16 @@ function FsSourceRootsEditor({ settings, onSaved }) {
     setSaving(true);
     setMessage(null);
     try {
-      const r = await api.post('/api/settings/fs-source-roots', { roots });
+      const r = await api.post('/api/settings/fs-source-roots', {
+        roots: roots.map((e) => ({ path: e.path, username: e.username || undefined, password: e.password || undefined })),
+      });
       setStatus(r.status);
       setRoots(r.roots);
       setDirty(false);
       const bad = r.status.filter((s) => !s.ok);
       setMessage(bad.length > 0
-        ? { type: 'error', text: `Saved, but the server cannot read ${bad.length} of ${r.status.length} share(s) - see below. The account running the migration server needs read access.` }
-        : { type: 'success', text: r.roots.length ? 'Saved - all shares readable by the server. The "File share (DFS)" source on the Mappings page is ready.' : 'Saved - no shares configured, the file-share source is disabled for this project.' });
+        ? { type: 'error', text: `Saved, but ${bad.length} of ${r.status.length} share(s) can't be read right now - see below.` }
+        : { type: 'success', text: r.roots.length ? 'Saved - all shares connect and read OK. The "File share (DFS)" source on the Mappings page is ready.' : 'Saved - no shares configured, the file-share source is disabled for this project.' });
       onSaved();
     } catch (err) {
       setMessage({ type: 'error', text: err.message });
@@ -107,33 +116,53 @@ function FsSourceRootsEditor({ settings, onSaved }) {
     <div className="bg-white border border-slate-200 rounded-lg p-4">
       <h2 className="text-sm font-semibold text-slate-700 mb-2">File share (DFS) migration source (this project)</h2>
       <p className="text-xs text-slate-500 mb-3">
-        UNC paths of the file shares this project may browse and migrate into SharePoint. The migration server's own
-        account reads them (not you), and everyone signed into this project can browse everything under these roots —
-        so list the folders actually being migrated, not a whole drive.
+        UNC paths of the file shares this project may browse and migrate into SharePoint. By default the migration
+        server's own account reads them; give a root its own <span className="font-medium">username + password</span> to
+        connect to that server as a different user instead (stored encrypted, tested on save). Everyone signed into this
+        project can browse everything under these roots — list the folders actually being migrated, not a whole drive.
       </p>
       <ul className="space-y-1 mb-2">
-        {roots.map((p) => {
-          const st = statusFor(p);
+        {roots.map((e) => {
+          const st = statusFor(e.path);
           return (
-            <li key={p} className="flex items-center gap-2 text-sm bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5">
+            <li key={e.path} className="flex items-center gap-2 text-sm bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5">
               <span className="shrink-0">🗄️</span>
-              <span className="font-mono text-xs text-slate-700 truncate flex-1 min-w-0" title={p}>{p}</span>
+              <span className="font-mono text-xs text-slate-700 truncate flex-1 min-w-0" title={e.path}>{e.path}</span>
+              {e.username && (
+                <span className="text-xs font-medium text-violet-700 bg-violet-50 border border-violet-200 rounded-full px-2 py-0.5 shrink-0" title={`Connects as ${e.username}${e.hasCredential || e.password ? '' : ' (no password stored!)'}`}>
+                  as {e.username}
+                </span>
+              )}
               {st && (st.ok
-                ? <span className="text-xs font-medium text-green-700 bg-green-50 border border-green-200 rounded-full px-2 py-0.5 shrink-0">✓ readable</span>
-                : <span className="text-xs font-medium text-red-700 bg-red-50 border border-red-200 rounded-full px-2 py-0.5 shrink-0" title={st.error}>✗ unreadable</span>)}
-              <button onClick={() => removeRoot(p)} className="text-xs text-slate-400 hover:text-red-600 shrink-0" title="Remove">remove</button>
+                ? <span className="text-xs font-medium text-green-700 bg-green-50 border border-green-200 rounded-full px-2 py-0.5 shrink-0">✓ connects & reads</span>
+                : <span className="text-xs font-medium text-red-700 bg-red-50 border border-red-200 rounded-full px-2 py-0.5 shrink-0" title={st.error}>✗ failed</span>)}
+              <button onClick={() => removeRoot(e.path)} className="text-xs text-slate-400 hover:text-red-600 shrink-0" title="Remove">remove</button>
             </li>
           );
         })}
         {roots.length === 0 && <li className="text-xs text-slate-400 px-1 py-1">No shares yet — add the first one below.</li>}
       </ul>
-      <div className="flex items-center gap-2 mb-2">
+      <div className="grid gap-2 mb-2 md:grid-cols-[1fr_auto_auto_auto_auto] items-center">
         <input
           value={newRoot}
           onChange={(e) => setNewRoot(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addRoot())}
           placeholder="\\server\share\folder  or  D:\Data\Departments"
-          className="flex-1 border border-slate-300 rounded-md px-2 py-1 text-sm font-mono"
+          className="border border-slate-300 rounded-md px-2 py-1 text-sm font-mono min-w-0"
+        />
+        <input
+          value={newUser}
+          onChange={(e) => setNewUser(e.target.value)}
+          placeholder="DOMAIN\user (optional)"
+          className="border border-slate-300 rounded-md px-2 py-1 text-sm w-44"
+        />
+        <input
+          type="password"
+          value={newPassword}
+          onChange={(e) => setNewPassword(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addRoot())}
+          placeholder="Password"
+          disabled={!newUser.trim()}
+          className="border border-slate-300 rounded-md px-2 py-1 text-sm w-36 disabled:bg-slate-50 disabled:placeholder:text-slate-300"
         />
         <button type="button" onClick={addRoot} disabled={!newRoot.trim()} className="btn-secondary disabled:opacity-40">Add</button>
         <button type="button" onClick={save} disabled={saving || !dirty} className="btn-primary disabled:opacity-40">

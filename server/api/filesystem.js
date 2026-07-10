@@ -2,7 +2,7 @@ const express = require('express');
 const fs = require('node:fs');
 const path = require('node:path');
 const { requireAuth, getTenantId } = require('../auth/middleware');
-const { fsSourceEnabled, allowedFsRoots, isAllowedFsPath, normalizeFsPath } = require('../util/fsSource');
+const { fsSourceEnabled, resolveFsRootEntries, findFsRootEntry, normalizeFsPath, ensureShareConnection } = require('../util/fsSource');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -16,7 +16,9 @@ router.use(requireAuth);
 router.get('/fs/roots', (req, res) => {
   res.json({
     enabled: fsSourceEnabled(getTenantId(req)),
-    roots: allowedFsRoots(getTenantId(req)).map((p) => ({ path: p, name: path.win32.basename(p) || p })),
+    roots: resolveFsRootEntries(getTenantId(req)).map((e) => ({
+      path: e.path, name: path.win32.basename(e.path) || e.path, username: e.username,
+    })),
   });
 });
 
@@ -25,8 +27,15 @@ router.get('/fs/browse', (req, res) => {
     return res.status(409).json({ error: 'fs_source_disabled', message: 'No file-share roots are configured - add them on the Settings page.' });
   }
   const dir = normalizeFsPath(req.query.path);
-  if (!isAllowedFsPath(dir, getTenantId(req))) {
+  const rootEntry = findFsRootEntry(dir, getTenantId(req));
+  if (!rootEntry) {
     return res.status(403).json({ error: 'path_not_allowed', message: 'That path is outside this project\'s allowed file-share roots (see Settings).' });
+  }
+  // Roots with their own credentials: authenticate to the share's server as
+  // that user before reading (cached per server+user for 10 minutes).
+  const conn = ensureShareConnection(rootEntry);
+  if (!conn.ok) {
+    return res.status(502).json({ error: 'share_connection_failed', message: conn.error });
   }
 
   let entries;

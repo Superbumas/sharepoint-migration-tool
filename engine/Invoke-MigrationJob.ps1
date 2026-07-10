@@ -533,15 +533,33 @@ try {
     # Fail in seconds with an actionable message instead of a bare "Access
     # denied" mid-enumeration. A connection succeeding proves nothing under
     # Sites.Selected - the first real read is where a missing/weak per-site
-    # grant surfaces. A filesystem source instead needs the engine PROCESS
-    # account (whoever runs the Node server) to be able to read the share.
+    # grant surfaces. A filesystem source instead needs a readable share -
+    # either as the engine PROCESS account (whoever runs the Node server) or,
+    # when the root was configured with its own credentials, as that user.
     if ($isFsSource) {
+        # Per-root share credentials (Settings page): the orchestrator passes
+        # them in this process's ENVIRONMENT (never the command line - that's
+        # visible to every process on the machine) and the engine establishes
+        # the SMB session itself, so a session made by Node can't strand a
+        # long job by dropping hours in. `net` output stays captured - stdout
+        # is NDJSON-reserved - and a non-zero exit only matters if the path
+        # is genuinely unreadable afterward (e.g. "already connected" while
+        # the session is in fact fine).
+        if ($env:FS_SOURCE_USERNAME -and $env:FS_SOURCE_SHARE) {
+            $netOutput = & net use $env:FS_SOURCE_SHARE $env:FS_SOURCE_PASSWORD "/user:$($env:FS_SOURCE_USERNAME)" /persistent:no 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Connected to $($env:FS_SOURCE_SHARE) as $($env:FS_SOURCE_USERNAME)." }
+            } elseif (-not (Test-Path -LiteralPath $SourcePath)) {
+                throw "Preflight failed: could not connect to $($env:FS_SOURCE_SHARE) as $($env:FS_SOURCE_USERNAME): $(($netOutput | Out-String).Trim())"
+            }
+        }
         try {
             $probe = [System.IO.DirectoryInfo]::new($SourcePath.TrimEnd('\', '/'))
             if (-not $probe.Exists) { throw "the path does not exist or is not reachable" }
             $probe.EnumerateFileSystemInfos() | Select-Object -First 1 | Out-Null
         } catch {
-            throw "Preflight failed: the migration engine cannot read source path '$SourcePath' ($($_.Exception.Message)). The account running the migration server needs read access to that share/directory."
+            $identityHint = if ($env:FS_SOURCE_USERNAME) { "the configured share user '$($env:FS_SOURCE_USERNAME)'" } else { 'the account running the migration server' }
+            throw "Preflight failed: the migration engine cannot read source path '$SourcePath' ($($_.Exception.Message)). $identityHint needs read access to that share/directory."
         }
     } else {
         try {

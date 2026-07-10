@@ -8,7 +8,7 @@ const { mapJob } = require('../util/mapJob');
 const clog = require('../util/consoleLog');
 const { decrypt } = require('../util/secretCrypto');
 const { resolveBlobConnectionString } = require('../util/blobCredential');
-const { isAllowedFsPath } = require('../util/fsSource');
+const { isAllowedFsPath, findFsRootEntry, shareBaseOf, decryptRootPassword } = require('../util/fsSource');
 
 // Resolves which Azure AD app the engine should authenticate as for a given
 // job's tenant: the Project's own dedicated app if one was successfully
@@ -58,6 +58,24 @@ function assertFsSourceAllowed(job) {
   if (!isAllowedFsPath(job.source_path, job.tenant_id || config.tenantId)) {
     throw httpError(409, `This job's source path "${job.source_path}" is not inside this project's allowed file-share roots - the allowlist may have been narrowed (Settings page) since the mapping was created.`);
   }
+}
+
+// When the job's file-share root carries its own credentials, the engine (a
+// separate, possibly long-lived process) must be able to establish the SMB
+// session itself - a session made here could drop hours into a run. The
+// credentials travel in the CHILD's environment, never on the command line
+// (command lines are visible to every process on the machine); the engine's
+// preflight runs `net use` with them and they die with the process.
+function fsSourceSpawnEnv(job) {
+  if ((job.source_provider || 'sharepoint') !== 'filesystem') return null;
+  const entry = findFsRootEntry(job.source_path, job.tenant_id || config.tenantId);
+  if (!entry?.username || !entry.passwordEncrypted) return null;
+  return {
+    ...process.env,
+    FS_SOURCE_SHARE: shareBaseOf(entry.path),
+    FS_SOURCE_USERNAME: entry.username,
+    FS_SOURCE_PASSWORD: decryptRootPassword(entry),
+  };
 }
 
 // jobId -> { child, actorOnPause, cancelTimer, recentOutcomes: [{ ok, ts }] }
@@ -367,7 +385,8 @@ function runJob(jobId, actor, tenantId) {
     args.push('-CheckpointJson', job.checkpoint_json);
   }
 
-  const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const spawnEnv = fsSourceSpawnEnv(job);
+  const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'], ...(spawnEnv ? { env: spawnEnv } : {}) });
 
   const db = getDb();
   db.prepare(
@@ -926,7 +945,8 @@ function verifyJob(jobId, actor, tenantId) {
       '-TargetPath', job.target_path
     );
   }
-  const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const verifySpawnEnv = fsSourceSpawnEnv(job);
+  const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'], ...(verifySpawnEnv ? { env: verifySpawnEnv } : {}) });
   verifyRuns.set(jobId, child);
   insertLog(jobId, { event_type: 'verify_started', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
 

@@ -126,7 +126,10 @@ export default function FileSharePicker({ label, onSelect }) {
                     </span>
                     <div className="flex-1 min-w-0">
                       <div className="font-medium text-slate-800 truncate">{r.name}</div>
-                      <div className="text-xs text-slate-400 truncate font-mono">{r.path}</div>
+                      <div className="text-xs text-slate-400 truncate font-mono">
+                        {r.path}
+                        {r.username && <span className="font-sans text-violet-500"> · as {r.username}</span>}
+                      </div>
                     </div>
                     <span className="text-slate-300 group-hover:text-violet-400 shrink-0">›</span>
                   </div>

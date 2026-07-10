@@ -4,7 +4,7 @@ const { getDb } = require('../db');
 const { encrypt } = require('../util/secretCrypto');
 const { resolveBlobConnectionString } = require('../util/blobCredential');
 const { analyzeBlobConnectionString } = require('../util/blobConnectionInfo');
-const { fsSourceEnabled, allowedFsRoots, saveProjectRoots, normalizeFsPath } = require('../util/fsSource');
+const { fsSourceEnabled, resolveFsRootEntries, saveProjectRoots, normalizeFsPath, ensureShareConnection } = require('../util/fsSource');
 const config = require('../config');
 const fs = require('node:fs');
 
@@ -33,8 +33,11 @@ router.get('/settings', (req, res) => {
     blobConnectionInfo: analyzeBlobConnectionString(connectionString),
     // File-share (DFS) sources: allowlist managed on the Settings page
     // (plus the optional server-wide FS_SOURCE_ROOTS fallback, merged in).
+    // Passwords never leave the server - only whether one is stored.
     fsSourceEnabled: fsSourceEnabled(getTenantId(req)),
-    fsSourceRoots: allowedFsRoots(getTenantId(req)),
+    fsSourceRoots: resolveFsRootEntries(getTenantId(req)).map((e) => ({
+      path: e.path, username: e.username, hasCredential: !!e.passwordEncrypted,
+    })),
   });
 });
 
@@ -71,33 +74,43 @@ router.delete('/settings/blob-connection-string', (req, res) => {
 });
 
 // File-share (DFS) source roots for this project, managed from the Settings
-// page. Saving replaces the whole list (an empty list disables the feature
-// for this project, unless the server-wide FS_SOURCE_ROOTS fallback is set).
-// The response reports whether the SERVER's process account can actually
-// read each root right now - a root the server can't reach is still saved
-// (maybe the share is being provisioned) but flagged, so "the picker shows
-// nothing" never needs a server-side investigation to explain.
-router.post('/settings/fs-source-roots', (req, res) => {
-  const roots = req.body?.roots;
-  if (!Array.isArray(roots)) return res.status(400).json({ error: 'roots must be an array of paths' });
-  for (const r of roots) {
-    const p = normalizeFsPath(r);
-    // Absolute paths only: UNC (\\server\share) or a drive letter. Anything
-    // relative would silently resolve against the server's cwd.
-    if (!/^(\\\\[^\\]+\\[^\\]+|[A-Za-z]:\\)/.test(p + '\\')) {
-      return res.status(400).json({ error: `"${r}" is not an absolute UNC (\\\\server\\share\\...) or drive (X:\\...) path.` });
+// page. Each root optionally carries its own username/password (encrypted at
+// rest) so shares the server's service account can't read are still usable -
+// the tool then connects to that server over SMB as the configured user.
+// Saving replaces the whole list (an empty list disables the feature for
+// this project, unless the server-wide FS_SOURCE_ROOTS fallback is set).
+// The response reports whether each root is actually readable right now -
+// connecting with its stored credentials first when it has them - so a wrong
+// password or unreachable server is visible here immediately instead of as
+// an empty picker.
+router.post('/settings/fs-source-roots', (req, res, next) => {
+  try {
+    const roots = req.body?.roots;
+    if (!Array.isArray(roots)) return res.status(400).json({ error: 'roots must be an array of {path, username?, password?}' });
+    for (const r of roots) {
+      const p = normalizeFsPath(typeof r === 'string' ? r : r?.path);
+      // Absolute paths only: UNC (\\server\share) or a drive letter. Anything
+      // relative would silently resolve against the server's cwd.
+      if (!/^(\\\\[^\\]+\\[^\\]+|[A-Za-z]:\\)/.test(p + '\\')) {
+        return res.status(400).json({ error: `"${p}" is not an absolute UNC (\\\\server\\share\\...) or drive (X:\\...) path.` });
+      }
     }
-  }
-  const saved = saveProjectRoots(getTenantId(req), roots);
-  const status = saved.map((p) => {
-    try {
-      fs.readdirSync(p);
-      return { path: p, ok: true };
-    } catch (err) {
-      return { path: p, ok: false, error: err.message };
-    }
-  });
-  res.json({ roots: saved, status });
+    const saved = saveProjectRoots(getTenantId(req), roots);
+    const status = saved.map((entry) => {
+      const conn = ensureShareConnection(entry);
+      if (!conn.ok) return { path: entry.path, ok: false, error: conn.error };
+      try {
+        fs.readdirSync(entry.path);
+        return { path: entry.path, ok: true, as: entry.username || null };
+      } catch (err) {
+        return { path: entry.path, ok: false, error: err.message };
+      }
+    });
+    res.json({
+      roots: saved.map((e) => ({ path: e.path, username: e.username, hasCredential: !!e.passwordEncrypted })),
+      status,
+    });
+  } catch (err) { next(err); }
 });
 
 module.exports = router;
