@@ -1197,11 +1197,43 @@ try {
                     }))
                 } catch {
                     $sw.Stop()
-                    $statusCode = Get-HttpStatusCode -Exception $_.Exception
-                    $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_failed' -Data @{
-                        sourcePath = $sourceFilePath; targetPath = $targetFileServerRel
-                        error      = $_.Exception.Message; httpStatus = $statusCode; retryCount = $script:attemptsUsed
-                    }))
+                    # Add-PnPFile can throw AFTER the upload has committed
+                    # (observed live: parallel cold-start uploads reporting
+                    # "Cannot access a closed file" while the file verified
+                    # present and hash-identical). Check the actual target
+                    # state before declaring failure - a file that landed is
+                    # a success with a footnote, not a failure that
+                    # verification later has to contradict.
+                    $landedAnyway = $false
+                    try {
+                        $landedAnyway = Test-PnPTargetFileMatches -Connection $laneTargetConn -TargetServerRelativeUrl $targetFileServerRel -ExpectedSize $item.Size -SourceModified $item.Modified
+                    } catch {}
+                    if ($landedAnyway) {
+                        $ResultQueue.Enqueue((New-EngineEventJson -Type 'log' -Data @{
+                            level = 'warn'; message = "Upload of '$($item.TargetName)' reported an error after committing ($($_.Exception.Message)) - the file is present at the correct size and counts as copied; verification will hash-check it like every other file."
+                        }))
+                        # The in-cmdlet failure skipped the timestamp stamp -
+                        # do it here so this path matches a clean success.
+                        try {
+                            $values = @{}
+                            if ($item.Created) { $values['Created'] = [datetime]$item.Created }
+                            if ($item.Modified) { $values['Modified'] = [datetime]$item.Modified }
+                            if ($laneTargetList -and $values.Count -gt 0) {
+                                $tgtItem = Get-PnPFile -Url $targetFileServerRel -AsListItem -Connection $laneTargetConn -ErrorAction Stop
+                                Set-PnPListItem -List $laneTargetList -Identity $tgtItem.Id -Values $values -Connection $laneTargetConn -ErrorAction Stop | Out-Null
+                            }
+                        } catch {}
+                        $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_success' -Data @{
+                            sourcePath = $sourceFilePath; targetPath = $targetFileServerRel
+                            bytes      = [long]$item.Size; durationMs = [int]$sw.ElapsedMilliseconds; httpStatus = 200
+                        }))
+                    } else {
+                        $statusCode = Get-HttpStatusCode -Exception $_.Exception
+                        $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_failed' -Data @{
+                            sourcePath = $sourceFilePath; targetPath = $targetFileServerRel
+                            error      = $_.Exception.Message; httpStatus = $statusCode; retryCount = $script:attemptsUsed
+                        }))
+                    }
                 } finally {
                     $null = $Shared.InFlight.Remove($LaneIndex)
                 }

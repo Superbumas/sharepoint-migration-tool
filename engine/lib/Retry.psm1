@@ -53,6 +53,13 @@ function Test-IsRetryableStatus {
     # didn't match what the service received) - safe to retry, and this
     # string never appears in PnP/Graph errors so it can't misfire there.
     if ($Message -match 'Md5Mismatch') { return $true }
+    # PnP/CSOM concurrency hiccups observed when several lanes fire their
+    # first Add-PnPFile simultaneously (cold shared state): the upload often
+    # commits and the cmdlet then throws loading the result. Both signatures
+    # are transient - a retry (or the caller's landed-anyway check) resolves
+    # them; neither string occurs in genuine permission/validation errors.
+    if ($Message -match 'Cannot access a closed file') { return $true }
+    if ($Message -match "has not been initialized\. It has not been requested") { return $true }
     return $false
 }
 
