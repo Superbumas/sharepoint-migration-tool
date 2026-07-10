@@ -175,13 +175,16 @@ export default function JobDetail() {
             const now = Date.now();
             const key = ev.lane ?? ev.sourcePath;
             const prior = prev[key];
+            const samePhase = prior && prior.sourcePath === ev.sourcePath && prior.phase === ev.phase;
             // Instantaneous rate from the delta between heartbeats - only
-            // when it's the same file still going forward (a retry rewinds).
-            let rate = prior?.rate || 0;
-            if (prior && prior.sourcePath === ev.sourcePath && now > prior.ts && ev.bytesDone > prior.bytesDone) {
+            // within the same file AND phase (blob transfers reset from
+            // download to upload; a retry rewinds).
+            let rate = samePhase ? (prior.rate || 0) : 0;
+            if (samePhase && now > prior.ts && ev.bytesDone > prior.bytesDone) {
               rate = ((ev.bytesDone - prior.bytesDone) * 1000) / (now - prior.ts);
             }
-            const next = { ...prev, [key]: { ...ev, ts: now, rate } };
+            const firstSeen = (prior && prior.sourcePath === ev.sourcePath) ? prior.firstSeen : now;
+            const next = { ...prev, [key]: { ...ev, ts: now, rate, firstSeen } };
             // Prune anything that stopped heartbeating (finished while we
             // missed the success event, e.g. socket reconnect).
             for (const k of Object.keys(next)) { if (now - next[k].ts > 15000) delete next[k]; }
@@ -365,29 +368,48 @@ export default function JobDetail() {
         );
       })()}
 
-      {/* Live per-file upload progress - only large files live long enough
-          between engine heartbeats to appear here, which is exactly when a
-          bar is needed (a 370MB file otherwise "disappears" for minutes
-          between item_start and item_success). */}
+      {/* Live per-file transfer progress - only files that live long enough
+          between engine heartbeats appear here, which is exactly when a row
+          is needed (a 370MB file otherwise "disappears" for minutes between
+          item_start and item_success). Byte-accurate for uploads/downloads;
+          SharePoint-to-SharePoint is a server-side copy with no measurable
+          bytes, so it shows an indeterminate "copying" row with elapsed time. */}
       {job.status === 'running' && Object.keys(uploads).length > 0 && (
         <div className="rounded-lg border border-slate-200 bg-white p-3 space-y-2.5">
-          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Uploading now</div>
+          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Transferring now</div>
           {Object.entries(uploads).map(([lane, u]) => {
-            const pct = u.bytesTotal > 0 ? Math.min(100, (u.bytesDone / u.bytesTotal) * 100) : 0;
+            const isCopy = u.phase === 'copying' || u.bytesDone == null;
+            const pct = !isCopy && u.bytesTotal > 0 ? Math.min(100, (u.bytesDone / u.bytesTotal) * 100) : 0;
             const name = (u.sourcePath || '').split(/[\\/]/).pop();
-            const etaSec = u.rate > 1 && u.bytesTotal > u.bytesDone ? (u.bytesTotal - u.bytesDone) / u.rate : null;
+            const etaSec = !isCopy && u.rate > 1 && u.bytesTotal > u.bytesDone ? (u.bytesTotal - u.bytesDone) / u.rate : null;
+            const elapsedSec = u.firstSeen ? Math.max(0, Math.round((u.ts - u.firstSeen) / 1000)) : 0;
+            const phaseLabelText = u.phase === 'downloading' ? 'downloading from source'
+              : isCopy ? 'server-side copy' : 'uploading';
             return (
               <div key={lane}>
                 <div className="flex items-baseline justify-between gap-2 text-xs mb-1">
-                  <span className="font-medium text-slate-700 truncate" title={u.sourcePath}>{name}</span>
+                  <span className="min-w-0 truncate">
+                    <span className="font-medium text-slate-700" title={u.sourcePath}>{name}</span>
+                    <span className="text-slate-400"> · {phaseLabelText}</span>
+                  </span>
                   <span className="text-slate-500 tabular-nums shrink-0">
-                    {formatBytes(u.bytesDone)} / {formatBytes(u.bytesTotal)} · {pct.toFixed(0)}%
-                    {u.rate > 1 && <> · {formatBytes(u.rate)}/s</>}
-                    {etaSec != null && <> · ~{etaSec >= 90 ? `${Math.round(etaSec / 60)} min` : `${Math.round(etaSec)}s`} left</>}
+                    {isCopy ? (
+                      <>{formatBytes(u.bytesTotal)}{elapsedSec >= 5 && <> · {elapsedSec >= 90 ? `${Math.round(elapsedSec / 60)} min` : `${elapsedSec}s`} elapsed</>}</>
+                    ) : (
+                      <>
+                        {formatBytes(u.bytesDone)} / {formatBytes(u.bytesTotal)} · {pct.toFixed(0)}%
+                        {u.rate > 1 && <> · {formatBytes(u.rate)}/s</>}
+                        {etaSec != null && <> · ~{etaSec >= 90 ? `${Math.round(etaSec / 60)} min` : `${Math.round(etaSec)}s`} left</>}
+                      </>
+                    )}
                   </span>
                 </div>
                 <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                  <div className="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-1000" style={{ width: `${pct}%` }} />
+                  {isCopy ? (
+                    <div className="h-full w-full rounded-full bg-gradient-to-r from-blue-300 to-indigo-400 animate-pulse" />
+                  ) : (
+                    <div className="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-1000" style={{ width: `${pct}%` }} />
+                  )}
                 </div>
               </div>
             );

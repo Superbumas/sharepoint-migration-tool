@@ -281,7 +281,11 @@ function Send-BlobFile {
         [Parameter(Mandatory)][string]$Sas,
         [Parameter(Mandatory)][string]$BlobKey,
         [Parameter(Mandatory)][string]$ContentMd5Base64,
-        [hashtable]$Metadata
+        [hashtable]$Metadata,
+        # Invoked with ('uploading', <cumulative bytes sent>) after each
+        # staged block - lets the caller surface live per-file progress on
+        # large uploads. Small single-PUT files finish too fast to matter.
+        [scriptblock]$OnProgress
     )
     $escapedKey = ConvertTo-BlobEscapedKey -Key $BlobKey
     $blobUrl = "$BlobEndpoint/$Container/$escapedKey"
@@ -340,6 +344,7 @@ function Send-BlobFile {
             Invoke-WebRequest -Uri "$blobUrl`?comp=block&blockid=$([uri]::EscapeDataString($blockId))&$Sas" `
                 -Method Put -Headers $blockHeaders -Body $chunk -ContentType 'application/octet-stream' -ErrorAction Stop | Out-Null
             $blockIndex++
+            if ($OnProgress) { & $OnProgress 'uploading' ([long]$stream.Position) }
         }
     } finally {
         $stream.Dispose()
@@ -368,13 +373,21 @@ function Save-BlobFromSharePointFile {
         [Parameter(Mandatory)][string]$Container,
         [Parameter(Mandatory)][string]$Sas,
         [Parameter(Mandatory)][string]$BlobKey,
-        [hashtable]$Metadata
+        [hashtable]$Metadata,
+        # Invoked at stage transitions and per uploaded block:
+        #   ('downloading', 0, <tempPath>) before the SharePoint download -
+        #       the temp path lets the caller poll the growing file's size
+        #       for download progress (Get-PnPFile itself exposes no hook);
+        #   ('uploading', <cumulative bytes>) during the block upload.
+        [scriptblock]$OnProgress
     )
     $tempDir = [System.IO.Path]::GetTempPath()
     $tempName = "$([guid]::NewGuid()).tmp"
     $tempPath = [System.IO.Path]::Combine($tempDir, $tempName)
     try {
+        if ($OnProgress) { & $OnProgress 'downloading' 0 $tempPath }
         Get-PnPFile -Url $SourceServerRelativeUrl -Path $tempDir -Filename $tempName -AsFile -Connection $SourceConnection -ErrorAction Stop | Out-Null
+        if ($OnProgress) { & $OnProgress 'uploading' 0 }
 
         $md5 = [System.Security.Cryptography.MD5]::Create()
         try {
@@ -393,7 +406,7 @@ function Save-BlobFromSharePointFile {
         if ($Metadata) { foreach ($k in $Metadata.Keys) { $metaWithHash[$k] = $Metadata[$k] } }
 
         Send-BlobFile -TempPath $tempPath -BlobEndpoint $BlobEndpoint -Container $Container -Sas $Sas `
-            -BlobKey $BlobKey -ContentMd5Base64 $md5Base64 -Metadata $metaWithHash
+            -BlobKey $BlobKey -ContentMd5Base64 $md5Base64 -Metadata $metaWithHash -OnProgress $OnProgress
 
         return $md5Base64
     } finally {

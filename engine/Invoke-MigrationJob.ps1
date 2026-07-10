@@ -870,6 +870,15 @@ try {
             } else {
                 $sw = [System.Diagnostics.Stopwatch]::StartNew()
                 $script:attemptsUsed = 0
+                # Live "currently copying" indicator. Copy-PnPFile is a
+                # SERVER-SIDE copy - the bytes never pass through the engine
+                # and SharePoint exposes no percentage for it - so this entry
+                # has no BytesDone: the UI shows which file each lane is on
+                # (with size and elapsed time) rather than a fake bar.
+                $Shared.InFlight[$LaneIndex] = @{
+                    SourcePath = $sourceFileServerRel; TargetPath = $targetFileServerRel
+                    Total = [long]$item.Size; Phase = 'copying'
+                }
                 try {
                     Invoke-WithRetry -MaxAttempts 5 -Action {
                         Copy-PnPFile -SourceUrl $sourceFileServerRel -TargetUrl $targetFolderServerRel `
@@ -925,6 +934,8 @@ try {
                         sourcePath = $sourceFileServerRel; targetPath = $targetFileServerRel
                         error      = $_.Exception.Message; httpStatus = $statusCode; retryCount = $script:attemptsUsed
                     }))
+                } finally {
+                    $null = $Shared.InFlight.Remove($LaneIndex)
                 }
             }
 
@@ -1010,6 +1021,25 @@ try {
             } else {
                 $sw = [System.Diagnostics.Stopwatch]::StartNew()
                 $script:attemptsUsed = 0
+                # Live per-file progress: the main thread polls this entry
+                # every ~2.5s - during the download phase it reads the growing
+                # temp file's size (TempPath), during the block upload the
+                # OnProgress closure updates BytesDone from this lane's thread.
+                $inflight = [hashtable]::Synchronized(@{
+                    SourcePath = $sourceFileServerRel; TargetPath = $targetDisplayPath
+                    Total = [long]$item.Size; Phase = 'downloading'; BytesDone = [long]0; TempPath = $null
+                })
+                $Shared.InFlight[$LaneIndex] = $inflight
+                # GetNewClosure: scriptblocks resolve variables dynamically at
+                # the CALL site (inside BlobTarget.psm1's module scope, where
+                # $inflight doesn't exist) - the closure pins this iteration's
+                # $inflight reference.
+                $blobProgress = {
+                    param($phase, $bytes, $temp = $null)
+                    $inflight.Phase = $phase
+                    $inflight.BytesDone = [long]$bytes
+                    if ($temp) { $inflight.TempPath = $temp }
+                }.GetNewClosure()
                 try {
                     # Metadata (Created/Modified/Author/Editor) lands on the
                     # blob atomically at upload commit - no separate restamp
@@ -1027,7 +1057,7 @@ try {
 
                     Invoke-WithRetry -MaxAttempts 5 -Action {
                         Save-BlobFromSharePointFile -SourceConnection $laneSourceConn -SourceServerRelativeUrl $sourceFileServerRel `
-                            -BlobEndpoint $BlobEndpoint -Container $Container -Sas $Sas -BlobKey $blobKey -Metadata $metadata | Out-Null
+                            -BlobEndpoint $BlobEndpoint -Container $Container -Sas $Sas -BlobKey $blobKey -Metadata $metadata -OnProgress $blobProgress | Out-Null
                     } -OnRetry {
                         param($attempt, $waitMs, $reason, $statusCode, $message)
                         $script:attemptsUsed = $attempt
@@ -1049,6 +1079,8 @@ try {
                         sourcePath = $sourceFileServerRel; targetPath = $targetDisplayPath
                         error      = $_.Exception.Message; httpStatus = $statusCode; retryCount = $script:attemptsUsed
                     }))
+                } finally {
+                    $null = $Shared.InFlight.Remove($LaneIndex)
                 }
             }
 
@@ -1310,25 +1342,42 @@ try {
             $lastCheckpointAt = Get-Date
         }
 
-        # Live per-file progress for uploads still in flight (filesystem-
-        # source lanes register them in $shared.InFlight). Small files finish
-        # between ticks and never appear - only the uploads long enough to
-        # need a progress bar produce events. Heartbeat like phase_progress:
+        # Live per-file progress for transfers still in flight (every lane
+        # type registers in $shared.InFlight). Small files finish between
+        # ticks and never appear - only transfers long enough to need a
+        # progress row produce events. Heartbeat like phase_progress:
         # broadcast to the UI, never written to the audit log.
+        # Progress source varies by lane:
+        #  - fs upload:  Stream.BytesConsumed (byte-counting wrapper)
+        #  - blob:       TempPath file size while downloading, then BytesDone
+        #                updated per uploaded block
+        #  - SP-to-SP:   none - Copy-PnPFile is a server-side copy, no bytes
+        #                pass through the engine; bytesDone stays null and the
+        #                UI shows an indeterminate "copying" row instead.
         if (((Get-Date) - $lastProgressAt).TotalSeconds -ge 2.5) {
             foreach ($laneIdx in @($shared.InFlight.Keys)) {
                 try {
                     $inf = $shared.InFlight[$laneIdx]
                     if (-not $inf) { continue }
+                    $phase = $inf.Phase ?? 'uploading'
+                    $done = $null
+                    if ($inf.Stream) {
+                        $done = [long]$inf.Stream.BytesConsumed
+                    } elseif ($phase -eq 'downloading' -and $inf.TempPath) {
+                        try { $done = [long][System.IO.FileInfo]::new($inf.TempPath).Length } catch { $done = [long]0 }
+                    } elseif ($phase -ne 'copying') {
+                        $done = [long]$inf.BytesDone
+                    }
                     Write-EngineEvent -Type 'item_progress' -Data @{
                         lane       = [int]$laneIdx
                         sourcePath = $inf.SourcePath
                         targetPath = $inf.TargetPath
-                        bytesDone  = [long]$inf.Stream.BytesConsumed
+                        phase      = $phase
+                        bytesDone  = $done
                         bytesTotal = [long]$inf.Total
                     }
                 } catch {
-                    # Entry vanished between snapshot and read - the upload
+                    # Entry vanished between snapshot and read - the transfer
                     # just finished; its item_success is already on the queue.
                 }
             }

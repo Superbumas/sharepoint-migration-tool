@@ -592,8 +592,14 @@ function consoleEngineEvent(job, event) {
     case 'item_progress': {
       if (throttled()) break;
       const fileName = (event.sourcePath || '').split(/[\\/]/).pop();
-      const pct = event.bytesTotal > 0 ? ((event.bytesDone / event.bytesTotal) * 100).toFixed(0) : '?';
-      clog.progress('job', `${name}: uploading ${fileName} — ${pct}% of ${fmtBytes(event.bytesTotal)}`);
+      if (event.bytesDone == null) {
+        // Server-side copy - no measurable bytes, just show what's in flight.
+        clog.progress('job', `${name}: copying ${fileName} (${fmtBytes(event.bytesTotal)}, server-side)`);
+      } else {
+        const pct = event.bytesTotal > 0 ? ((event.bytesDone / event.bytesTotal) * 100).toFixed(0) : '?';
+        const verb = event.phase === 'downloading' ? 'downloading' : 'uploading';
+        clog.progress('job', `${name}: ${verb} ${fileName} — ${pct}% of ${fmtBytes(event.bytesTotal)}`);
+      }
       break;
     }
     case 'item_retry':
