@@ -1,0 +1,1236 @@
+const { spawn } = require('node:child_process');
+const { v4: uuid } = require('uuid');
+const { getDb } = require('../db');
+const config = require('../config');
+const { attachNdjsonParser } = require('./ndjson');
+const { controlFilePath, writeControlFile, removeControlFile, treeCachePath, removeTreeCache } = require('./controlFile');
+const { mapJob } = require('../util/mapJob');
+const clog = require('../util/consoleLog');
+const { decrypt } = require('../util/secretCrypto');
+const { resolveBlobConnectionString } = require('../util/blobCredential');
+const { isAllowedFsPath } = require('../util/fsSource');
+
+// Resolves which Azure AD app the engine should authenticate as for a given
+// job's tenant: the Project's own dedicated app if one was successfully
+// auto-provisioned (server/graph/provisionTenantApp.js) - a certificate
+// (base64 PFX + password), NOT a client secret, since SharePoint Online
+// app-only auth rejects client-secret-based tokens outright regardless of
+// permissions - or the original shared global config.clientId/
+// config.engineCertThumbprint (a local certificate-store thumbprint) for
+// the legacy/backfilled project that predates that feature -
+// config.tenantId is exactly that one tenant, so it's the only case
+// allowed to fall back to the global identity. Any OTHER tenant with no
+// engine_client_id means provisioning never completed - fails loudly
+// rather than silently using the wrong tenant's credential.
+function resolveEngineIdentity(tenantId) {
+  const project = getDb().prepare('SELECT * FROM projects WHERE tenant_id = ?').get(tenantId);
+  // Both cert columns must be present, not just engine_client_id - a row
+  // provisioned during the abandoned client-secret era has engine_client_id
+  // set but no certificate, and decrypt(null) crashes with an opaque
+  // "Cannot read properties of null (reading 'split')" instead of the
+  // actionable 409 below.
+  if (project?.engine_client_id && project.engine_cert_base64_encrypted && project.engine_cert_password_encrypted) {
+    if (!config.credentialEncryptionKey) {
+      throw httpError(409, "This project's engine app credential can't be decrypted - CREDENTIAL_ENCRYPTION_KEY is not set on this server.");
+    }
+    try {
+      return {
+        clientId: project.engine_client_id,
+        certBase64: decrypt(project.engine_cert_base64_encrypted, config.credentialEncryptionKey),
+        certPassword: decrypt(project.engine_cert_password_encrypted, config.credentialEncryptionKey),
+        certThumbprint: null,
+      };
+    } catch {
+      throw httpError(409, "This project's stored engine credential can't be decrypted - CREDENTIAL_ENCRYPTION_KEY has changed since it was saved. Sign out and back into this project to re-provision automatically.");
+    }
+  }
+  if (tenantId && tenantId !== config.tenantId) {
+    throw httpError(409, "This project's engine app couldn't be provisioned yet. Sign out and back in to retry.");
+  }
+  return { clientId: config.clientId, certBase64: null, certPassword: null, certThumbprint: config.engineCertThumbprint };
+}
+
+// A file-share job re-validates against the CURRENT allowlist right before
+// every engine spawn - a mapping saved last month must not stay runnable
+// after an operator narrows (or empties) FS_SOURCE_ROOTS in .env.
+function assertFsSourceAllowed(job) {
+  if ((job.source_provider || 'sharepoint') !== 'filesystem') return;
+  if (!isAllowedFsPath(job.source_path, job.tenant_id || config.tenantId)) {
+    throw httpError(409, `This job's source path "${job.source_path}" is not inside this project's allowed file-share roots - the allowlist may have been narrowed (Settings page) since the mapping was created.`);
+  }
+}
+
+// jobId -> { child, actorOnPause, cancelTimer, recentOutcomes: [{ ok, ts }] }
+const runningJobs = new Map();
+const RETRY_WINDOW_SIZE = 30; // items considered for the adaptive-concurrency retry rate
+const CANCEL_GRACE_MS = 60_000;
+// Pause politely asks lanes to finish their current file first - but a single
+// huge file (or a lane wedged in a long retry backoff) can hold that up
+// indefinitely, leaving a pause that never lands (observed live: 3 of 4 lanes
+// stopped, one didn't, pause hung 15+ minutes until a manual cancel). After
+// this grace period the engine is force-stopped and the job is marked paused
+// anyway - safe, because resume never trusts the checkpoint: it re-verifies
+// every file against the actual target state before copying.
+const PAUSE_GRACE_MS = 60_000;
+
+let io = null;
+function init(socketIoServer) {
+  io = socketIoServer;
+  reconcileOrphanedJobs();
+}
+
+// Map any raw DB row on `event.job` to the same camelCase/nested shape the
+// REST API returns, at this single choke point. Previously call sites sent
+// the raw row straight through - the initial page load (via REST) rendered
+// fine, but the first live socket update replaced it with a raw row lacking
+// job.source/job.target, crashing the page on job.source.path.
+function normalizeJobEvent(event) {
+  return event?.job ? { ...event, job: mapJob(event.job) } : event;
+}
+
+function emitJob(jobId, event) {
+  if (io) io.to(`job:${jobId}`).emit('job:event', { jobId, ...normalizeJobEvent(event) });
+}
+// tenantId is required (not derived from the event itself) so a broadcast
+// can never accidentally reach every tenant's dashboard - see server/index.js
+// for the matching per-tenant room join, which is derived from the socket's
+// own authenticated session, never anything client-supplied.
+function emitDashboard(event, tenantId) {
+  if (io && tenantId) io.to(`dashboard:${tenantId}`).emit('dashboard:event', normalizeJobEvent(event));
+}
+
+// If Node restarted while a job's engine process was running, reconcile on
+// startup. SQLite still has the job's true progress as of the last ingested
+// event, so nothing is lost - but three things need handling:
+// - On Windows a spawned child does NOT die with its parent, so the old
+//   engine may still be running blind (its stdout pipe now goes nowhere) -
+//   kill it by recorded pid, or a re-run would have two engines writing the
+//   same target simultaneously.
+// - A pause/cancel the user clicked just before the restart lives only in
+//   the pause_requested/cancel_requested columns (the in-memory grace timers
+//   died with the server) - honor it now instead of silently forgetting it.
+// - Otherwise the job just can't be called "running" anymore - back to
+//   'approved', resume when ready.
+function reconcileOrphanedJobs() {
+  const db = getDb();
+  // A non-running job with a phase snapshot means an auxiliary run (source
+  // cleanup / recycle-bin purge) was killed mid-flight by a restart before
+  // its summary event could clear it - without this, the job page shows a
+  // stuck "Cleaning source - N of M" banner forever. The action itself is
+  // idempotent and can simply be started again.
+  const stale = db.prepare(`UPDATE jobs SET phase_json = NULL WHERE status != 'running' AND phase_json IS NOT NULL`).run();
+  if (stale.changes > 0) clog.dim('startup', `Cleared ${stale.changes} stale phase banner(s) from interrupted cleanup/purge runs.`);
+
+  const orphaned = db.prepare(`SELECT * FROM jobs WHERE status = 'running'`).all();
+  for (const job of orphaned) {
+    if (job.pid) {
+      try {
+        process.kill(job.pid);
+        clog.warn('startup', `Killed orphaned engine process ${job.pid} left over from before the restart (job "${job.name}").`);
+      } catch { /* already gone - the normal case */ }
+    }
+    if (job.cancel_requested === 1) {
+      db.prepare(
+        `UPDATE jobs SET status = 'cancelled', completed_at = datetime('now'), pid = NULL, phase_json = NULL, cancel_requested = 0, error_message = COALESCE(error_message, 'Cancelled by user.') WHERE id = ?`
+      ).run(job.id);
+      insertLog(job.id, { event_type: 'job_cancelled', error_message: 'Cancel was requested before the server restarted - completed on startup.', actor_name: 'system' });
+    } else if (job.pause_requested === 1) {
+      db.prepare(
+        `UPDATE jobs SET status = 'paused', paused_at = datetime('now'), pid = NULL, phase_json = NULL, pause_requested = 0 WHERE id = ?`
+      ).run(job.id);
+      insertLog(job.id, { event_type: 'job_paused', error_message: 'Pause was requested before the server restarted - completed on startup. Progress up to the last checkpoint is preserved.', actor_name: 'system' });
+    } else {
+      db.prepare(
+        `UPDATE jobs SET status = 'approved', pid = NULL, phase_json = NULL WHERE id = ?`
+      ).run(job.id);
+      insertLog(job.id, {
+        event_type: 'job_interrupted',
+        error_message: 'Server restarted while this job was running. Progress up to the last checkpoint was preserved - resume when ready.',
+        actor_name: 'system',
+      });
+    }
+  }
+}
+
+function insertLog(jobId, fields) {
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO job_log (
+      job_id, item_id, event_type, source_path, target_path, action, outcome,
+      bytes, duration_ms, http_status, error_message, retry_count,
+      actor_name, actor_email, actor_upn, raw_json
+    ) VALUES (
+      @job_id, @item_id, @event_type, @source_path, @target_path, @action, @outcome,
+      @bytes, @duration_ms, @http_status, @error_message, @retry_count,
+      @actor_name, @actor_email, @actor_upn, @raw_json
+    )`
+  ).run({
+    job_id: jobId,
+    item_id: fields.item_id || null,
+    event_type: fields.event_type,
+    source_path: fields.source_path || null,
+    target_path: fields.target_path || null,
+    action: fields.action || null,
+    outcome: fields.outcome || null,
+    bytes: fields.bytes ?? null,
+    duration_ms: fields.duration_ms ?? null,
+    http_status: fields.http_status ?? null,
+    error_message: fields.error_message || null,
+    retry_count: fields.retry_count || 0,
+    actor_name: fields.actor_name || null,
+    actor_email: fields.actor_email || null,
+    actor_upn: fields.actor_upn || null,
+    raw_json: fields.raw_json ? JSON.stringify(fields.raw_json) : null,
+  });
+
+  // Every audit row is also pushed to the job page's live log, exactly once,
+  // from this single choke point. Previously only engine events were pushed
+  // - lifecycle actions (pause/cancel/restart requests, interrupted-on-
+  // restart, stderr lines) wrote their DB row but never reached the browser
+  // until a page reload, so clicking Pause looked like it did nothing.
+  // `level` is transient (no DB column) - it only colors the live line.
+  emitJob(jobId, {
+    type: 'log_row',
+    row: {
+      event_type: fields.event_type,
+      level: fields.level,
+      source_path: fields.source_path || null,
+      target_path: fields.target_path || null,
+      error_message: fields.error_message || null,
+      bytes: fields.bytes ?? null,
+      duration_ms: fields.duration_ms ?? null,
+      actor_name: fields.actor_name || null,
+      ts: new Date().toISOString(),
+    },
+  });
+}
+
+// tenantId is optional: request-driven call sites (every exported lifecycle
+// function below) always pass the caller's session tenant, so a user in one
+// tenant can never look up or act on another tenant's job by UUID (404, not
+// 403 - don't confirm the row exists at all). Internal/system call sites
+// that react to the engine's own already-tenant-validated process (engine
+// event handling, orphan reconciliation, adaptive concurrency) omit it and
+// look the job up unfiltered, since they're never driven by a user request.
+function getJob(jobId, tenantId) {
+  if (tenantId) return getDb().prepare('SELECT * FROM jobs WHERE id = ? AND tenant_id = ?').get(jobId, tenantId);
+  return getDb().prepare('SELECT * FROM jobs WHERE id = ?').get(jobId);
+}
+
+function createJobFromMapping(mapping, actor, overrides = {}) {
+  const db = getDb();
+  const id = uuid();
+  // source_path/target_path can legitimately be '' (the library root, e.g. a
+  // freshly created site with no subfolders yet) - fall back to the library
+  // name so the job name doesn't read as "-> Documents" with a blank side.
+  const sourceLabel = mapping.source_provider === 'filesystem'
+    ? mapping.source_path
+    : (mapping.source_path || mapping.source_library || '(root)');
+  const targetLabel = mapping.target_provider === 'azure_blob'
+    ? `azure-blob://${mapping.target_container}/${mapping.target_blob_prefix || ''}`
+    : (mapping.target_library || mapping.target_path || '(root)');
+  const name = overrides.name || `${sourceLabel} -> ${targetLabel}`;
+  db.prepare(
+    `INSERT INTO jobs (
+      id, mapping_id, name, status, tenant_id,
+      source_type, source_provider, source_site_url, source_library, source_path,
+      target_type, target_site_url, target_library, target_path,
+      target_provider, target_container, target_blob_prefix,
+      action, concurrency,
+      created_by_name, created_by_email, created_by_upn
+    ) VALUES (
+      @id, @mapping_id, @name, 'queued', @tenant_id,
+      @source_type, @source_provider, @source_site_url, @source_library, @source_path,
+      @target_type, @target_site_url, @target_library, @target_path,
+      @target_provider, @target_container, @target_blob_prefix,
+      @action, @concurrency,
+      @created_by_name, @created_by_email, @created_by_upn
+    )`
+  ).run({
+    id,
+    mapping_id: mapping.id,
+    name,
+    // Trusted from the mapping row, not re-derived here: the caller
+    // (server/api/jobs.js) already fetched this mapping tenant-scoped to
+    // the signed-in session, so a job can never be created against a
+    // different tenant's mapping.
+    tenant_id: mapping.tenant_id,
+    source_type: mapping.source_type,
+    source_provider: mapping.source_provider || 'sharepoint',
+    source_site_url: mapping.source_site_url,
+    source_library: mapping.source_library,
+    source_path: mapping.source_path,
+    target_type: mapping.target_type,
+    target_site_url: mapping.target_site_url,
+    target_library: mapping.target_library,
+    target_path: mapping.target_path,
+    target_provider: mapping.target_provider || 'sharepoint',
+    target_container: mapping.target_container,
+    target_blob_prefix: mapping.target_blob_prefix,
+    action: mapping.action,
+    concurrency: overrides.concurrency || config.defaultJobConcurrency,
+    created_by_name: actor.name,
+    created_by_email: actor.email,
+    created_by_upn: actor.upn,
+  });
+  insertLog(id, { event_type: 'job_created', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
+  return getJob(id);
+}
+
+function approveJob(jobId, actor, tenantId) {
+  const job = getJob(jobId, tenantId);
+  if (!job) throw httpError(404, 'Job not found');
+  if (job.status !== 'queued') throw httpError(409, `Cannot approve a job in status "${job.status}" - only queued jobs can be approved.`);
+  getDb().prepare(
+    `UPDATE jobs SET status = 'approved', approved_by_name = ?, approved_by_email = ?, approved_at = datetime('now') WHERE id = ?`
+  ).run(actor.name, actor.email, jobId);
+  insertLog(jobId, { event_type: 'job_approved', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
+  const updated = getJob(jobId);
+  emitJob(jobId, { type: 'job_updated', job: updated });
+  emitDashboard({ type: 'job_updated', job: updated }, updated.tenant_id);
+  return updated;
+}
+
+// Concurrency budgets are per-tenant: one client's heavy migration
+// shouldn't throttle a different client's job just because they happen to
+// share this server process.
+function currentGlobalConcurrencyUsage(excludeJobId, tenantId) {
+  const rows = getDb().prepare(`SELECT concurrency FROM jobs WHERE status = 'running' AND id != ? AND tenant_id = ?`).all(excludeJobId || '', tenantId);
+  return rows.reduce((sum, r) => sum + (r.concurrency || 0), 0);
+}
+
+function runJob(jobId, actor, tenantId) {
+  const job = getJob(jobId, tenantId);
+  if (!job) throw httpError(404, 'Job not found');
+  if (!['approved', 'paused'].includes(job.status)) {
+    throw httpError(409, `Cannot run a job in status "${job.status}". It must be "approved" (first run) or "paused" (resume).`);
+  }
+  if (runningJobs.has(jobId)) throw httpError(409, 'Job already has a running engine process.');
+  const blobConnectionString = job.target_provider === 'azure_blob'
+    ? resolveBlobConnectionString(job.tenant_id || config.tenantId) : null;
+  if (job.target_provider === 'azure_blob' && !blobConnectionString) {
+    throw httpError(409, 'Azure Blob archiving is not configured for this project - add a connection string on the Settings page (or set AZURE_BLOB_CONNECTION_STRING on the server) before running this job.');
+  }
+  assertFsSourceAllowed(job);
+
+  const isResume = job.status === 'paused';
+
+  const usage = currentGlobalConcurrencyUsage(jobId, job.tenant_id);
+  let effectiveConcurrency = job.concurrency;
+  if (usage + effectiveConcurrency > config.globalMaxConcurrency) {
+    effectiveConcurrency = Math.max(1, config.globalMaxConcurrency - usage);
+  }
+
+  writeControlFile(jobId, { pauseRequested: false, cancelRequested: false, concurrencyOverride: effectiveConcurrency });
+
+  // The job's own tenant's own app (per-project client secret) or, for the
+  // legacy tenant only, the original shared cert-based identity - see
+  // resolveEngineIdentity above.
+  const engineIdentity = resolveEngineIdentity(job.tenant_id || config.tenantId);
+
+  const args = [
+    '-NoProfile',
+    '-NonInteractive',
+    '-File', config.engineScriptPath,
+    '-JobId', jobId,
+    '-SourceProvider', job.source_provider || 'sharepoint',
+    '-SourceSiteUrl', job.source_site_url || '',
+    '-SourceLibrary', job.source_library || '',
+    '-SourcePath', job.source_path,
+    '-TargetProvider', job.target_provider || 'sharepoint',
+    '-Action', job.action,
+    '-Concurrency', String(effectiveConcurrency),
+    '-ControlFilePath', controlFilePath(jobId),
+    '-TreeCachePath', treeCachePath(jobId),
+    '-ClientId', engineIdentity.clientId,
+    '-TenantId', job.tenant_id || config.tenantId,
+  ];
+  if (engineIdentity.certBase64) {
+    args.push('-CertificateBase64Encoded', engineIdentity.certBase64, '-CertificatePassword', engineIdentity.certPassword);
+  } else {
+    args.push('-CertThumbprint', engineIdentity.certThumbprint);
+  }
+  if (job.target_provider === 'azure_blob') {
+    args.push(
+      '-TargetContainer', job.target_container || '',
+      '-TargetBlobPrefix', job.target_blob_prefix || '',
+      '-BlobConnectionString', blobConnectionString
+    );
+  } else {
+    args.push(
+      '-TargetSiteUrl', job.target_site_url || '',
+      '-TargetLibrary', job.target_library || '',
+      '-TargetPath', job.target_path
+    );
+  }
+  if (isResume && job.checkpoint_json) {
+    args.push('-CheckpointJson', job.checkpoint_json);
+  }
+
+  const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+
+  const db = getDb();
+  db.prepare(
+    `UPDATE jobs SET status = 'running', pid = ?, started_at = COALESCE(started_at, datetime('now')), pause_requested = 0, cancel_requested = 0, phase_json = NULL,
+     verification_json = NULL, verified_at = NULL WHERE id = ?`
+  ).run(child.pid, jobId);
+
+  insertLog(jobId, {
+    event_type: isResume ? 'job_resumed' : 'job_run',
+    actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn,
+  });
+
+  const state = { child, actorOnPause: actor, cancelTimer: null, recentOutcomes: [] };
+  runningJobs.set(jobId, state);
+
+  attachNdjsonParser(
+    child.stdout,
+    (event) => handleEngineEvent(jobId, event, state),
+    (rawLine, err) => {
+      insertLog(jobId, { event_type: 'log', error_message: `Unparseable engine output: ${rawLine}` });
+    }
+  );
+
+  let stderrBuffer = '';
+  child.stderr.on('data', (chunk) => {
+    stderrBuffer += chunk.toString();
+    const lines = stderrBuffer.split('\n');
+    stderrBuffer = lines.pop();
+    for (const line of lines) {
+      if (line.trim()) {
+        insertLog(jobId, { event_type: 'log', error_message: `[stderr] ${line.trim()}` });
+        emitJob(jobId, { type: 'log', level: 'error', message: line.trim() });
+      }
+    }
+  });
+
+  child.on('error', (err) => {
+    insertLog(jobId, { event_type: 'log', error_message: `Failed to start engine process: ${err.message}` });
+  });
+
+  child.on('close', (code) => {
+    // A 'paused' NDJSON event already frees the jobId for a new run (see
+    // releaseRunningState) before this OS-level close event necessarily
+    // fires. If a resume has since spawned a new process for the same jobId,
+    // runningJobs now points at that new child - this stale close event
+    // belongs to the old process and must not touch the new run's state.
+    const current = runningJobs.get(jobId);
+    if (current && current.child !== child) return;
+    finalizeJobProcess(jobId, code);
+  });
+
+  const updated = getJob(jobId);
+  emitJob(jobId, { type: 'job_updated', job: updated });
+  emitDashboard({ type: 'job_updated', job: updated }, updated.tenant_id);
+  return updated;
+}
+
+// Frees up the jobId for a new run as soon as we know - from the engine's own
+// NDJSON declaration - that this invocation is over (paused/cancelled/done),
+// rather than waiting for the OS-level child 'close' event. That event can
+// lag behind the NDJSON line by a tick or two, which otherwise creates a race
+// where clicking Resume immediately after the UI shows "paused" gets a false
+// "already running" error. finalizeJobProcess() still calls this too, as a
+// safety net for crashes that never emit a terminal event.
+function releaseRunningState(jobId) {
+  const state = runningJobs.get(jobId);
+  if (state?.cancelTimer) clearTimeout(state.cancelTimer);
+  if (state?.pauseTimer) clearTimeout(state.pauseTimer);
+  removeControlFile(jobId);
+  runningJobs.delete(jobId);
+  consoleThrottles.delete(jobId);
+}
+
+function finalizeJobProcess(jobId, code) {
+  const db = getDb();
+  const job = getJob(jobId);
+
+  if (job && !['completed', 'failed', 'cancelled', 'paused'].includes(job.status)) {
+    if (job.cancel_requested === 1) {
+      db.prepare(
+        `UPDATE jobs SET status = 'cancelled', completed_at = datetime('now'), pid = NULL, phase_json = NULL, error_message = COALESCE(error_message, 'Cancelled by user.') WHERE id = ?`
+      ).run(jobId);
+      insertLog(jobId, { event_type: 'job_cancelled', error_message: 'Cancelled by user.', actor_name: 'system' });
+    } else if (job.pause_requested === 1) {
+      // The engine was force-stopped by the pause grace timer before it could
+      // emit its own 'paused' event. The periodic checkpoint events already
+      // persisted true progress, and resume re-verifies every file against the
+      // target anyway - so this lands as a clean pause, not a failure.
+      db.prepare(
+        `UPDATE jobs SET status = 'paused', paused_at = datetime('now'), pause_requested = 0, pid = NULL, phase_json = NULL WHERE id = ?`
+      ).run(jobId);
+      insertLog(jobId, {
+        event_type: 'job_paused',
+        error_message: 'Engine was force-stopped after the pause grace period; progress up to the last checkpoint is preserved.',
+        actor_name: 'system',
+      });
+    } else {
+      const message = `Engine process exited unexpectedly (exit code ${code}).`;
+      db.prepare(
+        `UPDATE jobs SET status = 'failed', completed_at = datetime('now'), pid = NULL, phase_json = NULL, error_message = COALESCE(error_message, ?) WHERE id = ?`
+      ).run(message, jobId);
+      insertLog(jobId, { event_type: 'job_failed', error_message: message, actor_name: 'system' });
+    }
+  } else if (job) {
+    db.prepare(`UPDATE jobs SET pid = NULL WHERE id = ?`).run(jobId);
+  }
+
+  releaseRunningState(jobId);
+
+  const updated = getJob(jobId);
+  if (updated) {
+    emitJob(jobId, { type: 'job_updated', job: updated });
+    emitDashboard({ type: 'job_updated', job: updated }, updated.tenant_id);
+  }
+}
+
+// Compact terminal feed of what every running job is doing - the web UI gets
+// the full event stream over Socket.IO, but whoever is watching the server
+// console (npm run dev) previously saw nothing at all between "listening on
+// :3000" and a job finishing. High-volume events (per-file successes, phase
+// ticks) are throttled to one summary line every few seconds per job;
+// failures and lifecycle changes always print.
+const consoleThrottles = new Map(); // jobId -> { lastProgressAt }
+function consoleEngineEvent(job, event) {
+  const name = job.name || job.id;
+  const throttleKey = job.id;
+  const throttled = () => {
+    const t = consoleThrottles.get(throttleKey) || { lastProgressAt: 0 };
+    if (Date.now() - t.lastProgressAt < 5000) return true;
+    t.lastProgressAt = Date.now();
+    consoleThrottles.set(throttleKey, t);
+    return false;
+  };
+  const fmtBytes = (n) => {
+    if (!n) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return `${n.toFixed(1)} ${units[i]}`;
+  };
+
+  switch (event.type) {
+    case 'job_started':
+      clog.start('job', `${name}: starting copy of ${(event.totalItems ?? 0).toLocaleString()} files (${fmtBytes(event.totalBytes)})`);
+      break;
+    case 'phase_progress': {
+      if (throttled()) break;
+      const p = event;
+      const label = p.phase === 'enumerating' ? `scanning source — ${(p.folders ?? 0).toLocaleString()} folders, ${(p.files ?? 0).toLocaleString()} files found`
+        : p.phase === 'preparing_folders' ? `creating target folders — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
+        : p.phase === 'indexing_source' ? `indexing source metadata — ${(p.files ?? 0).toLocaleString()} files`
+        : p.phase === 'indexing_target' ? `indexing existing target files — ${(p.files ?? 0).toLocaleString()} files`
+        : p.phase === 'hashing_source' ? `hashing source files for verification — ${(p.files ?? 0).toLocaleString()} files`
+        : p.phase;
+      clog.progress('job', `${name}: ${label}`);
+      break;
+    }
+    case 'item_success': {
+      if (throttled()) break;
+      // items_done on the row was read before this event's increment - +1 is
+      // the count including this file.
+      const done = (job.items_done ?? 0) + (job.items_skipped ?? 0) + 1;
+      const total = job.total_items;
+      if (total) {
+        const pct = (done / total) * 100;
+        clog.progress('job', `${name} ${clog.bar(pct)} ${pct.toFixed(1).padStart(5)}% · ${done.toLocaleString()}/${total.toLocaleString()} · ${fmtBytes((job.bytes_done ?? 0) + (event.bytes || 0))}`);
+      } else {
+        clog.progress('job', `${name}: ${done.toLocaleString()} files · ${fmtBytes((job.bytes_done ?? 0) + (event.bytes || 0))}`);
+      }
+      break;
+    }
+    case 'item_failed':
+      clog.error('job', `${name}: FAILED ${event.sourcePath} — ${event.error || 'unknown error'}`);
+      break;
+    case 'item_progress': {
+      if (throttled()) break;
+      const fileName = (event.sourcePath || '').split(/[\\/]/).pop();
+      const pct = event.bytesTotal > 0 ? ((event.bytesDone / event.bytesTotal) * 100).toFixed(0) : '?';
+      clog.progress('job', `${name}: uploading ${fileName} — ${pct}% of ${fmtBytes(event.bytesTotal)}`);
+      break;
+    }
+    case 'item_retry':
+      if (!throttled()) clog.warn('job', `${name}: retrying ${event.sourcePath} (attempt ${event.attempt}${event.reason ? `, ${event.reason}` : ''})`);
+      break;
+    case 'paused':
+      clog.stop('job', `${name}: paused`);
+      break;
+    case 'job_completed':
+      clog.ok('job', `${name}: completed — ${(job.items_done ?? 0).toLocaleString()} files, ${fmtBytes(job.bytes_done)}`);
+      break;
+    case 'job_failed':
+      clog.error('job', `${name}: FAILED — ${event.error || 'unknown engine error'}`);
+      break;
+    case 'job_cancelled':
+      clog.stop('job', `${name}: cancelled`);
+      break;
+    case 'verification_summary': {
+      const v = event.verification || {};
+      const problems = (v.Missing?.length ?? v.missing ?? 0) + (v.SizeMismatch?.length ?? v.sizeMismatch ?? 0) + (v.HashMismatch?.length ?? v.hashMismatch ?? 0);
+      if (problems > 0) clog.warn('verify', `${name}: ${problems} problem(s) found`);
+      else clog.ok('verify', `${name}: all files verified identical`);
+      break;
+    }
+    case 'source_deleted':
+      if (!throttled()) clog.progress('cleanup', `${name}: recycling verified source files…`);
+      break;
+    case 'source_kept':
+      clog.warn('cleanup', `${name}: KEPT ${event.sourcePath} — ${event.reason}`);
+      break;
+    case 'cleanup_summary':
+      clog.ok('cleanup', `${name}: source cleanup done — ${(event.deleted ?? 0).toLocaleString()} file(s) recycled, ${(event.kept ?? 0).toLocaleString()} kept, ${(event.foldersDeleted ?? 0).toLocaleString()} empty folder(s) removed`);
+      break;
+    case 'purge_summary':
+      clog.ok('purge', `${name}: ${(event.purged ?? 0).toLocaleString()} recycled item(s) permanently purged (${fmtBytes(event.bytes)}) — storage freed`);
+      break;
+    case 'log':
+      if (event.level === 'error') clog.error('engine', `${name}: ${event.message}`);
+      else if (event.level === 'warn') clog.warn('engine', `${name}: ${event.message}`);
+      else clog.dim('engine', `${name}: ${event.message}`);
+      break;
+    default:
+      break;
+  }
+}
+
+function handleEngineEvent(jobId, event, state) {
+  const db = getDb();
+  const job = getJob(jobId);
+  if (!job) return;
+
+  consoleEngineEvent(job, event);
+
+  switch (event.type) {
+    case 'job_started': {
+      // phase_json cleared: the copy phase has begun, so the phase banner
+      // hands over to the regular items_done/total_items progress bar.
+      db.prepare('UPDATE jobs SET total_items = ?, total_bytes = ?, phase_json = NULL WHERE id = ?').run(
+        event.totalItems ?? job.total_items, event.totalBytes ?? job.total_bytes, jobId
+      );
+      insertLog(jobId, { event_type: 'job_started', raw_json: event });
+      break;
+    }
+    case 'phase_progress': {
+      // Live progress for the long pre-copy phases (enumerating, folder
+      // pre-creation, index prefetch). Fires every ~2s while one is running -
+      // persisted for page reloads, broadcast via the socket emit below, but
+      // deliberately never written to job_log (it's a heartbeat, not audit).
+      db.prepare('UPDATE jobs SET phase_json = ? WHERE id = ?').run(JSON.stringify(event), jobId);
+      break;
+    }
+    case 'item_progress': {
+      // Per-file upload progress for large files (filesystem-source lanes).
+      // Same heartbeat treatment as phase_progress: broadcast via the socket
+      // emit below so the job page can render live bars, never persisted -
+      // the audit log records outcomes, not percentages.
+      break;
+    }
+    case 'item_start': {
+      // The prefetch phases run after job_started, so their phase_json can
+      // still be set when copying begins - the first file starting is the
+      // real "pre-copy phases are over" signal.
+      if (job.phase_json) db.prepare('UPDATE jobs SET phase_json = NULL WHERE id = ?').run(jobId);
+      upsertItem(jobId, event, { status: 'pending' });
+      insertLog(jobId, { event_type: 'item_start', source_path: event.sourcePath, target_path: event.targetPath, action: job.action });
+      break;
+    }
+    case 'item_success': {
+      // Counters reconcile against the item's previous state so resumes and
+      // verification re-copies never inflate them: a file that failed on an
+      // earlier attempt and now succeeded moves from "failed" to "done"
+      // (decrementing the failure count - it synced in the end, so showing
+      // the old failure would be a lie), a re-copy of an already-counted
+      // file counts nothing extra, and a previously-skipped file that got
+      // re-copied moves from "skipped" to "done".
+      const prior = db.prepare('SELECT status FROM job_items WHERE job_id = ? AND source_path = ?').get(jobId, event.sourcePath)?.status;
+      upsertItem(jobId, event, {
+        status: 'success', size_bytes: event.bytes, duration_ms: event.durationMs,
+        http_status: event.httpStatus, completed_at: true,
+      });
+      if (prior !== 'success') {
+        db.prepare(
+          `UPDATE jobs SET items_done = items_done + 1, bytes_done = bytes_done + ?,
+           items_failed = MAX(items_failed - ?, 0), items_skipped = MAX(items_skipped - ?, 0) WHERE id = ?`
+        ).run(event.bytes || 0, prior === 'failed' ? 1 : 0, prior === 'skipped' ? 1 : 0, jobId);
+      }
+      insertLog(jobId, {
+        event_type: 'item_success', source_path: event.sourcePath, target_path: event.targetPath, action: job.action,
+        outcome: 'success', bytes: event.bytes, duration_ms: event.durationMs, http_status: event.httpStatus,
+      });
+      trackOutcome(state, true);
+      break;
+    }
+    case 'item_retry': {
+      upsertItem(jobId, event, { status: 'retried' });
+      db.prepare('UPDATE jobs SET retries_total = retries_total + 1 WHERE id = ?').run(jobId);
+      insertLog(jobId, {
+        event_type: 'item_retry', source_path: event.sourcePath, target_path: event.targetPath, action: job.action,
+        outcome: 'retried', retry_count: event.attempt, http_status: event.httpStatus,
+        error_message: event.reason ? `${event.reason}${event.waitMs ? ` (backoff ${event.waitMs}ms)` : ''}` : null,
+      });
+      trackOutcome(state, false);
+      maybeAdaptConcurrency(jobId, job, state);
+      break;
+    }
+    case 'item_failed': {
+      // A file that already counted as failed on a previous attempt of this
+      // job doesn't count twice - this is what turned 4 genuinely-failing
+      // files into "12 failed" across three resumes.
+      const prior = db.prepare('SELECT status FROM job_items WHERE job_id = ? AND source_path = ?').get(jobId, event.sourcePath)?.status;
+      upsertItem(jobId, event, {
+        status: 'failed', http_status: event.httpStatus, error_message: event.error, completed_at: true,
+      });
+      if (prior !== 'failed') {
+        db.prepare('UPDATE jobs SET items_failed = items_failed + 1 WHERE id = ?').run(jobId);
+      }
+      insertLog(jobId, {
+        event_type: 'item_failed', source_path: event.sourcePath, target_path: event.targetPath, action: job.action,
+        outcome: 'failed', http_status: event.httpStatus, error_message: event.error, retry_count: event.retryCount || 0,
+      });
+      break;
+    }
+    case 'item_skipped': {
+      // Same reconciliation as item_success: a resume re-walking files that
+      // were copied (and counted) on a previous attempt reports them as
+      // skipped - counting those again would make done+skipped exceed the
+      // total. Only genuinely new outcomes move the counters.
+      const prior = db.prepare('SELECT status FROM job_items WHERE job_id = ? AND source_path = ?').get(jobId, event.sourcePath)?.status;
+      // "Skipped because already present" after an earlier successful copy is
+      // still a success - keep the row's status so the completion-time
+      // recompute below counts it where it belongs.
+      if (prior !== 'success') upsertItem(jobId, event, { status: 'skipped', completed_at: true });
+      if (prior !== 'success' && prior !== 'skipped') {
+        db.prepare('UPDATE jobs SET items_skipped = items_skipped + 1, items_failed = MAX(items_failed - ?, 0) WHERE id = ?')
+          .run(prior === 'failed' ? 1 : 0, jobId);
+      }
+      insertLog(jobId, {
+        event_type: 'item_skipped', source_path: event.sourcePath, target_path: event.targetPath,
+        error_message: event.reason || 'already present at target',
+      });
+      break;
+    }
+    case 'checkpoint': {
+      db.prepare('UPDATE jobs SET checkpoint_json = ? WHERE id = ?').run(
+        JSON.stringify({ lastCompletedPath: event.lastCompletedPath, deltaToken: event.deltaToken, itemsDone: event.itemsDone, bytesDone: event.bytesDone }),
+        jobId
+      );
+      break;
+    }
+    case 'paused': {
+      db.prepare(
+        `UPDATE jobs SET status = 'paused', paused_at = datetime('now'), pause_requested = 0, phase_json = NULL, checkpoint_json = ? WHERE id = ?`
+      ).run(JSON.stringify(event.checkpoint || {}), jobId);
+      const actor = state.actorOnPause || { name: 'system' };
+      insertLog(jobId, { event_type: 'job_paused', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
+      releaseRunningState(jobId);
+      break;
+    }
+    case 'job_cancelled': {
+      db.prepare(`UPDATE jobs SET status = 'cancelled', completed_at = datetime('now'), phase_json = NULL WHERE id = ?`).run(jobId);
+      insertLog(jobId, { event_type: 'job_cancelled', actor_name: 'system' });
+      releaseRunningState(jobId);
+      break;
+    }
+    case 'job_completed': {
+      // Counters are event-driven approximations that can drift across
+      // resumes and repairs (this job's "12 failed" was 4 files × 3
+      // attempts); at completion the per-item rows are the truth, so
+      // recompute from them. A file that failed earlier but synced in the
+      // end simply is not a failure.
+      db.prepare(
+        `UPDATE jobs SET
+           items_done = (SELECT COUNT(*) FROM job_items WHERE job_id = jobs.id AND status = 'success'),
+           items_failed = (SELECT COUNT(*) FROM job_items WHERE job_id = jobs.id AND status = 'failed'),
+           items_skipped = (SELECT COUNT(*) FROM job_items WHERE job_id = jobs.id AND status = 'skipped'),
+           bytes_done = (SELECT COALESCE(SUM(size_bytes), 0) FROM job_items WHERE job_id = jobs.id AND status = 'success')
+         WHERE id = ?`
+      ).run(jobId);
+      db.prepare(`UPDATE jobs SET status = 'completed', completed_at = datetime('now'), phase_json = NULL WHERE id = ?`).run(jobId);
+      insertLog(jobId, { event_type: 'job_completed', raw_json: event.summary });
+      // The cached source-tree scan exists to make resume cheap; a completed
+      // job won't resume, and any later re-run should see the source fresh.
+      removeTreeCache(jobId);
+      releaseRunningState(jobId);
+      break;
+    }
+    case 'job_failed': {
+      db.prepare(`UPDATE jobs SET status = 'failed', completed_at = datetime('now'), phase_json = NULL, error_message = ? WHERE id = ?`).run(event.error || 'Unknown engine error', jobId);
+      insertLog(jobId, { event_type: 'job_failed', error_message: event.error });
+      releaseRunningState(jobId);
+      break;
+    }
+    case 'verify_mismatch': {
+      insertLog(jobId, {
+        event_type: 'verify_mismatch', source_path: event.sourcePath || null,
+        outcome: 'failed', error_message: event.message || `Verification mismatch (${event.reason})`,
+        raw_json: event,
+      });
+      break;
+    }
+    case 'verification_summary': {
+      db.prepare(`UPDATE jobs SET verification_json = ?, verified_at = datetime('now') WHERE id = ?`).run(
+        JSON.stringify(event.verification || {}), jobId
+      );
+      insertLog(jobId, { event_type: 'verification_summary', raw_json: event.verification });
+      break;
+    }
+    case 'log': {
+      insertLog(jobId, { event_type: 'log', error_message: event.message, level: event.level });
+      break;
+    }
+    case 'source_deleted': {
+      insertLog(jobId, { event_type: 'source_deleted', source_path: event.sourcePath, outcome: 'success' });
+      break;
+    }
+    case 'source_kept': {
+      insertLog(jobId, { event_type: 'source_kept', source_path: event.sourcePath, error_message: event.reason });
+      break;
+    }
+    case 'cleanup_summary': {
+      db.prepare(`UPDATE jobs SET cleanup_json = ?, cleaned_at = datetime('now'), phase_json = NULL WHERE id = ?`).run(
+        JSON.stringify({ deleted: event.deleted, kept: event.kept, foldersDeleted: event.foldersDeleted, keptSample: event.keptSample || [] }),
+        jobId
+      );
+      insertLog(jobId, { event_type: 'cleanup_summary', raw_json: event });
+      break;
+    }
+    case 'purge_summary': {
+      // Merged into cleanup_json rather than its own column - the purge is
+      // the storage-reclamation tail of the cleanup story.
+      let existing = {};
+      try { existing = JSON.parse(job.cleanup_json || '{}'); } catch {}
+      existing.purged = event.purged;
+      existing.purgedBytes = event.bytes;
+      existing.purgedAt = new Date().toISOString();
+      db.prepare(`UPDATE jobs SET cleanup_json = ?, phase_json = NULL WHERE id = ?`).run(JSON.stringify(existing), jobId);
+      insertLog(jobId, { event_type: 'purge_summary', raw_json: event });
+      break;
+    }
+    default: {
+      insertLog(jobId, { event_type: 'log', error_message: `Unknown engine event type "${event.type}"`, raw_json: event });
+    }
+  }
+
+  const updated = getJob(jobId);
+  emitJob(jobId, { type: 'engine_event', event, job: updated });
+  emitDashboard({ type: 'engine_event', jobId, eventType: event.type, job: updated }, updated?.tenant_id);
+}
+
+function upsertItem(jobId, event, fields) {
+  const db = getDb();
+  const existing = db.prepare('SELECT * FROM job_items WHERE job_id = ? AND source_path = ?').get(jobId, event.sourcePath);
+  if (existing) {
+    // attempt_count counts actual retries (a new attempt beginning), not every
+    // status transition - the success/failed event that follows a retry is
+    // reporting the outcome of the attempt already counted, not starting one.
+    const bumpAttempt = fields.status === 'retried';
+    db.prepare(
+      `UPDATE job_items SET status = ?, size_bytes = COALESCE(?, size_bytes), duration_ms = COALESCE(?, duration_ms),
+       http_status = COALESCE(?, http_status), error_message = COALESCE(?, error_message),
+       attempt_count = attempt_count + ?, completed_at = CASE WHEN ? THEN datetime('now') ELSE completed_at END
+       WHERE id = ?`
+    ).run(
+      fields.status, fields.size_bytes ?? null, fields.duration_ms ?? null,
+      fields.http_status ?? null, fields.error_message ?? null,
+      bumpAttempt ? 1 : 0, fields.completed_at ? 1 : 0, existing.id
+    );
+  } else {
+    db.prepare(
+      `INSERT INTO job_items (id, job_id, item_type, source_path, target_path, size_bytes, status, attempt_count, duration_ms, http_status, error_message, started_at, completed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, datetime('now'), CASE WHEN ? THEN datetime('now') ELSE NULL END)`
+    ).run(
+      uuid(), jobId, event.itemType || 'file', event.sourcePath, event.targetPath || '',
+      fields.size_bytes ?? null, fields.status, fields.duration_ms ?? null, fields.http_status ?? null,
+      fields.error_message ?? null, fields.completed_at ? 1 : 0
+    );
+  }
+}
+
+function trackOutcome(state, ok) {
+  if (!state) return;
+  state.recentOutcomes.push(ok);
+  if (state.recentOutcomes.length > RETRY_WINDOW_SIZE) state.recentOutcomes.shift();
+}
+
+// Backs off a job's own concurrency (via the control file the engine polls)
+// when its recent retry rate crosses the configured threshold, instead of
+// letting it keep hammering an API that's already struggling.
+function maybeAdaptConcurrency(jobId, job, state) {
+  if (!state || state.recentOutcomes.length < RETRY_WINDOW_SIZE) return;
+  const retryCount = state.recentOutcomes.filter((ok) => ok === false).length;
+  const retryRate = retryCount / state.recentOutcomes.length;
+  if (retryRate > config.retryRateBackoffThreshold) {
+    const current = getJob(jobId);
+    const reduced = Math.max(1, Math.floor((current.concurrency || 1) / 2));
+    writeControlFile(jobId, { pauseRequested: false, cancelRequested: false, concurrencyOverride: reduced });
+    insertLog(jobId, {
+      event_type: 'log',
+      error_message: `Adaptive throttling: retry rate ${(retryRate * 100).toFixed(0)}% over last ${state.recentOutcomes.length} items exceeded threshold - reducing concurrency to ${reduced}.`,
+      actor_name: 'system',
+    });
+    state.recentOutcomes = [];
+  }
+}
+
+// On-demand re-verification of a completed job (the "Verify" button). Spawns
+// the engine in -VerifyOnly mode: no copying, no lifecycle events - it only
+// emits log / verify_mismatch / verification_summary, so a completed job's
+// status can never change. Useful weeks later, e.g. right before
+// decommissioning the source site.
+const verifyRuns = new Map(); // jobId -> child process
+function verifyJob(jobId, actor, tenantId) {
+  const job = getJob(jobId, tenantId);
+  if (!job) throw httpError(404, 'Job not found');
+  if (job.status !== 'completed') throw httpError(409, `Only completed jobs can be verified (this one is "${job.status}").`);
+  if (verifyRuns.has(jobId)) throw httpError(409, 'A verification is already running for this job.');
+  const blobConnectionString = job.target_provider === 'azure_blob'
+    ? resolveBlobConnectionString(job.tenant_id || config.tenantId) : null;
+  if (job.target_provider === 'azure_blob' && !blobConnectionString) {
+    throw httpError(409, 'Azure Blob archiving is not configured for this project - add a connection string on the Settings page (or set AZURE_BLOB_CONNECTION_STRING on the server).');
+  }
+  assertFsSourceAllowed(job);
+
+  const engineIdentity = resolveEngineIdentity(job.tenant_id || config.tenantId);
+
+  const args = [
+    '-NoProfile',
+    '-NonInteractive',
+    '-File', config.engineScriptPath,
+    '-JobId', jobId,
+    '-SourceProvider', job.source_provider || 'sharepoint',
+    '-SourceSiteUrl', job.source_site_url || '',
+    '-SourceLibrary', job.source_library || '',
+    '-SourcePath', job.source_path,
+    '-TargetProvider', job.target_provider || 'sharepoint',
+    '-Action', job.action,
+    '-ControlFilePath', controlFilePath(jobId),
+    '-ClientId', engineIdentity.clientId,
+    '-TenantId', job.tenant_id || config.tenantId,
+    '-VerifyOnly',
+  ];
+  if (engineIdentity.certBase64) {
+    args.push('-CertificateBase64Encoded', engineIdentity.certBase64, '-CertificatePassword', engineIdentity.certPassword);
+  } else {
+    args.push('-CertThumbprint', engineIdentity.certThumbprint);
+  }
+  if (job.target_provider === 'azure_blob') {
+    args.push(
+      '-TargetContainer', job.target_container || '',
+      '-TargetBlobPrefix', job.target_blob_prefix || '',
+      '-BlobConnectionString', blobConnectionString
+    );
+  } else {
+    args.push(
+      '-TargetSiteUrl', job.target_site_url || '',
+      '-TargetLibrary', job.target_library || '',
+      '-TargetPath', job.target_path
+    );
+  }
+  const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  verifyRuns.set(jobId, child);
+  insertLog(jobId, { event_type: 'verify_started', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
+
+  attachNdjsonParser(
+    child.stdout,
+    (event) => handleEngineEvent(jobId, event, null),
+    (rawLine) => insertLog(jobId, { event_type: 'log', error_message: `Unparseable engine output: ${rawLine}` })
+  );
+  child.stderr.on('data', (chunk) => {
+    const text = chunk.toString().trim();
+    if (text) insertLog(jobId, { event_type: 'log', error_message: `[verify stderr] ${text}` });
+  });
+  child.on('close', () => {
+    verifyRuns.delete(jobId);
+    const updated = getJob(jobId);
+    emitJob(jobId, { type: 'job_updated', job: updated });
+    emitDashboard({ type: 'job_updated', job: updated }, updated?.tenant_id);
+  });
+
+  const updated = getJob(jobId);
+  emitJob(jobId, { type: 'job_updated', job: updated });
+  return updated;
+}
+
+// Post-verification source cleanup - the deliberate, explicit "delete the
+// source now that the archive is verified" action (the engine itself stays
+// copy-only during migration; this is a separate, user-triggered step).
+// Guards: completed job, verification passed clean, not already cleaned or
+// cleaning. The engine re-verifies each file at deletion time regardless and
+// only ever recycles (never permanent-deletes).
+const cleanupRuns = new Map(); // jobId -> child process
+function cleanupSourceJob(jobId, actor, tenantId) {
+  const job = getJob(jobId, tenantId);
+  if (!job) throw httpError(404, 'Job not found');
+  if (job.status !== 'completed') throw httpError(409, `Only completed jobs can have their source cleaned up (this one is "${job.status}").`);
+  if ((job.source_provider || 'sharepoint') === 'filesystem') {
+    // The engine only ever deletes via SharePoint's recycle bin; a file share
+    // has no equivalent, so file-share sources stay strictly copy-only.
+    throw httpError(409, 'Source cleanup is not available for file-share sources - the engine never deletes from a file share. Retire the share manually once you are satisfied with the migration.');
+  }
+  let verification = null;
+  try { verification = JSON.parse(job.verification_json || 'null'); } catch {}
+  if (!verification?.ok) {
+    throw httpError(409, 'Source cleanup requires a clean verification first - click Verify and make sure it reports no problems, then try again.');
+  }
+  if (cleanupRuns.has(jobId)) throw httpError(409, 'A source cleanup is already running for this job.');
+  if (verifyRuns.has(jobId)) throw httpError(409, 'A verification is currently running for this job - wait for it to finish.');
+
+  const blobConnectionString = job.target_provider === 'azure_blob'
+    ? resolveBlobConnectionString(job.tenant_id || config.tenantId) : null;
+  if (job.target_provider === 'azure_blob' && !blobConnectionString) {
+    throw httpError(409, 'Azure Blob archiving is not configured for this project - the cleanup needs it to re-verify each file before deleting.');
+  }
+  const engineIdentity = resolveEngineIdentity(job.tenant_id || config.tenantId);
+
+  const args = [
+    '-NoProfile',
+    '-NonInteractive',
+    '-File', config.engineScriptPath,
+    '-JobId', jobId,
+    '-SourceSiteUrl', job.source_site_url || '',
+    '-SourceLibrary', job.source_library || '',
+    '-SourcePath', job.source_path,
+    '-TargetProvider', job.target_provider || 'sharepoint',
+    '-Action', job.action,
+    '-ControlFilePath', controlFilePath(jobId),
+    '-ClientId', engineIdentity.clientId,
+    '-TenantId', job.tenant_id || config.tenantId,
+    '-CleanupSource',
+  ];
+  if (engineIdentity.certBase64) {
+    args.push('-CertificateBase64Encoded', engineIdentity.certBase64, '-CertificatePassword', engineIdentity.certPassword);
+  } else {
+    args.push('-CertThumbprint', engineIdentity.certThumbprint);
+  }
+  if (job.target_provider === 'azure_blob') {
+    args.push(
+      '-TargetContainer', job.target_container || '',
+      '-TargetBlobPrefix', job.target_blob_prefix || '',
+      '-BlobConnectionString', blobConnectionString
+    );
+  } else {
+    args.push(
+      '-TargetSiteUrl', job.target_site_url || '',
+      '-TargetLibrary', job.target_library || '',
+      '-TargetPath', job.target_path
+    );
+  }
+  const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  cleanupRuns.set(jobId, child);
+  insertLog(jobId, { event_type: 'cleanup_started', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
+  clog.warn('cleanup', `${job.name}: source cleanup started by ${actor.name} - verified files are being moved to the source recycle bin`);
+
+  attachNdjsonParser(
+    child.stdout,
+    (event) => handleEngineEvent(jobId, event, null),
+    (rawLine) => insertLog(jobId, { event_type: 'log', error_message: `Unparseable engine output: ${rawLine}` })
+  );
+  child.stderr.on('data', (chunk) => {
+    const text = chunk.toString().trim();
+    if (text) insertLog(jobId, { event_type: 'log', error_message: `[cleanup stderr] ${text}` });
+  });
+  child.on('close', () => {
+    cleanupRuns.delete(jobId);
+    const updated = getJob(jobId);
+    emitJob(jobId, { type: 'job_updated', job: updated });
+    emitDashboard({ type: 'job_updated', job: updated }, updated?.tenant_id);
+  });
+
+  const updated = getJob(jobId);
+  emitJob(jobId, { type: 'job_updated', job: updated });
+  return updated;
+}
+
+// Permanently purges the recycle-bin items this job's cleanup created -
+// recycled files still count toward SharePoint storage quota for 93 days,
+// which defeats the purpose of an archive-to-free-space migration. Scoped
+// strictly to items whose original path was under the job's source root.
+function purgeRecycleBinJob(jobId, actor, tenantId) {
+  const job = getJob(jobId, tenantId);
+  if (!job) throw httpError(404, 'Job not found');
+  if (job.status !== 'completed') throw httpError(409, 'Only completed jobs can purge their recycled items.');
+  if ((job.source_provider || 'sharepoint') === 'filesystem') {
+    throw httpError(409, 'There is no recycle bin to purge for a file-share source - nothing was ever deleted from it.');
+  }
+  let cleanup = null;
+  try { cleanup = JSON.parse(job.cleanup_json || 'null'); } catch {}
+  if (!cleanup) throw httpError(409, 'Run the source cleanup first - there is nothing recycled by this job to purge yet.');
+  if (cleanupRuns.has(jobId)) throw httpError(409, 'A cleanup/purge is already running for this job.');
+
+  const engineIdentity = resolveEngineIdentity(job.tenant_id || config.tenantId);
+  const args = [
+    '-NoProfile',
+    '-NonInteractive',
+    '-File', config.engineScriptPath,
+    '-JobId', jobId,
+    '-SourceSiteUrl', job.source_site_url || '',
+    '-SourceLibrary', job.source_library || '',
+    '-SourcePath', job.source_path,
+    '-TargetProvider', job.target_provider || 'sharepoint',
+    '-Action', job.action,
+    '-ControlFilePath', controlFilePath(jobId),
+    '-ClientId', engineIdentity.clientId,
+    '-TenantId', job.tenant_id || config.tenantId,
+    '-PurgeRecycleBin',
+  ];
+  if (engineIdentity.certBase64) {
+    args.push('-CertificateBase64Encoded', engineIdentity.certBase64, '-CertificatePassword', engineIdentity.certPassword);
+  } else {
+    args.push('-CertThumbprint', engineIdentity.certThumbprint);
+  }
+  // Target params are irrelevant to a purge but the engine requires a valid
+  // target shape - pass the job's own.
+  if (job.target_provider === 'azure_blob') {
+    args.push('-TargetContainer', job.target_container || '', '-TargetBlobPrefix', job.target_blob_prefix || '', '-BlobConnectionString', 'unused=1;AccountName=unused;AccountKey=dW51c2Vk');
+  } else {
+    args.push('-TargetSiteUrl', job.target_site_url || '', '-TargetLibrary', job.target_library || '', '-TargetPath', job.target_path);
+  }
+  const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  cleanupRuns.set(jobId, child);
+  insertLog(jobId, { event_type: 'purge_started', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
+  clog.warn('purge', `${job.name}: recycle-bin purge started by ${actor.name}`);
+
+  attachNdjsonParser(
+    child.stdout,
+    (event) => handleEngineEvent(jobId, event, null),
+    (rawLine) => insertLog(jobId, { event_type: 'log', error_message: `Unparseable engine output: ${rawLine}` })
+  );
+  child.stderr.on('data', (chunk) => {
+    const text = chunk.toString().trim();
+    if (text) insertLog(jobId, { event_type: 'log', error_message: `[purge stderr] ${text}` });
+  });
+  child.on('close', () => {
+    cleanupRuns.delete(jobId);
+    const updated = getJob(jobId);
+    emitJob(jobId, { type: 'job_updated', job: updated });
+    emitDashboard({ type: 'job_updated', job: updated }, updated?.tenant_id);
+  });
+
+  const updated = getJob(jobId);
+  emitJob(jobId, { type: 'job_updated', job: updated });
+  return updated;
+}
+
+function pauseJob(jobId, actor, tenantId) {
+  const job = getJob(jobId, tenantId);
+  if (!job) throw httpError(404, 'Job not found');
+  if (job.status !== 'running') throw httpError(409, `Cannot pause a job in status "${job.status}".`);
+  const state = runningJobs.get(jobId);
+  if (state) {
+    state.actorOnPause = actor;
+    // Same force-stop safety net cancel has always had (see cancelJob): lanes
+    // only notice the pause flag between files, so one long copy or a wedged
+    // retry backoff can otherwise hold "pausing..." open forever. Killing
+    // mid-file is safe - finalizeJobProcess sees pause_requested=1 and lands
+    // the job as cleanly paused, and resume re-verifies every file's actual
+    // target state rather than trusting the checkpoint.
+    state.pauseTimer = setTimeout(() => {
+      const stillRunning = runningJobs.get(jobId);
+      if (stillRunning?.child && !stillRunning.child.killed) {
+        insertLog(jobId, { event_type: 'log', error_message: `Engine did not pause within ${PAUSE_GRACE_MS}ms (a large in-flight file can cause this) - forcing it to stop. Progress up to the last checkpoint is preserved.`, actor_name: 'system' });
+        stillRunning.child.kill();
+      }
+    }, PAUSE_GRACE_MS);
+  }
+  getDb().prepare('UPDATE jobs SET pause_requested = 1 WHERE id = ?').run(jobId);
+  writeControlFile(jobId, { pauseRequested: true, cancelRequested: false });
+  insertLog(jobId, { event_type: 'job_pause_requested', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
+  const updated = getJob(jobId);
+  emitJob(jobId, { type: 'job_updated', job: updated });
+  return updated;
+}
+
+function cancelJob(jobId, actor, tenantId) {
+  const job = getJob(jobId, tenantId);
+  if (!job) throw httpError(404, 'Job not found');
+  if (!['running', 'paused', 'approved', 'queued'].includes(job.status)) {
+    throw httpError(409, `Cannot cancel a job in status "${job.status}".`);
+  }
+
+  getDb().prepare('UPDATE jobs SET cancel_requested = 1 WHERE id = ?').run(jobId);
+  insertLog(jobId, { event_type: 'job_cancel_requested', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
+
+  if (job.status === 'running') {
+    writeControlFile(jobId, { pauseRequested: false, cancelRequested: true });
+    const state = runningJobs.get(jobId);
+    if (state) {
+      state.cancelTimer = setTimeout(() => {
+        const stillRunning = runningJobs.get(jobId);
+        if (stillRunning?.child && !stillRunning.child.killed) {
+          insertLog(jobId, { event_type: 'log', error_message: `Engine did not exit within ${CANCEL_GRACE_MS}ms of cancel request - forcing termination.`, actor_name: 'system' });
+          stillRunning.child.kill();
+        }
+      }, CANCEL_GRACE_MS);
+    }
+  } else {
+    // Not yet running (queued/approved) or already paused - just mark it cancelled directly.
+    getDb().prepare(`UPDATE jobs SET status = 'cancelled', completed_at = datetime('now') WHERE id = ?`).run(jobId);
+    insertLog(jobId, { event_type: 'job_cancelled', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
+  }
+
+  const updated = getJob(jobId);
+  emitJob(jobId, { type: 'job_updated', job: updated });
+  emitDashboard({ type: 'job_updated', job: updated }, updated.tenant_id);
+  return updated;
+}
+
+// Resets a failed/cancelled job back to 'approved' so it can be run again
+// without recreating it from the mapping. Deliberately does NOT skip the
+// approve step - it goes back to 'approved', not straight to 'running' - so
+// the explicit run action (and its own audit log entry) still happens. Job
+// history (job_items, job_log) is left alone; the next run's verify-before-
+// copy logic re-checks the real target state regardless of old rows here.
+function restartJob(jobId, actor, tenantId) {
+  const job = getJob(jobId, tenantId);
+  if (!job) throw httpError(404, 'Job not found');
+  if (!['failed', 'cancelled'].includes(job.status)) {
+    throw httpError(409, `Cannot restart a job in status "${job.status}" - only failed or cancelled jobs can be restarted.`);
+  }
+  getDb().prepare(
+    `UPDATE jobs SET status = 'approved', error_message = NULL,
+     items_done = 0, bytes_done = 0, items_failed = 0, items_skipped = 0, retries_total = 0,
+     checkpoint_json = NULL, started_at = NULL, paused_at = NULL, completed_at = NULL,
+     pause_requested = 0, cancel_requested = 0, verification_json = NULL, verified_at = NULL
+     WHERE id = ?`
+  ).run(jobId);
+  insertLog(jobId, { event_type: 'job_restarted', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
+  const updated = getJob(jobId);
+  emitJob(jobId, { type: 'job_updated', job: updated });
+  emitDashboard({ type: 'job_updated', job: updated }, updated.tenant_id);
+  return updated;
+}
+
+function deleteJob(jobId, actor, tenantId) {
+  const job = getJob(jobId, tenantId);
+  if (!job) throw httpError(404, 'Job not found');
+  if (!['completed', 'failed', 'cancelled'].includes(job.status)) {
+    throw httpError(409, 'Only jobs in a terminal state (completed, failed, cancelled) can be deleted.');
+  }
+  // Soft delete only: job_items and job_log rows are untouched and remain
+  // exportable via /api/export forever, per the compliance requirement.
+  getDb().prepare(`UPDATE jobs SET deleted_at = datetime('now'), deleted_by_name = ? WHERE id = ?`).run(actor.name, jobId);
+  insertLog(jobId, { event_type: 'job_deleted', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
+  removeTreeCache(jobId);
+  emitDashboard({ type: 'job_deleted', jobId }, job.tenant_id);
+}
+
+function httpError(status, message) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
+}
+
+module.exports = {
+  init,
+  createJobFromMapping,
+  approveJob,
+  runJob,
+  pauseJob,
+  cancelJob,
+  verifyJob,
+  cleanupSourceJob,
+  purgeRecycleBinJob,
+  restartJob,
+  deleteJob,
+  getJob,
+};

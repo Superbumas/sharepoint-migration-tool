@@ -1,0 +1,25 @@
+{
+  "name": "sharepoint-migration-tool",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SharePoint Online migration tool - Node/React UI + orchestration over a PowerShell/PnP migration engine",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "concurrently -n SERVER,WEB -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "npm run dev -w server",
+    "dev:web": "npm run dev -w web",
+    "build": "npm run build -w web",
+    "start": "npm run build && npm run start -w server",
+    "start:server-only": "npm run start -w server",
+    "setup:app-registration": "pwsh -File setup/New-AppRegistration.ps1"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

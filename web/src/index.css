@@ -1,0 +1,123 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  @apply bg-slate-50 text-slate-900;
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-blue-600 text-white text-sm font-medium px-3 py-1.5 rounded-md hover:bg-blue-700;
+  }
+  .btn-secondary {
+    @apply bg-slate-100 text-slate-700 text-sm font-medium px-3 py-1.5 rounded-md hover:bg-slate-200;
+  }
+  .btn-danger {
+    @apply bg-red-50 text-red-600 text-sm font-medium px-3 py-1.5 rounded-md hover:bg-red-100;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Dark theme: a central "skin" that remaps the light palette whenever
+   <html class="dark"> is set (toggle in Header.jsx, initialized in main.jsx).
+   Components keep their light-mode utility classes; these higher-specificity
+   overrides re-color them - one place to maintain instead of dark: variants
+   sprinkled across every component. The job log console is already dark and
+   is left alone.
+--------------------------------------------------------------------------- */
+.dark body { background-color: #09090b; color: #e4e4e7; }
+
+/* Surfaces */
+.dark .bg-white { background-color: #18181b; }
+.dark .bg-white\/70 { background-color: rgb(24 24 27 / 0.7); }
+.dark .bg-white\/90 { background-color: rgb(24 24 27 / 0.9); }
+.dark .bg-slate-50 { background-color: #27272a; }
+.dark .bg-slate-100 { background-color: #27272a; }
+.dark .bg-slate-200 { background-color: #3f3f46; }
+.dark .hover\:bg-slate-50:hover { background-color: #27272a; }
+.dark .hover\:bg-slate-100:hover { background-color: #3f3f46; }
+.dark .hover\:bg-slate-200:hover { background-color: #3f3f46; }
+.dark .hover\:bg-slate-200\/70:hover { background-color: rgb(63 63 70 / 0.7); }
+.dark .hover\:bg-blue-50\/40:hover { background-color: rgb(30 58 138 / 0.15); }
+.dark .hover\:bg-blue-50\/50:hover { background-color: rgb(30 58 138 / 0.15); }
+
+/* Borders & dividers */
+.dark .border-slate-100 { border-color: #27272a; }
+.dark .border-slate-200 { border-color: #27272a; }
+.dark .border-slate-300 { border-color: #3f3f46; }
+.dark .divide-slate-100 > :not([hidden]) ~ :not([hidden]) { border-color: #27272a; }
+.dark .ring-slate-100 { --tw-ring-color: #3f3f46; }
+
+/* Text */
+.dark .text-slate-900 { color: #fafafa; }
+.dark .text-slate-800 { color: #e4e4e7; }
+.dark .text-slate-700 { color: #d4d4d8; }
+.dark .text-slate-600 { color: #a1a1aa; }
+.dark .text-slate-500 { color: #a1a1aa; }
+.dark .text-slate-400 { color: #71717a; }
+.dark .text-slate-300 { color: #d4d4d8; }
+.dark .hover\:text-slate-800:hover { color: #fafafa; }
+
+/* Tinted panels (success / error / warning / info) */
+.dark .bg-green-50 { background-color: rgb(5 46 22 / 0.5); }
+.dark .bg-red-50 { background-color: rgb(69 10 10 / 0.5); }
+.dark .bg-amber-50 { background-color: rgb(69 26 3 / 0.5); }
+.dark .bg-blue-50 { background-color: rgb(23 37 84 / 0.5); }
+.dark .bg-indigo-50 { background-color: rgb(30 27 75 / 0.5); }
+.dark .hover\:bg-blue-100:hover { background-color: rgb(23 37 84 / 0.8); }
+.dark .hover\:bg-amber-100:hover { background-color: rgb(69 26 3 / 0.8); }
+.dark .hover\:bg-red-100:hover { background-color: rgb(69 10 10 / 0.8); }
+.dark .border-green-200 { border-color: #166534; }
+.dark .border-red-200 { border-color: #991b1b; }
+.dark .border-amber-200 { border-color: #92400e; }
+.dark .border-blue-200 { border-color: #1e40af; }
+.dark .border-indigo-100 { border-color: #3730a3; }
+.dark .hover\:border-blue-300:hover { border-color: #1d4ed8; }
+.dark .text-green-800, .dark .text-green-900 { color: #86efac; }
+.dark .text-green-700 { color: #4ade80; }
+.dark .text-red-700, .dark .text-red-600 { color: #fca5a5; }
+.dark .text-amber-800, .dark .text-amber-700 { color: #fcd34d; }
+.dark .text-blue-800, .dark .text-blue-900, .dark .text-blue-700 { color: #93c5fd; }
+.dark .text-indigo-700 { color: #a5b4fc; }
+.dark .text-blue-600 { color: #60a5fa; }
+.dark .hover\:text-blue-800:hover, .dark .hover\:text-blue-600:hover { color: #93c5fd; }
+.dark .text-blue-400 { color: #60a5fa; }
+.dark .text-blue-500 { color: #60a5fa; }
+
+/* Status pills / badges (bg-*-100 text-*-700/800 family) */
+.dark .bg-slate-100.text-slate-600, .dark .bg-slate-200.text-slate-600 { background-color: #27272a; color: #a1a1aa; }
+.dark .bg-sky-100 { background-color: rgb(8 47 73 / 0.7); }
+.dark .text-sky-700 { color: #7dd3fc; }
+.dark .bg-blue-100 { background-color: rgb(23 37 84 / 0.7); }
+.dark .bg-green-100 { background-color: rgb(5 46 22 / 0.7); }
+.dark .bg-emerald-100 { background-color: rgb(2 44 34 / 0.7); }
+.dark .text-emerald-700 { color: #6ee7b7; }
+.dark .bg-amber-100 { background-color: rgb(69 26 3 / 0.7); }
+.dark .bg-red-100 { background-color: rgb(69 10 10 / 0.7); }
+.dark .bg-indigo-100 { background-color: rgb(30 27 75 / 0.7); }
+.dark .bg-green-200 { background-color: rgb(5 46 22 / 0.9); }
+
+/* Gradient banners (phase banner, connection card, hero chips) */
+.dark .from-blue-50 { --tw-gradient-from: rgb(23 37 84 / 0.5) var(--tw-gradient-from-position); --tw-gradient-to: rgb(23 37 84 / 0); --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to); }
+.dark .to-indigo-50 { --tw-gradient-to: rgb(30 27 75 / 0.5) var(--tw-gradient-to-position); }
+.dark .from-green-50 { --tw-gradient-from: rgb(5 46 22 / 0.5) var(--tw-gradient-from-position); --tw-gradient-to: rgb(5 46 22 / 0); --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to); }
+.dark .to-emerald-50 { --tw-gradient-to: rgb(2 44 34 / 0.5) var(--tw-gradient-to-position); }
+
+/* Progress track backgrounds */
+.dark .bg-slate-100.rounded-full, .dark .bg-blue-100.rounded-full { background-color: #27272a; }
+
+/* Form controls */
+.dark input, .dark select, .dark textarea {
+  background-color: #27272a;
+  color: #e4e4e7;
+  border-color: #3f3f46;
+}
+.dark input::placeholder, .dark textarea::placeholder { color: #71717a; }
+
+/* Buttons */
+.dark .btn-secondary { background-color: #27272a; color: #d4d4d8; }
+.dark .btn-secondary:hover { background-color: #3f3f46; }
+.dark .btn-danger { background-color: rgb(69 10 10 / 0.5); color: #fca5a5; }
+.dark .btn-danger:hover { background-color: rgb(69 10 10 / 0.8); }
