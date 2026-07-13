@@ -762,6 +762,10 @@ try {
     # behaviour.
     $targetFileMap = $null
     $sourceMetaMap = $null
+    # Source drive id doubles as the handle for the encoding-proof Graph
+    # download fallback (blob lanes and the repair pass) - keep whatever the
+    # prefetch resolved even if a later prefetch step fails.
+    $srcDriveId = $null
     try {
         if ($isFsSource) {
             # No source-side prefetch: the filesystem walk above already
@@ -984,7 +988,7 @@ try {
     $laneScriptBlob = {
         param($LaneIndex, $WorkQueue, $ResultQueue, $Shared, $SourceSiteUrl, $ClientId, $TenantId,
               $CertThumbprint, $CertificateBase64Encoded, $CertificatePassword, $ControlFilePath, $SourceSiteServerRelative, $SourceRoot,
-              $BlobEndpoint, $Container, $Sas, $BlobPrefix, $TargetFileMap, $SourceMetaMap)
+              $BlobEndpoint, $Container, $Sas, $BlobPrefix, $TargetFileMap, $SourceMetaMap, $SourcePathInLib, $SrcDriveId)
 
         Import-Module PnP.PowerShell -ErrorAction Stop
         # NO -Force - same in-process clobbering hazard as the SharePoint
@@ -1080,9 +1084,17 @@ try {
                         if ($meta.EditorEmail) { $metadata['editor'] = $meta.EditorEmail }
                     }
 
+                    # Drive-addressed Graph fallback for the download: kicks
+                    # in for %/# names (which Get-PnPFile cannot fetch) and
+                    # after any Get-PnPFile failure. Unavailable (null) only
+                    # if the prefetch couldn't resolve the source drive id.
+                    $graphSource = if ($SrcDriveId) {
+                        @{ DriveId = $SrcDriveId; RelPath = (Get-BlobKey -Segments @($SourcePathInLib, $relFromRoot, $item.Name)) }
+                    } else { $null }
                     Invoke-WithRetry -MaxAttempts 5 -Action {
                         Save-BlobFromSharePointFile -SourceConnection $laneSourceConn -SourceServerRelativeUrl $sourceFileServerRel `
-                            -BlobEndpoint $BlobEndpoint -Container $Container -Sas $Sas -BlobKey $blobKey -Metadata $metadata -OnProgress $blobProgress | Out-Null
+                            -BlobEndpoint $BlobEndpoint -Container $Container -Sas $Sas -BlobKey $blobKey -Metadata $metadata `
+                            -GraphSource $graphSource -OnProgress $blobProgress | Out-Null
                     } -OnRetry {
                         param($attempt, $waitMs, $reason, $statusCode, $message)
                         $script:attemptsUsed = $attempt
@@ -1316,7 +1328,7 @@ try {
             $lanes += Start-ThreadJob -ScriptBlock $laneScriptBlob -ArgumentList @(
                 $i, $workQueue, $resultQueue, $shared, $SourceSiteUrl, $ClientId, $TenantId,
                 $CertThumbprint, $CertificateBase64Encoded, $CertificatePassword, $ControlFilePath, $sourceSiteServerRelative, $sourceRoot,
-                $blobCtx.BlobEndpoint, $blobCtx.Container, $blobCtx.Sas, $blobCtx.Prefix, $targetFileMap, $sourceMetaMap
+                $blobCtx.BlobEndpoint, $blobCtx.Container, $blobCtx.Sas, $blobCtx.Prefix, $targetFileMap, $sourceMetaMap, $SourcePath, $srcDriveId
             )
         } else {
             $lanes += Start-ThreadJob -ScriptBlock $laneScriptSharePoint -ArgumentList @(
@@ -1474,6 +1486,13 @@ try {
         $verifyOut = Invoke-VerificationPhase @verifyArgs
         $verification = $verifyOut?.Summary
 
+        # The repair pass downloads source bytes via Graph wherever possible
+        # (encoding-proof - see Save-GraphFileToPath); resolve the source
+        # drive id now if the prefetch didn't get the chance.
+        if ($verifyOut -and -not $verifyOut.Summary.ok -and -not $isFsSource -and -not $srcDriveId) {
+            try { $srcDriveId = Get-GraphDriveId -Connection $sourceConn -SiteUrl $SourceSiteUrl -Library $SourceLibrary } catch {}
+        }
+
         # Up to 3 verify->repair->verify rounds; each next round only runs
         # while the problem count strictly decreases, so transient flakes
         # clear in round one, stubborn files get the escalated copy method
@@ -1527,8 +1546,12 @@ try {
                     } elseif ($isBlobTarget) {
                         Invoke-WithRetry -MaxAttempts 3 -Action {
                             $blobKey = Get-BlobKey -Segments @($blobCtx.Prefix, $relFromRoot, $file.Name)
+                            $graphSource = if ($srcDriveId) {
+                                @{ DriveId = $srcDriveId; RelPath = (Get-BlobKey -Segments @($SourcePath, $relFromRoot, $file.Name)) }
+                            } else { $null }
                             Save-BlobFromSharePointFile -SourceConnection $sourceConn -SourceServerRelativeUrl $srcRel `
-                                -BlobEndpoint $blobCtx.BlobEndpoint -Container $blobCtx.Container -Sas $blobCtx.Sas -BlobKey $blobKey | Out-Null
+                                -BlobEndpoint $blobCtx.BlobEndpoint -Container $blobCtx.Container -Sas $blobCtx.Sas -BlobKey $blobKey `
+                                -GraphSource $graphSource | Out-Null
                         }
                     } else {
                         # SP->SP repair ladder: server-side Copy-PnPFile first
@@ -1561,7 +1584,16 @@ try {
                                 $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ('mig-repair-' + [guid]::NewGuid().ToString('N'))
                                 $null = New-Item -ItemType Directory -Path $tmpDir -Force
                                 try {
-                                    Get-PnPFile -Url $srcRel -Path $tmpDir -Filename $file.Name -AsFile -Force -Connection $sourceConn -ErrorAction Stop
+                                    # Get-PnPFile decodes %XX in the URL and
+                                    # fetches the wrong name - download via
+                                    # Graph whenever the drive id is known.
+                                    if ($srcDriveId) {
+                                        Save-GraphFileToPath -Connection $sourceConn -DriveId $srcDriveId `
+                                            -RelPath (Get-BlobKey -Segments @($SourcePath, $relFromRoot, $file.Name)) `
+                                            -OutFile (Join-Path $tmpDir $file.Name)
+                                    } else {
+                                        Get-PnPFile -Url $srcRel -Path $tmpDir -Filename $file.Name -AsFile -Force -Connection $sourceConn -ErrorAction Stop
+                                    }
                                     $repairStream = [System.IO.File]::OpenRead((Join-Path $tmpDir $file.Name))
                                     try {
                                         $tgtFolderWebRel = "$targetRoot/$relFromRoot".TrimEnd('/').Replace('//', '/')

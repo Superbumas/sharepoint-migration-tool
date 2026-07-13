@@ -384,6 +384,32 @@ function Send-BlobFile {
         -Body $blockListXml -ContentType 'application/xml' -ErrorAction Stop | Out-Null
 }
 
+# Downloads a SharePoint file's bytes via Microsoft Graph, addressed by
+# drive id + drive-root-relative path with each segment percent-encoded
+# on its own (a literal % in the name becomes %25, which Graph decodes
+# back to the literal). This is the download path that survives filenames
+# containing % or #: Get-PnPFile round-trips the server-relative URL and
+# SharePoint decodes %XX sequences in it, resolving the WRONG name
+# (observed live 2026-07-13: 'a%20b.pptx' was looked up as 'a b.pptx' ->
+# "The file ... does not exist" on every copy and repair attempt). The
+# byte transfer itself streams from the item's short-lived
+# pre-authenticated @microsoft.graph.downloadUrl straight to disk - no
+# auth header, no memory buffering.
+function Save-GraphFileToPath {
+    param(
+        [Parameter(Mandatory)]$Connection,
+        [Parameter(Mandatory)][string]$DriveId,
+        # Path relative to the drive (library) root, decoded form.
+        [Parameter(Mandatory)][string]$RelPath,
+        [Parameter(Mandatory)][string]$OutFile
+    )
+    $escaped = ConvertTo-BlobEscapedKey -Key $RelPath
+    $item = Invoke-PnPGraphMethod -Url "v1.0/drives/$DriveId/root:/$escaped" -Connection $Connection
+    $downloadUrl = $item.'@microsoft.graph.downloadUrl'
+    if (-not $downloadUrl) { throw "Graph returned no downloadUrl for '$RelPath' (drive $DriveId)." }
+    Invoke-WebRequest -Uri $downloadUrl -OutFile $OutFile -ErrorAction Stop | Out-Null
+}
+
 # Per-file copy orchestration: downloads the SharePoint file to a temp path
 # via the caller's existing PnP connection (no separate Graph download
 # plumbing needed), streams-hashes it (chunked MD5 - never loads the whole
@@ -398,6 +424,11 @@ function Save-BlobFromSharePointFile {
         [Parameter(Mandatory)][string]$Sas,
         [Parameter(Mandatory)][string]$BlobKey,
         [hashtable]$Metadata,
+        # Optional @{ DriveId; RelPath } (drive-root-relative, decoded):
+        # enables the encoding-proof Graph download above - taken directly
+        # for names containing % or # (Get-PnPFile cannot fetch those at
+        # all), and as the fallback after any Get-PnPFile failure.
+        [hashtable]$GraphSource,
         # Invoked at stage transitions and per uploaded block:
         #   ('downloading', 0, <tempPath>) before the SharePoint download -
         #       the temp path lets the caller poll the growing file's size
@@ -411,7 +442,16 @@ function Save-BlobFromSharePointFile {
     $tempPath = [System.IO.Path]::Combine($tempDir, $tempName)
     try {
         if ($OnProgress) { & $OnProgress 'downloading' 0 $tempPath }
-        Get-PnPFile -Url $SourceServerRelativeUrl -Path $tempDir -Filename $tempName -AsFile -Connection $SourceConnection -ErrorAction Stop | Out-Null
+        if ($GraphSource -and $SourceServerRelativeUrl -match '[%#]') {
+            Save-GraphFileToPath -Connection $SourceConnection -DriveId $GraphSource.DriveId -RelPath $GraphSource.RelPath -OutFile $tempPath
+        } else {
+            try {
+                Get-PnPFile -Url $SourceServerRelativeUrl -Path $tempDir -Filename $tempName -AsFile -Connection $SourceConnection -ErrorAction Stop | Out-Null
+            } catch {
+                if (-not $GraphSource) { throw }
+                Save-GraphFileToPath -Connection $SourceConnection -DriveId $GraphSource.DriveId -RelPath $GraphSource.RelPath -OutFile $tempPath
+            }
+        }
         if ($OnProgress) { & $OnProgress 'uploading' 0 }
 
         $md5 = [System.Security.Cryptography.MD5]::Create()
@@ -442,4 +482,4 @@ function Save-BlobFromSharePointFile {
 Export-ModuleMember -Function `
     ConvertFrom-BlobConnectionString, New-BlobSasToken, Get-BlobKey, ConvertTo-BlobEscapedKey, `
     Confirm-BlobContainerExists, Get-BlobKeyMap, Test-BlobTargetMatches, Send-BlobFile, Save-BlobFromSharePointFile, `
-    Clear-StaleBlobTempFiles
+    Save-GraphFileToPath, Clear-StaleBlobTempFiles
