@@ -260,16 +260,29 @@ function Invoke-VerificationPhase {
         }
 
         $problems = $result.Missing.Count + $result.SizeMismatch.Count + $result.HashMismatch.Count
+        # The problem paths travel INSIDE the summary (capped), not just as
+        # log lines: the summary is what Node persists to verification_json
+        # and what job_completed carries, so the UI can show a durable
+        # failed-files list. The verify_mismatch log lines above are capped
+        # at 50 and scroll away with the live log.
+        $maxReportedProblems = 200
+        $problemList = @(
+            @($result.Missing | ForEach-Object { @{ path = $_; reason = 'missing' } }) +
+            @($result.SizeMismatch | ForEach-Object { @{ path = $_; reason = 'size' } }) +
+            @($result.HashMismatch | ForEach-Object { @{ path = $_; reason = 'hash' } })
+        ) | Select-Object -First $maxReportedProblems
         $summary = @{
-            sourceFiles     = $result.SourceFiles
-            targetFiles     = $result.TargetFiles
-            identical       = $result.Identical
-            missing         = $result.Missing.Count
-            sizeMismatch    = $result.SizeMismatch.Count
-            hashMismatch    = $result.HashMismatch.Count
-            officeRewritten = $result.OfficeRewritten.Count
-            hashUnavailable = $result.HashUnavailable
-            ok              = ($problems -eq 0)
+            sourceFiles       = $result.SourceFiles
+            targetFiles       = $result.TargetFiles
+            identical         = $result.Identical
+            missing           = $result.Missing.Count
+            sizeMismatch      = $result.SizeMismatch.Count
+            hashMismatch      = $result.HashMismatch.Count
+            officeRewritten   = $result.OfficeRewritten.Count
+            hashUnavailable   = $result.HashUnavailable
+            ok                = ($problems -eq 0)
+            problems          = @($problemList)
+            problemsTruncated = ($problems -gt $maxReportedProblems)
         }
         Write-EngineEvent -Type 'verification_summary' -Data @{ verification = $summary }
         $verdict = if ($problems -eq 0) { 'PASSED' } else { "FOUND $problems PROBLEM(S)" }
@@ -1461,10 +1474,28 @@ try {
         $verifyOut = Invoke-VerificationPhase @verifyArgs
         $verification = $verifyOut?.Summary
 
-        if ($verifyOut -and -not $verifyOut.Summary.ok) {
+        # Up to 3 verify->repair->verify rounds; each next round only runs
+        # while the problem count strictly decreases, so transient flakes
+        # clear in round one, stubborn files get the escalated copy method
+        # below, and files nothing can fix stop the loop instead of spinning.
+        $prevProblemCount = [int]::MaxValue
+        for ($repairRound = 1; $repairRound -le 3 -and $verifyOut -and -not $verifyOut.Summary.ok; $repairRound++) {
             $problemPaths = @($verifyOut.Result.Missing) + @($verifyOut.Result.SizeMismatch) + @($verifyOut.Result.HashMismatch)
-            Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Attempting automatic re-copy of $($problemPaths.Count) file(s) that failed verification..." }
-            $recopied = 0
+            if ($problemPaths.Count -ge $prevProblemCount) {
+                Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Repair made no further progress - $($problemPaths.Count) file(s) still fail verification (listed on the job). Re-running the job retries only these files." }
+                break
+            }
+            $prevProblemCount = $problemPaths.Count
+            Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Repair round ${repairRound}: attempting re-copy of $($problemPaths.Count) file(s) that failed verification..." }
+            # rel path -> @{ SrcRel; Size } for each file whose re-copy call
+            # succeeded this round. Deliberately NOT reported as item_success
+            # yet: a copy call can "succeed" while still leaving verification
+            # broken (observed live: SharePoint's server-side copy endpoint
+            # URL-decodes names, so a file literally named 'a%20b.pptx' lands
+            # as 'a b.pptx' - the copy reports OK, the %20 name stays
+            # missing). Only files the follow-up verification confirms fixed
+            # get counted as repaired.
+            $attempted = @{}
             foreach ($rel in $problemPaths) {
                 # Filesystem-source map keys are built from the SANITIZED
                 # (SharePoint-legal) names, so match on TargetName there.
@@ -1483,8 +1514,8 @@ try {
                     "$sourceSiteServerRelative/$sourceRoot/$relFromRoot/$($file.Name)".Replace('//', '/')
                 }
                 try {
-                    Invoke-WithRetry -MaxAttempts 3 -Action {
-                        if ($isFsSource) {
+                    if ($isFsSource) {
+                        Invoke-WithRetry -MaxAttempts 3 -Action {
                             $tgtFolderSiteRel = "$targetRoot/$relFromRoot".TrimEnd('/').Replace('//', '/')
                             $repairStream = [System.IO.File]::OpenRead($srcRel)
                             try {
@@ -1492,32 +1523,87 @@ try {
                             } finally {
                                 $repairStream.Dispose()
                             }
-                        } elseif ($isBlobTarget) {
+                        }
+                    } elseif ($isBlobTarget) {
+                        Invoke-WithRetry -MaxAttempts 3 -Action {
                             $blobKey = Get-BlobKey -Segments @($blobCtx.Prefix, $relFromRoot, $file.Name)
                             Save-BlobFromSharePointFile -SourceConnection $sourceConn -SourceServerRelativeUrl $srcRel `
                                 -BlobEndpoint $blobCtx.BlobEndpoint -Container $blobCtx.Container -Sas $blobCtx.Sas -BlobKey $blobKey | Out-Null
-                        } else {
-                            $tgtFolderRel = "$targetSiteServerRelative/$targetRoot/$relFromRoot".TrimEnd('/').Replace('//', '/')
-                            Copy-PnPFile -SourceUrl $srcRel -TargetUrl $tgtFolderRel -Force -OverwriteIfAlreadyExists -Connection $sourceConn -ErrorAction Stop
+                        }
+                    } else {
+                        # SP->SP repair ladder: server-side Copy-PnPFile first
+                        # (fast, no bytes through the engine), stream
+                        # download/upload as the fallback. Names containing %
+                        # or # skip straight to the stream path - the
+                        # server-side endpoint mangles them (see above) - as
+                        # does any file still broken after a Copy-PnPFile
+                        # round: repeating the exact call that already failed
+                        # to stick would loop forever.
+                        $useStreamCopy = ($file.Name -match '[%#]') -or ($repairRound -gt 1)
+                        if (-not $useStreamCopy) {
+                            try {
+                                Invoke-WithRetry -MaxAttempts 3 -Action {
+                                    $tgtFolderRel = "$targetSiteServerRelative/$targetRoot/$relFromRoot".TrimEnd('/').Replace('//', '/')
+                                    Copy-PnPFile -SourceUrl $srcRel -TargetUrl $tgtFolderRel -Force -OverwriteIfAlreadyExists -Connection $sourceConn -ErrorAction Stop
+                                }
+                            } catch {
+                                Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Server-side re-copy failed for '$rel' ($($_.Exception.Message)) - retrying as a stream copy..." }
+                                $useStreamCopy = $true
+                            }
+                        }
+                        if ($useStreamCopy) {
+                            # Add-PnPFile sets the target name as a CSOM
+                            # property rather than a URL segment, so names
+                            # that break the server-side copy survive intact.
+                            # Staged through a temp file, not memory - repair
+                            # candidates can be multi-GB videos.
+                            Invoke-WithRetry -MaxAttempts 3 -Action {
+                                $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ('mig-repair-' + [guid]::NewGuid().ToString('N'))
+                                $null = New-Item -ItemType Directory -Path $tmpDir -Force
+                                try {
+                                    Get-PnPFile -Url $srcRel -Path $tmpDir -Filename $file.Name -AsFile -Force -Connection $sourceConn -ErrorAction Stop
+                                    $repairStream = [System.IO.File]::OpenRead((Join-Path $tmpDir $file.Name))
+                                    try {
+                                        $tgtFolderWebRel = "$targetRoot/$relFromRoot".TrimEnd('/').Replace('//', '/')
+                                        Add-PnPFile -FileName $file.Name -Folder $tgtFolderWebRel -Stream $repairStream -Connection $targetConn -ErrorAction Stop | Out-Null
+                                    } finally {
+                                        $repairStream.Dispose()
+                                    }
+                                } finally {
+                                    Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+                                }
+                            }
                         }
                     }
-                    $recopied++
-                    # A real item_success (not just a log line) so Node moves
-                    # the item from failed to done - a file repaired here
-                    # synced in the end and must not be reported as a failure.
-                    Write-EngineEvent -Type 'item_success' -Data @{
-                        sourcePath = $srcRel; targetPath = ''; itemType = 'file'
-                        bytes = [long]$file.Size; durationMs = 0; httpStatus = 200
-                    }
+                    $attempted[$rel] = @{ SrcRel = $srcRel; Size = [long]$file.Size }
                     Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Re-copied after verification failure: $rel" }
                 } catch {
                     Write-EngineEvent -Type 'log' -Data @{ level = 'error'; message = "Re-copy FAILED for '$rel': $($_.Exception.Message)" }
                 }
             }
-            if ($recopied -gt 0) {
-                Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Re-copied $recopied file(s) - running verification again..." }
-                $verifyOut = Invoke-VerificationPhase @verifyArgs
-                if ($verifyOut) { $verification = $verifyOut.Summary }
+            if ($attempted.Count -eq 0) { break }
+
+            Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Re-copied $($attempted.Count) file(s) - running verification again..." }
+            $verifyOut = Invoke-VerificationPhase @verifyArgs
+            if (-not $verifyOut) {
+                Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Could not re-verify after the repairs - the $($attempted.Count) re-copied file(s) stay marked failed until a verification confirms them (use the job's Verify button)." }
+                break
+            }
+            $verification = $verifyOut.Summary
+
+            # Confirm repairs against the fresh verification: only files that
+            # dropped off the problem list emit item_success (a real event,
+            # not just a log line, so Node moves them from failed to done).
+            $stillBroken = [System.Collections.Generic.HashSet[string]]::new(
+                [string[]](@($verifyOut.Result.Missing) + @($verifyOut.Result.SizeMismatch) + @($verifyOut.Result.HashMismatch))
+            )
+            foreach ($rel in $attempted.Keys) {
+                if (-not $stillBroken.Contains($rel)) {
+                    Write-EngineEvent -Type 'item_success' -Data @{
+                        sourcePath = $attempted[$rel].SrcRel; targetPath = ''; itemType = 'file'
+                        bytes = $attempted[$rel].Size; durationMs = 0; httpStatus = 200
+                    }
+                }
             }
         }
 

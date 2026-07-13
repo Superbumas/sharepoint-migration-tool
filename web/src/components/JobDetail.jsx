@@ -293,6 +293,28 @@ export default function JobDetail() {
               <span className="text-slate-500"> · {job.verification.officeRewritten} Office file(s) re-stamped by SharePoint (expected, content intact)</span>
             )}
             {job.verifiedAt && <span className="text-slate-400"> · verified {job.verifiedAt}</span>}
+            {!job.verification.ok && job.verification.problems?.length > 0 && (
+              <ul className="mt-2 max-h-48 overflow-y-auto space-y-0.5 border-t border-red-200 pt-2">
+                {job.verification.problems.map((p) => (
+                  <li key={`${p.reason}:${p.path}`} className="flex items-start gap-2 text-xs">
+                    <span className="shrink-0 rounded bg-red-100 text-red-700 px-1 py-0.5 uppercase text-[10px] font-medium">{p.reason}</span>
+                    <span className="font-mono break-all text-red-800">{p.path}</span>
+                  </li>
+                ))}
+                {job.verification.problemsTruncated && (
+                  <li className="text-xs text-slate-500">List capped at 200 files — the full set is in the job log (verify entries).</li>
+                )}
+              </ul>
+            )}
+          </div>
+        )}
+        {job.status === 'completed' && job.verification && !job.verification.ok && (
+          <div className="mt-2 text-sm rounded-md p-2 border text-slate-600 bg-slate-50 border-slate-200 flex items-center justify-between gap-3 flex-wrap">
+            <span>
+              <span className="font-medium text-slate-700">Retry the failed files:</span>{' '}
+              re-running this job skips every verified copy and re-copies only the files above, then verifies the whole tree again.
+            </span>
+            <button onClick={() => act('restart')} className="btn-primary shrink-0">Re-run to repair…</button>
           </div>
         )}
         {job.cleanup && (

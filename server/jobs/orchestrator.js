@@ -1321,8 +1321,15 @@ function cancelJob(jobId, actor, tenantId) {
 function restartJob(jobId, actor, tenantId) {
   const job = getJob(jobId, tenantId);
   if (!job) throw httpError(404, 'Job not found');
-  if (!['failed', 'cancelled'].includes(job.status)) {
-    throw httpError(409, `Cannot restart a job in status "${job.status}" - only failed or cancelled jobs can be restarted.`);
+  // A completed job whose verification found problems may also restart:
+  // re-running IS the targeted repair - the engine's skip/delta check
+  // streams every verified file back as a skip and only re-copies the
+  // failures, then verifies the whole tree again.
+  let verificationOk = null;
+  try { verificationOk = JSON.parse(job.verification_json || 'null')?.ok ?? null; } catch {}
+  const repairable = job.status === 'completed' && verificationOk === false;
+  if (!['failed', 'cancelled'].includes(job.status) && !repairable) {
+    throw httpError(409, `Cannot restart a job in status "${job.status}" - only failed or cancelled jobs (or completed jobs whose verification found problems) can be restarted.`);
   }
   getDb().prepare(
     `UPDATE jobs SET status = 'approved', error_message = NULL,
