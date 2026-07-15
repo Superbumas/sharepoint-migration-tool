@@ -1356,7 +1356,8 @@ try {
                     Invoke-WithRetry -MaxAttempts 5 -Action {
                         if ($IsFsSource) {
                             $localPath = Join-Path $item.SourceFolder $item.Name
-                            Send-GraphDriveFile -Connection $laneOneDriveConn -TempPath $localPath -DriveId $TargetDriveId -RelPath $targetRelPath -OnProgress $progress
+                            Send-GraphDriveFile -Connection $laneOneDriveConn -TempPath $localPath -DriveId $TargetDriveId -RelPath $targetRelPath `
+                                -Created $item.Created -Modified $item.Modified -OnProgress $progress
                         } else {
                             # Drive-addressed Graph fallback for the download:
                             # kicks in for %/# names (which Get-PnPFile cannot
@@ -1389,7 +1390,11 @@ try {
                     $statusCode = Get-HttpStatusCode -Exception $_.Exception
                     $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_failed' -Data @{
                         sourcePath = $sourceDisplayPath; targetPath = $targetDisplayPath
-                        error      = $_.Exception.Message; httpStatus = $statusCode; retryCount = $script:attemptsUsed
+                        # Prefix the .NET exception type: a bare message like
+                        # "Nullable object must have a value" is unactionable,
+                        # but "InvalidOperationException: ..." pins down where
+                        # it came from for the next round of diagnosis.
+                        error      = "$($_.Exception.GetType().Name): $($_.Exception.Message)"; httpStatus = $statusCode; retryCount = $script:attemptsUsed
                     }))
                 } finally {
                     $null = $Shared.InFlight.Remove($LaneIndex)

@@ -23,11 +23,10 @@
 # under every runspace that imported it.
 Import-Module "$PSScriptRoot/Retry.psm1"
 
-# Graph's simple ("PUT .../content") upload only accepts files up to 4 MiB;
-# above that a resumable upload session is required. Session chunks must be a
-# multiple of 320 KiB except the final one - 5 MiB (16 * 320 KiB) satisfies
-# that exactly.
-$script:OneDriveSimpleUploadThresholdBytes = 4MB
+# Every non-empty file is uploaded via a resumable upload session (see
+# Send-GraphDriveFile for why the simpler small-file content PUT is avoided).
+# Session chunks must be a multiple of 320 KiB except the final one - 5 MiB
+# (16 * 320 KiB) satisfies that exactly.
 $script:OneDriveChunkSizeBytes = 5 * 1024 * 1024
 
 # Shared with BlobTarget.psm1's $script:BlobTempRoot by convention (same
@@ -72,15 +71,21 @@ function Get-OneDriveDriveId {
     return $drive.id
 }
 
-# Ensures every folder in $RelativeFolderPaths (plus the target root itself)
-# exists under the drive, in the given order - which must be parent-before-
-# child (true by construction: callers pass the source tree's breadth-first
-# folder list, exactly like Initialize-PnPTargetFolders relies on for the
-# SharePoint target). Idempotent: POSTing a folder-create with
-# conflictBehavior=replace against an existing item that is ALSO a folder is
-# a documented Graph no-op (it does not touch the existing folder's
-# children) - the same idiom OneDrive's own sync clients use to ensure a
-# path exists without first checking whether it already does.
+# Ensures every folder under the drive that the migration needs exists:
+# $TargetRootPath itself AND all of its own ancestor segments, then every
+# entry in $RelativeFolderPaths (each relative to the root). Created shallow-
+# to-deep so a parent always exists before its child - the relative list is
+# the source tree's breadth-first folder order (already parent-first), and the
+# root's own ancestor chain is expanded here so a multi-segment target prefix
+# like "Migrated/2024/Documents" doesn't try to create the leaf under a
+# "Migrated/2024" that was never made (which 404s and fails the whole job).
+#
+# conflictBehavior=fail (NOT replace): an existing folder comes back 409, which
+# we treat as "already there". Replace is deliberately avoided - for a folder
+# it is not a documented safe no-op and can delete the folder's existing
+# CHILDREN, which on a resume that re-runs folder pre-creation (its cache
+# expired) would wipe already-uploaded files. fail + catch-409 never touches an
+# existing folder's contents.
 function Initialize-GraphDriveFolders {
     param(
         [Parameter(Mandatory)]$Connection,
@@ -90,11 +95,19 @@ function Initialize-GraphDriveFolders {
         [scriptblock]$OnProgress
     )
     $root = $TargetRootPath.Trim('/')
-    $allPaths = @()
-    if ($root) { $allPaths += $root }
+    $allPaths = [System.Collections.Generic.List[string]]::new()
+    # The root's own ancestor chain, shallow-first: "A/B/C" -> A, A/B, A/B/C.
+    if ($root) {
+        $acc = ''
+        foreach ($seg in ($root -split '/')) {
+            if (-not $seg) { continue }
+            $acc = if ($acc) { "$acc/$seg" } else { $seg }
+            $allPaths.Add($acc)
+        }
+    }
     foreach ($p in $RelativeFolderPaths) {
         if (-not $p) { continue }
-        $allPaths += if ($root) { "$root/$p" } else { $p }
+        $allPaths.Add($(if ($root) { "$root/$p" } else { $p }))
     }
     $done = 0
     $total = $allPaths.Count
@@ -110,11 +123,12 @@ function Initialize-GraphDriveFolders {
         }
         try {
             Invoke-PnPGraphMethod -Connection $Connection -Method Post -Url $parentUrl -Content (@{
-                name                                 = $leaf
-                folder                               = @{}
-                '@microsoft.graph.conflictBehavior'   = 'replace'
+                name                                = $leaf
+                folder                              = @{}
+                '@microsoft.graph.conflictBehavior' = 'fail'
             }) -ErrorAction Stop | Out-Null
         } catch {
+            # 409 = the folder already exists, which is exactly what we want.
             $status = Get-HttpStatusCode -Exception $_.Exception
             if ($status -ne 409) { throw "Could not create OneDrive folder '$trimmed': $($_.Exception.Message)" }
         }
@@ -123,46 +137,72 @@ function Initialize-GraphDriveFolders {
     }
 }
 
-# Uploads a local file's bytes into a drive at a drive-root-relative path.
-# Small files (<= 4 MiB) go up as one PUT; larger files use Graph's resumable
-# upload session, PUTting 5 MiB-aligned chunks with Content-Range directly
-# against the session's own pre-authenticated uploadUrl (no Authorization
-# header on those - same "the URL itself carries the signed access" contract
-# BlobTarget.psm1's Save-GraphFileToPath already relies on for its
-# pre-authenticated downloadUrl).
+# Uploads a local file's bytes into a drive at a drive-root-relative path,
+# always through Graph's resumable upload SESSION for any non-empty file:
+# createUploadSession, then PUT 5 MiB-aligned chunks with Content-Range
+# directly against the session's own pre-authenticated uploadUrl (no
+# Authorization header on those - same "the URL itself carries the signed
+# access" contract BlobTarget.psm1's Save-GraphFileToPath relies on).
 #
-# NOTE ON -Content <byte[]>: Invoke-PnPGraphMethod is documented (and used in
-# Microsoft's own PnP samples) to send a byte[] -Content as a raw binary
-# body rather than JSON-serializing it - this is the officially supported
-# way to PUT file content through it. If a future PnP.PowerShell version
-# changes that behavior, uploads of files at or under the threshold would
-# start failing with a content-mismatch error at the target (the same
-# failure signature BlobTarget.psm1's Send-BlobFile documents for its own
-# historical Object[]-vs-byte[] Azure incident) - verify this against the
-# installed PnP.PowerShell version if OneDrive uploads start silently
-# corrupting small files.
+# It deliberately does NOT use the simpler "PUT :/content with -Content
+# <byte[]>" via Invoke-PnPGraphMethod for small files. That path does NOT send
+# the raw bytes - the cmdlet mangles a byte[] body - so the file lands at the
+# WRONG size/content while the PUT still returns success: silent corruption
+# (found live: a file-share -> OneDrive run reported 447 files "copied", then
+# verification caught 368 of them with mismatched sizes - every corrupted one
+# was a small file that took that path, while the large files, already on this
+# session path, were byte-identical). The session PUTs send the raw byte[] with
+# Invoke-WebRequest -Body, verified byte-for-byte correct, so every real file
+# goes through it regardless of size. The one exception is a 0-byte file, which
+# a session cannot express (no range to send) - it gets an explicit
+# empty-content PUT, where there are no bytes to corrupt.
 function Send-GraphDriveFile {
     param(
         [Parameter(Mandatory)]$Connection,
         [Parameter(Mandatory)][string]$TempPath,
         [Parameter(Mandatory)][string]$DriveId,
         [Parameter(Mandatory)][string]$RelPath,
+        # Original source timestamps to stamp onto the OneDrive copy so migrated
+        # files keep their real dates instead of showing the migration time
+        # (the SharePoint and Blob targets preserve these too). Optional - null
+        # just leaves OneDrive's own upload-time values. Applied via the upload
+        # session's fileSystemInfo, so no extra request.
+        $Created = $null,
+        $Modified = $null,
         # Invoked with ('uploading', <cumulative bytes sent>) after each
         # staged chunk - small single-PUT files finish too fast to matter.
         [scriptblock]$OnProgress
     )
     $itemPath = "v1.0/drives/$DriveId/root:/$(ConvertTo-GraphDrivePath -Path $RelPath)"
-    $fileInfo = Get-Item -Path $TempPath
+    # -LiteralPath: filenames legitimately contain [ and ] (PowerShell wildcard
+    # metacharacters) - -Path would mis-glob them and fail to find the file.
+    $fileInfo = Get-Item -LiteralPath $TempPath
 
-    if ($fileInfo.Length -le $script:OneDriveSimpleUploadThresholdBytes) {
-        $bytes = [System.IO.File]::ReadAllBytes($TempPath)
-        Invoke-PnPGraphMethod -Connection $Connection -Method Put -Url "${itemPath}:/content" `
-            -Content $bytes -ContentType 'application/octet-stream' -ErrorAction Stop | Out-Null
+    # 0-byte file: an upload session has no byte range to send, so it needs a
+    # plain content PUT - but NOT via Invoke-PnPGraphMethod, whose byte[] body
+    # handling is exactly what corrupts non-empty small files (an empty byte[]
+    # would likely land as a "[]"-shaped 2-byte file, not 0 bytes). Send a
+    # genuinely empty body straight to Graph with our own Invoke-WebRequest,
+    # authorized with the connection's Graph token. -InFile on a 0-byte file
+    # sends nothing, producing a true 0-byte item.
+    if ($fileInfo.Length -eq 0) {
+        $graphToken = Get-PnPGraphAccessToken -Connection $Connection
+        Invoke-WebRequest -Uri "https://graph.microsoft.com/${itemPath}:/content" -Method Put `
+            -Headers @{ Authorization = "Bearer $graphToken" } -InFile $TempPath `
+            -ContentType 'application/octet-stream' -ErrorAction Stop | Out-Null
         return
     }
 
+    $uploadItem = @{ '@microsoft.graph.conflictBehavior' = 'replace' }
+    $fsInfo = @{}
+    # ISO 8601 with an explicit Z; the source tree hands us UTC DateTimes, and
+    # ToUniversalTime keeps it correct even if a caller passes a local one.
+    if ($Created) { $fsInfo.createdDateTime = ([datetime]$Created).ToUniversalTime().ToString('o') }
+    if ($Modified) { $fsInfo.lastModifiedDateTime = ([datetime]$Modified).ToUniversalTime().ToString('o') }
+    if ($fsInfo.Count -gt 0) { $uploadItem.fileSystemInfo = $fsInfo }
+
     $session = Invoke-PnPGraphMethod -Connection $Connection -Method Post -Url "${itemPath}:/createUploadSession" `
-        -Content (@{ item = @{ '@microsoft.graph.conflictBehavior' = 'replace' } }) -ErrorAction Stop
+        -Content (@{ item = $uploadItem }) -ErrorAction Stop
     $uploadUrl = $session.uploadUrl
     if (-not $uploadUrl) { throw "Microsoft Graph did not return an upload session URL for '$RelPath'." }
 
