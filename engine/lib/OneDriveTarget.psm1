@@ -23,11 +23,10 @@
 # under every runspace that imported it.
 Import-Module "$PSScriptRoot/Retry.psm1"
 
-# Graph's simple ("PUT .../content") upload only accepts files up to 4 MiB;
-# above that a resumable upload session is required. Session chunks must be a
-# multiple of 320 KiB except the final one - 5 MiB (16 * 320 KiB) satisfies
-# that exactly.
-$script:OneDriveSimpleUploadThresholdBytes = 4MB
+# Every non-empty file is uploaded via a resumable upload session (see
+# Send-GraphDriveFile for why the simpler small-file content PUT is avoided).
+# Session chunks must be a multiple of 320 KiB except the final one - 5 MiB
+# (16 * 320 KiB) satisfies that exactly.
 $script:OneDriveChunkSizeBytes = 5 * 1024 * 1024
 
 # Shared with BlobTarget.psm1's $script:BlobTempRoot by convention (same
@@ -123,25 +122,25 @@ function Initialize-GraphDriveFolders {
     }
 }
 
-# Uploads a local file's bytes into a drive at a drive-root-relative path.
-# Small files (<= 4 MiB) go up as one PUT; larger files use Graph's resumable
-# upload session, PUTting 5 MiB-aligned chunks with Content-Range directly
-# against the session's own pre-authenticated uploadUrl (no Authorization
-# header on those - same "the URL itself carries the signed access" contract
-# BlobTarget.psm1's Save-GraphFileToPath already relies on for its
-# pre-authenticated downloadUrl).
+# Uploads a local file's bytes into a drive at a drive-root-relative path,
+# always through Graph's resumable upload SESSION for any non-empty file:
+# createUploadSession, then PUT 5 MiB-aligned chunks with Content-Range
+# directly against the session's own pre-authenticated uploadUrl (no
+# Authorization header on those - same "the URL itself carries the signed
+# access" contract BlobTarget.psm1's Save-GraphFileToPath relies on).
 #
-# The small-file path (simple content PUT) goes through Invoke-PnPGraphMethod,
-# which has been seen to throw "Nullable object must have a value" on some
-# files (observed live migrating a user-documents share to OneDrive: a handful
-# of small PDFs failed while everything else copied). That is an error inside
-# the compiled cmdlet's own request/response handling, NOT a real upload
-# problem - the file and connection are fine. So on ANY failure of the simple
-# PUT we fall back to the resumable upload SESSION path below, which uploads
-# the bytes with our own Invoke-WebRequest and is unaffected by whatever the
-# cmdlet trips over. The lane's own retry loop can't recover these on its own:
-# the simple PUT fails deterministically for such a file, so retrying the same
-# call just fails again - switching mechanisms is what actually recovers it.
+# It deliberately does NOT use the simpler "PUT :/content with -Content
+# <byte[]>" via Invoke-PnPGraphMethod for small files. That path does NOT send
+# the raw bytes - the cmdlet mangles a byte[] body - so the file lands at the
+# WRONG size/content while the PUT still returns success: silent corruption
+# (found live: a file-share -> OneDrive run reported 447 files "copied", then
+# verification caught 368 of them with mismatched sizes - every corrupted one
+# was a small file that took that path, while the large files, already on this
+# session path, were byte-identical). The session PUTs send the raw byte[] with
+# Invoke-WebRequest -Body, verified byte-for-byte correct, so every real file
+# goes through it regardless of size. The one exception is a 0-byte file, which
+# a session cannot express (no range to send) - it gets an explicit
+# empty-content PUT, where there are no bytes to corrupt.
 function Send-GraphDriveFile {
     param(
         [Parameter(Mandatory)]$Connection,
@@ -157,18 +156,13 @@ function Send-GraphDriveFile {
     # metacharacters) - -Path would mis-glob them and fail to find the file.
     $fileInfo = Get-Item -LiteralPath $TempPath
 
-    if ($fileInfo.Length -le $script:OneDriveSimpleUploadThresholdBytes) {
-        try {
-            $bytes = [System.IO.File]::ReadAllBytes($TempPath)
-            Invoke-PnPGraphMethod -Connection $Connection -Method Put -Url "${itemPath}:/content" `
-                -Content $bytes -ContentType 'application/octet-stream' -ErrorAction Stop | Out-Null
-            return
-        } catch {
-            # A 0-byte file can only go via the simple PUT (an upload session
-            # has no byte range to send), so there is nothing to fall back to.
-            if ($fileInfo.Length -eq 0) { throw }
-            # Otherwise fall through to the upload-session path below.
-        }
+    # 0-byte file: an upload session has no byte range to send, so create it
+    # with an empty-content PUT. An empty body has no bytes for the cmdlet to
+    # mangle, so this is safe (unlike the non-empty byte[] PUT - see above).
+    if ($fileInfo.Length -eq 0) {
+        Invoke-PnPGraphMethod -Connection $Connection -Method Put -Url "${itemPath}:/content" `
+            -Content ([byte[]]::new(0)) -ContentType 'application/octet-stream' -ErrorAction Stop | Out-Null
+        return
     }
 
     $session = Invoke-PnPGraphMethod -Connection $Connection -Method Post -Url "${itemPath}:/createUploadSession" `
