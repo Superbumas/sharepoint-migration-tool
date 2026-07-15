@@ -18,6 +18,7 @@ const settingsRoutes = require('./api/settings');
 const blobRoutes = require('./api/blob');
 const projectsRoutes = require('./api/projects');
 const filesystemRoutes = require('./api/filesystem');
+const onedriveRoutes = require('./api/onedrive');
 const orchestrator = require('./jobs/orchestrator');
 
 // Ensure the DB (and its migrations) are applied before anything else touches it.
@@ -51,6 +52,7 @@ app.use('/api', settingsRoutes);
 app.use('/api', blobRoutes);
 app.use('/api', projectsRoutes);
 app.use('/api', filesystemRoutes);
+app.use('/api', onedriveRoutes);
 
 // Production: the same Node server hosts the built React SPA (per architecture -
 // this is one app, not two). In dev, Vite's own dev server handles / and proxies

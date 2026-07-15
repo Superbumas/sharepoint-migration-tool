@@ -291,6 +291,8 @@ function createJobFromMapping(mapping, actor, overrides = {}) {
     : (mapping.source_path || mapping.source_library || '(root)');
   const targetLabel = mapping.target_provider === 'azure_blob'
     ? `azure-blob://${mapping.target_container}/${mapping.target_blob_prefix || ''}`
+    : mapping.target_provider === 'onedrive'
+    ? `onedrive://${mapping.target_onedrive_upn}/${mapping.target_onedrive_path || ''}`
     : (mapping.target_library || mapping.target_path || '(root)');
   const name = overrides.name || `${sourceLabel} -> ${targetLabel}`;
   db.prepare(
@@ -298,14 +300,14 @@ function createJobFromMapping(mapping, actor, overrides = {}) {
       id, mapping_id, name, status, tenant_id,
       source_type, source_provider, source_site_url, source_library, source_path,
       target_type, target_site_url, target_library, target_path,
-      target_provider, target_container, target_blob_prefix,
+      target_provider, target_container, target_blob_prefix, target_onedrive_upn, target_onedrive_path, target_onedrive_host_url,
       action, concurrency,
       created_by_name, created_by_email, created_by_upn
     ) VALUES (
       @id, @mapping_id, @name, 'queued', @tenant_id,
       @source_type, @source_provider, @source_site_url, @source_library, @source_path,
       @target_type, @target_site_url, @target_library, @target_path,
-      @target_provider, @target_container, @target_blob_prefix,
+      @target_provider, @target_container, @target_blob_prefix, @target_onedrive_upn, @target_onedrive_path, @target_onedrive_host_url,
       @action, @concurrency,
       @created_by_name, @created_by_email, @created_by_upn
     )`
@@ -330,6 +332,9 @@ function createJobFromMapping(mapping, actor, overrides = {}) {
     target_provider: mapping.target_provider || 'sharepoint',
     target_container: mapping.target_container,
     target_blob_prefix: mapping.target_blob_prefix,
+    target_onedrive_upn: mapping.target_onedrive_upn,
+    target_onedrive_path: mapping.target_onedrive_path,
+    target_onedrive_host_url: mapping.target_onedrive_host_url,
     action: mapping.action,
     concurrency: overrides.concurrency || config.defaultJobConcurrency,
     created_by_name: actor.name,
@@ -374,6 +379,9 @@ function runJob(jobId, actor, tenantId) {
   if (job.target_provider === 'azure_blob' && !blobConnectionString) {
     throw httpError(409, 'Azure Blob archiving is not configured for this project - add a connection string on the Settings page (or set AZURE_BLOB_CONNECTION_STRING on the server) before running this job.');
   }
+  if (job.target_provider === 'onedrive' && !config.onedriveTargetEnabled) {
+    throw httpError(409, 'The OneDrive target is not enabled on this server - set ENGINE_ONEDRIVE_TARGET_ENABLED before running this job.');
+  }
   assertFsSourceAllowed(job);
 
   const isResume = job.status === 'paused';
@@ -417,6 +425,12 @@ function runJob(jobId, actor, tenantId) {
     args.push(
       '-TargetContainer', job.target_container || '',
       '-TargetBlobPrefix', job.target_blob_prefix || ''
+    );
+  } else if (job.target_provider === 'onedrive') {
+    args.push(
+      '-TargetOneDriveUpn', job.target_onedrive_upn || '',
+      '-TargetOneDrivePath', job.target_onedrive_path || '',
+      '-TargetOneDriveHostUrl', job.target_onedrive_host_url || ''
     );
   } else {
     args.push(
@@ -1011,6 +1025,9 @@ function verifyJob(jobId, actor, tenantId) {
   if (job.target_provider === 'azure_blob' && !blobConnectionString) {
     throw httpError(409, 'Azure Blob archiving is not configured for this project - add a connection string on the Settings page (or set AZURE_BLOB_CONNECTION_STRING on the server).');
   }
+  if (job.target_provider === 'onedrive' && !config.onedriveTargetEnabled) {
+    throw httpError(409, 'The OneDrive target is not enabled on this server - set ENGINE_ONEDRIVE_TARGET_ENABLED before verifying this job.');
+  }
   assertFsSourceAllowed(job);
 
   const engineIdentity = resolveEngineIdentity(job.tenant_id || config.tenantId);
@@ -1040,6 +1057,12 @@ function verifyJob(jobId, actor, tenantId) {
     args.push(
       '-TargetContainer', job.target_container || '',
       '-TargetBlobPrefix', job.target_blob_prefix || ''
+    );
+  } else if (job.target_provider === 'onedrive') {
+    args.push(
+      '-TargetOneDriveUpn', job.target_onedrive_upn || '',
+      '-TargetOneDrivePath', job.target_onedrive_path || '',
+      '-TargetOneDriveHostUrl', job.target_onedrive_host_url || ''
     );
   } else {
     args.push(
@@ -1106,6 +1129,9 @@ function cleanupSourceJob(jobId, actor, tenantId) {
   if (job.target_provider === 'azure_blob' && !blobConnectionString) {
     throw httpError(409, 'Azure Blob archiving is not configured for this project - the cleanup needs it to re-verify each file before deleting.');
   }
+  if (job.target_provider === 'onedrive' && !config.onedriveTargetEnabled) {
+    throw httpError(409, 'The OneDrive target is not enabled on this server - the cleanup needs it to re-verify each file before deleting.');
+  }
   const engineIdentity = resolveEngineIdentity(job.tenant_id || config.tenantId);
 
   const args = [
@@ -1132,6 +1158,12 @@ function cleanupSourceJob(jobId, actor, tenantId) {
     args.push(
       '-TargetContainer', job.target_container || '',
       '-TargetBlobPrefix', job.target_blob_prefix || ''
+    );
+  } else if (job.target_provider === 'onedrive') {
+    args.push(
+      '-TargetOneDriveUpn', job.target_onedrive_upn || '',
+      '-TargetOneDrivePath', job.target_onedrive_path || '',
+      '-TargetOneDriveHostUrl', job.target_onedrive_host_url || ''
     );
   } else {
     args.push(
@@ -1211,6 +1243,8 @@ function purgeRecycleBinJob(jobId, actor, tenantId) {
   // target shape - pass the job's own.
   if (job.target_provider === 'azure_blob') {
     args.push('-TargetContainer', job.target_container || '', '-TargetBlobPrefix', job.target_blob_prefix || '');
+  } else if (job.target_provider === 'onedrive') {
+    args.push('-TargetOneDriveUpn', job.target_onedrive_upn || '', '-TargetOneDrivePath', job.target_onedrive_path || '', '-TargetOneDriveHostUrl', job.target_onedrive_host_url || '');
   } else {
     args.push('-TargetSiteUrl', job.target_site_url || '', '-TargetLibrary', job.target_library || '', '-TargetPath', job.target_path);
   }

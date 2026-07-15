@@ -32,6 +32,11 @@ router.get('/settings', (req, res) => {
     enginePermissionMode: config.enginePermissionMode,
     blobArchivingEnabled: !!connectionString,
     blobConnectionInfo: analyzeBlobConnectionString(connectionString),
+    // OneDrive target: gated purely by the server's Files.ReadWrite.All grant
+    // (see server/config.js), not a per-project secret - so this is just a
+    // flag, unlike blobArchivingEnabled which depends on a stored connection
+    // string.
+    onedriveTargetEnabled: config.onedriveTargetEnabled,
     // File-share (DFS) sources: allowlist managed on the Settings page
     // (plus the optional server-wide FS_SOURCE_ROOTS fallback, merged in).
     // Passwords never leave the server - only whether one is stored.

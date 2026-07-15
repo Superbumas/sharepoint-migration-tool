@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import SharePointPicker from './SharePointPicker';
 import BlobTargetPicker from './BlobTargetPicker';
+import OneDriveTargetPicker from './OneDriveTargetPicker';
 import FileSharePicker from './FileSharePicker';
 
 // Human label for a mapping's SharePoint site: the picker-provided display
@@ -51,8 +52,9 @@ export default function MappingsPage() {
   const [source, setSource] = useState(null);
   const [target, setTarget] = useState(null);
   const [sourceKind, setSourceKind] = useState('sharepoint'); // 'sharepoint' | 'filesystem'
-  const [targetKind, setTargetKind] = useState('sharepoint'); // 'sharepoint' | 'azure_blob'
+  const [targetKind, setTargetKind] = useState('sharepoint'); // 'sharepoint' | 'azure_blob' | 'onedrive'
   const [blobArchivingEnabled, setBlobArchivingEnabled] = useState(false);
+  const [onedriveTargetEnabled, setOnedriveTargetEnabled] = useState(false);
   const [notes, setNotes] = useState('');
   const [message, setMessage] = useState(null);
   const [importResult, setImportResult] = useState(null);
@@ -64,7 +66,10 @@ export default function MappingsPage() {
   }
   useEffect(refresh, []);
   useEffect(() => {
-    api.get('/api/settings').then((r) => setBlobArchivingEnabled(!!r.blobArchivingEnabled));
+    api.get('/api/settings').then((r) => {
+      setBlobArchivingEnabled(!!r.blobArchivingEnabled);
+      setOnedriveTargetEnabled(!!r.onedriveTargetEnabled);
+    });
   }, []);
 
   function switchTargetKind(kind) {
@@ -75,9 +80,10 @@ export default function MappingsPage() {
   function switchSourceKind(kind) {
     setSourceKind(kind);
     setSource(null);
-    // A file-share source can only migrate into SharePoint (no share-to-blob
-    // path in the engine) - snap the target back if blob was selected.
-    if (kind === 'filesystem' && targetKind !== 'sharepoint') switchTargetKind('sharepoint');
+    // A file-share source can only migrate into SharePoint or a OneDrive (no
+    // share-to-blob path in the engine) - snap the target back if blob was
+    // selected.
+    if (kind === 'filesystem' && targetKind === 'azure_blob') switchTargetKind('sharepoint');
   }
 
   async function saveMapping() {
@@ -96,6 +102,8 @@ export default function MappingsPage() {
     try {
       const targetFields = target.provider === 'azure_blob'
         ? { targetProvider: 'azure_blob', targetContainer: target.container, targetBlobPrefix: target.blobPrefix }
+        : target.provider === 'onedrive'
+        ? { targetProvider: 'onedrive', targetOnedriveUpn: target.upn, targetOnedrivePath: target.path }
         : { targetType: target.type, targetSiteUrl: target.siteUrl, targetSiteName: target.siteName, targetLibrary: target.library, targetPath: target.path };
       const sourceFields = isFsSource
         ? { sourceProvider: 'filesystem' }
@@ -201,7 +209,7 @@ export default function MappingsPage() {
             File share (DFS)
           </button>
         </div>
-        {blobArchivingEnabled && sourceKind === 'sharepoint' && (
+        {((blobArchivingEnabled && sourceKind === 'sharepoint') || onedriveTargetEnabled) && (
           <div className="flex items-center gap-2 text-xs">
             <span className="text-slate-500">Target destination:</span>
             <button
@@ -210,12 +218,22 @@ export default function MappingsPage() {
             >
               SharePoint site
             </button>
-            <button
-              onClick={() => switchTargetKind('azure_blob')}
-              className={`rounded-full px-2 py-0.5 ${targetKind === 'azure_blob' ? 'bg-blue-100 text-blue-800 font-medium' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
-            >
-              Azure Blob container (archive)
-            </button>
+            {blobArchivingEnabled && sourceKind === 'sharepoint' && (
+              <button
+                onClick={() => switchTargetKind('azure_blob')}
+                className={`rounded-full px-2 py-0.5 ${targetKind === 'azure_blob' ? 'bg-blue-100 text-blue-800 font-medium' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+              >
+                Azure Blob container (archive)
+              </button>
+            )}
+            {onedriveTargetEnabled && (
+              <button
+                onClick={() => switchTargetKind('onedrive')}
+                className={`rounded-full px-2 py-0.5 ${targetKind === 'onedrive' ? 'bg-blue-100 text-blue-800 font-medium' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+              >
+                A user's OneDrive
+              </button>
+            )}
           </div>
         )}
         <div className="grid md:grid-cols-2 gap-4">
@@ -224,6 +242,8 @@ export default function MappingsPage() {
             : <SharePointPicker label="Source (tick one or more folders/files)" onSelect={setSource} multi />}
           {targetKind === 'azure_blob'
             ? <BlobTargetPicker onSelect={setTarget} />
+            : targetKind === 'onedrive'
+            ? <OneDriveTargetPicker onSelect={setTarget} />
             : <SharePointPicker label="Target folder" onSelect={setTarget} />}
         </div>
         <div className="flex items-center gap-3">
