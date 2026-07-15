@@ -91,10 +91,13 @@ export default function MappingsPage() {
     if (!source || !target) { setMessage({ type: 'error', text: 'Pick both a source and a target first.' }); return; }
     // A multi-selection (several ticked folders/files) becomes one mapping
     // per ticked item, all sharing the same target. A file-share source is
-    // always a single folder.
+    // always a folder (a single directory the engine walks), whether one or
+    // many are ticked.
     const isFsSource = source.provider === 'filesystem';
     const sourceItems = isFsSource
-      ? [{ sourceType: 'folder', sourcePath: source.path }]
+      ? (source.multi
+        ? source.items.map((it) => ({ sourceType: 'folder', sourcePath: it.path }))
+        : [{ sourceType: 'folder', sourcePath: source.path }])
       : (source.multi
         ? source.items.map((it) => ({ sourceType: it.type, sourcePath: it.path }))
         : [{ sourceType: source.type, sourcePath: source.path }]);
@@ -238,7 +241,7 @@ export default function MappingsPage() {
         )}
         <div className="grid md:grid-cols-2 gap-4">
           {sourceKind === 'filesystem'
-            ? <FileSharePicker label="Source folder on a file share" onSelect={setSource} />
+            ? <FileSharePicker label="Source (tick one or more folders on a file share)" onSelect={setSource} multi />
             : <SharePointPicker label="Source (tick one or more folders/files)" onSelect={setSource} multi />}
           {targetKind === 'azure_blob'
             ? <BlobTargetPicker onSelect={setTarget} />
