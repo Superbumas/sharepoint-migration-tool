@@ -1254,7 +1254,7 @@ try {
         param($LaneIndex, $WorkQueue, $ResultQueue, $Shared, $IsFsSource, $ClientId, $TenantId,
               $CertThumbprint, $CertificateBase64Encoded, $CertificatePassword, $ControlFilePath,
               $SourceSiteUrl, $SourceSiteServerRelative, $SourceRoot, $SourcePathInLib, $SrcDriveId,
-              $TargetOneDriveHostUrl, $TargetDriveId, $TargetOneDrivePathRoot, $TargetFileMap)
+              $TargetOneDriveHostUrl, $TargetDriveId, $TargetOneDrivePathRoot, $TargetFileMap, $SourceMetaMap)
 
         Import-Module PnP.PowerShell -ErrorAction Stop
         # NO -Force - same in-process clobbering hazard as every other lane
@@ -1367,9 +1367,14 @@ try {
                             $graphSource = if ($SrcDriveId) {
                                 @{ DriveId = $SrcDriveId; RelPath = "$SourcePathInLib/$relFromRoot/$($item.Name)".Trim('/').Replace('//', '/') }
                             } else { $null }
+                            # Original source dates from the prefetched source
+                            # index (Get-GraphFileMap -IncludeDetails), keyed the
+                            # same way as the target skip map, so the OneDrive
+                            # copy keeps the real Created/Modified.
+                            $srcMeta = if ($null -ne $SourceMetaMap) { $SourceMetaMap[$relKey] } else { $null }
                             Save-OneDriveFileFromSharePoint -SourceConnection $laneSourceConn -SourceServerRelativeUrl $sourceDisplayPath `
                                 -TargetConnection $laneOneDriveConn -TargetDriveId $TargetDriveId -TargetRelPath $targetRelPath `
-                                -GraphSource $graphSource -OnProgress $progress
+                                -GraphSource $graphSource -Created $srcMeta.Created -Modified $srcMeta.Modified -OnProgress $progress
                         }
                     } -OnRetry {
                         param($attempt, $waitMs, $reason, $statusCode, $message)
@@ -1604,7 +1609,7 @@ try {
                 $i, $workQueue, $resultQueue, $shared, $isFsSource, $ClientId, $TenantId,
                 $CertThumbprint, $CertificateBase64Encoded, $CertificatePassword, $ControlFilePath,
                 $SourceSiteUrl, $sourceSiteServerRelative, $sourceRoot, $SourcePath, $srcDriveId,
-                $TargetOneDriveHostUrl, $oneDriveCtx.DriveId, $oneDriveCtx.PathRoot, $targetFileMap
+                $TargetOneDriveHostUrl, $oneDriveCtx.DriveId, $oneDriveCtx.PathRoot, $targetFileMap, $sourceMetaMap
             )
         } elseif ($isFsSource) {
             $lanes += Start-ThreadJob -ScriptBlock $laneScriptFileUpload -ArgumentList @(

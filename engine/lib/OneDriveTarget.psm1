@@ -275,6 +275,10 @@ function Save-OneDriveFileFromSharePoint {
         # cannot fetch those at all), and as the fallback after any
         # Get-PnPFile failure.
         [hashtable]$GraphSource,
+        # Original source timestamps to preserve on the OneDrive copy (see
+        # Send-GraphDriveFile). Null just leaves OneDrive's upload-time values.
+        $Created = $null,
+        $Modified = $null,
         [scriptblock]$OnProgress
     )
     $tempDir = $script:OneDriveTempRoot
@@ -294,7 +298,8 @@ function Save-OneDriveFileFromSharePoint {
             }
         }
         if ($OnProgress) { & $OnProgress 'uploading' 0 }
-        Send-GraphDriveFile -Connection $TargetConnection -TempPath $tempPath -DriveId $TargetDriveId -RelPath $TargetRelPath -OnProgress $OnProgress
+        Send-GraphDriveFile -Connection $TargetConnection -TempPath $tempPath -DriveId $TargetDriveId -RelPath $TargetRelPath `
+            -Created $Created -Modified $Modified -OnProgress $OnProgress
     } finally {
         Remove-Item -Path $tempPath -Force -ErrorAction SilentlyContinue
     }

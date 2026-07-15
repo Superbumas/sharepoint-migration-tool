@@ -256,13 +256,18 @@ function ConvertTo-SharePointSafeName {
 }
 
 # OS/application droppings that have no business being migrated into a
-# document library: Explorer thumbnail caches, folder-view settings, and
-# Office's transient ownership-lock files (~$Report.docx). Skipped during
+# document library: Explorer thumbnail caches, folder-view settings, Office's
+# transient ownership-lock files (~$Report.docx), and Windows/internet
+# shortcuts (.lnk/.url). Shortcuts point at local/UNC paths that don't resolve
+# once the content lives in OneDrive/SharePoint, and system ones (cmd.lnk,
+# control.lnk) are frequently ACL'd so the engine can't even read them - both
+# reasons they're dropped rather than migrated as broken files. Skipped during
 # enumeration (counted, logged, never item events - they don't belong in the
 # job's totals any more than SharePoint's own hidden files would).
 function Test-IsJunkFile {
     param([Parameter(Mandatory)][string]$Name)
-    return ($Name -in 'Thumbs.db', 'desktop.ini') -or ($Name -like '~$*')
+    return ($Name -in 'Thumbs.db', 'desktop.ini') -or ($Name -like '~$*') -or
+        ($Name -like '*.lnk') -or ($Name -like '*.url')
 }
 
 # --- Enumeration ---------------------------------------------------------------
