@@ -1356,7 +1356,8 @@ try {
                     Invoke-WithRetry -MaxAttempts 5 -Action {
                         if ($IsFsSource) {
                             $localPath = Join-Path $item.SourceFolder $item.Name
-                            Send-GraphDriveFile -Connection $laneOneDriveConn -TempPath $localPath -DriveId $TargetDriveId -RelPath $targetRelPath -OnProgress $progress
+                            Send-GraphDriveFile -Connection $laneOneDriveConn -TempPath $localPath -DriveId $TargetDriveId -RelPath $targetRelPath `
+                                -Created $item.Created -Modified $item.Modified -OnProgress $progress
                         } else {
                             # Drive-addressed Graph fallback for the download:
                             # kicks in for %/# names (which Get-PnPFile cannot
