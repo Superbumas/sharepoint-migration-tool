@@ -117,12 +117,24 @@ router.get('/auth/login', async (req, res, next) => {
     }
     req.session.pendingProvisionScopes = needsProvisionScopes;
 
+    // Three consent tiers, narrowest that fits this leg:
+    //   identity  - bare sign-in, team member identifying themself (User.Read)
+    //   working   - opening a project: site pickers, file reads, engine grants
+    //   provision - first-ever project sign-in: working + app-creation scopes
+    // The tier actually requested is stashed on the session because the
+    // /auth/redirect token exchange must ask for EXACTLY what the auth code
+    // was granted for.
+    const scopes = needsProvisionScopes ? PROJECT_PROVISION_SCOPES
+      : req.query.project ? config.delegatedScopes
+      : config.identityScopes;
+    req.session.pendingLoginScopes = scopes;
+
     // Always the tenant-agnostic (or that project's own) authority,
     // regardless of any tenantId left over on this session from a previous
     // login - a browser could sign out and sign back into a different project.
     const client = getMsalClient(req.session, { authority });
     const url = await client.getAuthCodeUrl({
-      scopes: needsProvisionScopes ? PROJECT_PROVISION_SCOPES : config.delegatedScopes,
+      scopes,
       redirectUri: config.redirectUri,
       codeChallenge: challenge,
       codeChallengeMethod: 'S256',
@@ -191,10 +203,14 @@ router.get('/auth/redirect', async (req, res, next) => {
     // Must match whatever /auth/login actually requested for this same
     // sign-in - MSAL's token exchange is against the code's own granted
     // scopes, not an independent request. wasProvisionLeg also guards the
-    // provisioning bounce below against redirect loops.
+    // provisioning bounce below against redirect loops. The fallback covers
+    // a session that somehow lost pendingLoginScopes (e.g. an in-flight
+    // login started before this deploy).
     const wasProvisionLeg = !!req.session.pendingProvisionScopes;
-    const scopes = wasProvisionLeg ? PROJECT_PROVISION_SCOPES : config.delegatedScopes;
+    const scopes = req.session.pendingLoginScopes
+      || (wasProvisionLeg ? PROJECT_PROVISION_SCOPES : config.delegatedScopes);
     delete req.session.pendingProvisionScopes;
+    delete req.session.pendingLoginScopes;
     const client = getMsalClient(req.session, { authority: ORGANIZATIONS_AUTHORITY });
     const result = await client.acquireTokenByCode({
       code: req.query.code,
@@ -286,16 +302,17 @@ router.get('/auth/redirect', async (req, res, next) => {
       if (!config.credentialEncryptionKey) {
         console.error('[auth] Skipping engine app provisioning for project', project.id, '- CREDENTIAL_ENCRYPTION_KEY is not set.');
       } else if (!wasProvisionLeg) {
-        // A bare "Sign in with Microsoft" (no ?project=) can't provision -
-        // its token wasn't requested with the app-creation scopes, because
-        // the tenant (and whether its project even needs provisioning)
-        // wasn't known until this moment. Bounce through the project-scoped
-        // login once: SSO makes it a silent redirect (no password re-entry;
-        // at most a one-time consent prompt for a brand-new tenant's GA),
-        // and that leg carries the scopes and provisions. wasProvisionLeg
-        // guarantees a provisioning failure exits to '/' instead of looping.
-        await hydrateUserProfile(req);
-        return res.redirect(`/auth/login?project=${project.id}`);
+        // A bare "Sign in with Microsoft" (no ?project=) is an IDENTITY
+        // login - it deliberately carries only User.Read (see identityScopes)
+        // and must never drag a team member through the full-scope +
+        // app-creation consent wall just because their home tenant's
+        // placeholder project is unprovisioned. Provisioning happens when
+        // someone actually opens the project (the /projects page links go
+        // through /auth/login?project=, which requests the provisioning
+        // scopes when this credential is unusable) - that is also how a new
+        // client tenant is onboarded: create the project, then sign into it
+        // with that tenant's GA account.
+        console.log(`[auth] Identity sign-in for project ${project.id} - leaving engine app unprovisioned until a project-scoped sign-in.`);
       } else {
         try {
           const provisioned = await provisionTenantApp(result.accessToken, project.name, config.onedriveTargetEnabled);
@@ -358,7 +375,10 @@ router.get('/auth/logout', (req, res) => {
 // Fetches /me and /me/photo/$value once per login and caches into SQLite + session
 // so the header can show identity without re-hitting Graph on every page load.
 async function hydrateUserProfile(req) {
-  const token = await getGraphToken(req);
+  // identityScopes, not the full working set: this only calls /me and
+  // /me/photo, and it MUST also work right after a bare identity sign-in,
+  // whose consent covers nothing beyond User.Read.
+  const token = await getGraphToken(req, config.identityScopes);
   if (!token) {
     // Used to fail silently here, which left req.session.profile unset with
     // no explanation - /auth/redirect would still redirect to '/' as if sign-in
@@ -367,8 +387,8 @@ async function hydrateUserProfile(req) {
     // as a thrown error (caught by the /auth/redirect route below) means the
     // user sees a real message instead of a silent bounce back to the login screen.
     throw new Error(
-      'Signed in, but could not get a Graph token for the delegated scopes (User.Read/Sites.Read.All/Files.Read.All/offline_access). ' +
-      'Check the server log above for the acquireTokenSilent error - this is usually missing admin consent for one of those scopes.'
+      'Signed in, but could not get a Graph token for the basic profile scopes (User.Read/offline_access). ' +
+      'Check the server log above for the acquireTokenSilent error - this is usually missing admin consent.'
     );
   }
 

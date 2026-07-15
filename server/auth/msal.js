@@ -54,13 +54,18 @@ function persistMsalCache(session, client) {
 // Returns a fresh Graph access token for the signed-in user, refreshing silently
 // via the cached refresh token if the access token has expired. Used only for the
 // SharePoint browser/picker + /me - never for the long-running migration engine.
-async function getGraphToken(req) {
+//
+// `scopes` defaults to the full working set; pass config.identityScopes for
+// calls that must also succeed on an identity-only session (a bare team
+// sign-in consented to nothing beyond User.Read, so silently requesting the
+// working scopes there fails with interaction_required).
+async function getGraphToken(req, scopes) {
   if (!req.session.account) return null;
   const client = getMsalClient(req.session);
   try {
     const result = await client.acquireTokenSilent({
       account: req.session.account,
-      scopes: config.delegatedScopes.filter((s) => !['openid', 'profile', 'email', 'offline_access'].includes(s)),
+      scopes: (scopes || config.delegatedScopes).filter((s) => !['openid', 'profile', 'email', 'offline_access'].includes(s)),
     });
     persistMsalCache(req.session, client);
     return result.accessToken;

@@ -46,6 +46,15 @@ module.exports = {
     'openid profile email offline_access User.Read Sites.Read.All Files.Read.All'
   ).split(' ').filter(Boolean),
 
+  // What a BARE sign-in (no ?project= - a team member identifying themself)
+  // asks for: just enough to know who they are. The heavy DELEGATED_SCOPES
+  // above (site browsing, file reads, Sites.FullControl.All for engine
+  // grants) are only requested on a project-scoped sign-in, where the user
+  // is actually going to work against that tenant - so a teammate's first
+  // login shows a one-line consent, not a "full control of all your site
+  // collections" wall.
+  identityScopes: ['openid', 'profile', 'email', 'offline_access', 'User.Read'],
+
   sessionSecret: required('SESSION_SECRET', 'dev-only-insecure-secret'),
 
   // Restricts who may sign in at all, by the DOMAIN of the authenticated
