@@ -5,7 +5,7 @@ const config = require('../config');
 const { getMsalClient, persistMsalCache, getGraphToken, ORGANIZATIONS_AUTHORITY } = require('./msal');
 const { generatePkcePair, generateState } = require('./pkce');
 const { getDb } = require('../db');
-const { provisionTenantApp } = require('../graph/provisionTenantApp');
+const { provisionTenantApp, ensureEngineAppRoles } = require('../graph/provisionTenantApp');
 const { encrypt, decrypt } = require('../util/secretCrypto');
 
 const router = express.Router();
@@ -69,6 +69,10 @@ router.get('/auth/login', async (req, res, next) => {
       if (project && (!project.tenant_id || !engineCredentialUsable(project))) {
         needsProvisionScopes = true;
       }
+      // A permissions-repair leg (from /auth/repair-engine) always needs the
+      // management scopes even though the project's credential is already
+      // usable - it's topping up the app's ROLES, not its certificate.
+      if (req.query.repair) needsProvisionScopes = true;
     } else {
       delete req.session.pendingProjectId;
     }
@@ -106,6 +110,17 @@ router.get('/auth/admin-consent', (req, res) => {
     `&redirect_uri=${encodeURIComponent(config.redirectUri)}` +
     `&state=${encodeURIComponent(state)}`;
   res.redirect(url);
+});
+
+// "Re-sync engine app permissions" from the Settings → Permissions panel.
+// Bounces the signed-in admin through a provisioning-scope login leg (SSO
+// makes it near-silent) so the callback below has a token that can grant app
+// roles, then tops up the CURRENT project's own engine app to the required
+// permission set (server/graph/provisionTenantApp.js ensureEngineAppRoles).
+router.get('/auth/repair-engine', (req, res) => {
+  if (!req.session.projectId) return res.redirect('/?authError=not_authenticated');
+  req.session.pendingRepairEngine = true;
+  res.redirect(`/auth/login?project=${req.session.projectId}&repair=1`);
 });
 
 router.get('/auth/redirect', async (req, res, next) => {
@@ -251,6 +266,28 @@ router.get('/auth/redirect', async (req, res, next) => {
           console.error(`[auth] Engine app provisioning failed for project ${project.id}:`, err.message);
         }
       }
+    }
+
+    // Permissions-repair leg (from /auth/repair-engine): this token carries
+    // the management scopes, so top up the project's existing engine app to
+    // the current required role set (idempotent; never re-provisions). The
+    // result is stashed for the Settings page to show. A freshly-provisioned
+    // project (the block above just ran) already has current roles, so this is
+    // a harmless no-op in that case.
+    if (req.session.pendingRepairEngine) {
+      delete req.session.pendingRepairEngine;
+      // Re-read: the provisioning block above may have just set engine_client_id.
+      const repairProject = db.prepare('SELECT id, name, engine_client_id FROM projects WHERE id = ?').get(project.id);
+      try {
+        const repair = await ensureEngineAppRoles(result.accessToken, repairProject, config.onedriveTargetEnabled);
+        req.session.lastEngineRepair = { at: new Date().toISOString(), ...repair };
+        console.log(`[auth] Engine permission re-sync for project ${project.id}: added [${(repair.added || []).join(', ') || 'none'}]`);
+      } catch (err) {
+        console.error(`[auth] Engine permission re-sync failed for project ${project.id}:`, err.message);
+        req.session.lastEngineRepair = { at: new Date().toISOString(), ok: false, error: err.message };
+      }
+      await hydrateUserProfile(req);
+      return res.redirect('/settings?repair=engine');
     }
 
     await hydrateUserProfile(req);

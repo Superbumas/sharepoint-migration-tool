@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
+import PermissionsPanel from './PermissionsPanel';
 
 // Renders the non-secret analysis of a connection string (form, account,
 // SAS expiry) - used both for the currently-saved string and live while
@@ -261,6 +262,8 @@ export default function Settings() {
         <h1 className="text-xl font-semibold text-slate-800">Settings</h1>
         <p className="text-sm text-slate-500 mt-0.5">Per-project configuration and audit exports.</p>
       </div>
+
+      <PermissionsPanel />
 
       <div className="bg-white border border-slate-200 rounded-lg p-4">
         <h2 className="text-sm font-semibold text-slate-700 mb-2">Azure Blob archiving (this project)</h2>

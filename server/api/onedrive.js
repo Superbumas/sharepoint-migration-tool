@@ -26,6 +26,15 @@ router.get('/onedrive/users', async (req, res, next) => {
     );
     res.json({ items: data.value || [] });
   } catch (err) {
+    // Directory search needs the User.Read.All DELEGATED scope (distinct from
+    // the engine's app-only Files.ReadWrite.All). Turn Graph's bare 403 into
+    // something a non-admin colleague can act on rather than a dead end.
+    if (err.status === 403) {
+      return res.status(403).json({
+        error: 'directory_search_denied',
+        message: 'This app can\'t search your directory yet - it needs the "User.Read.All" permission granted and consented. An admin can fix it from Settings → Permissions (or re-run setup with -EnableOneDriveTarget, restart, and sign in again).',
+      });
+    }
     next(err);
   }
 });
