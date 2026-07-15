@@ -215,13 +215,34 @@ if (-not ('MigrationEngine.QuickXorHash' -as [type]) -or -not ('MigrationEngine.
 
 # Base64 QuickXorHash of a local/UNC file - directly comparable to Graph's
 # driveItem file.hashes.quickXorHash for the uploaded copy.
+#
+# Reads in large explicit chunks rather than [System.IO.File]::OpenRead +
+# ComputeHash. That default path uses a 4 KB FileStream buffer and
+# ComputeHash then pulls the stream in ~4 KB reads - which over SMB (the
+# common case here: verifying a file-share source) is thousands of tiny,
+# latency-bound network round-trips per file, and it dominates verification
+# time on a DFS/UNC source (observed live: a 4 GB user-documents tree taking
+# ~20+ minutes to hash, decelerating on the larger tail files). Reading 4 MB
+# at a time turns each of those into one round-trip that moves 4 MB, so the
+# read is bandwidth-bound instead. Identical hash output - only the I/O
+# batching changes. FileShare ReadWrite|Delete so a file a user has open on
+# the live share still hashes instead of failing to a size-only check.
+$script:HashReadChunkBytes = 4MB
 function Get-FileQuickXorHash {
     param([Parameter(Mandatory)][string]$Path)
     $algo = [MigrationEngine.QuickXorHash]::new()
     try {
-        $stream = [System.IO.File]::OpenRead($Path)
+        $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+        $stream = [System.IO.FileStream]::new(
+            $Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $share,
+            81920, [System.IO.FileOptions]::SequentialScan)
         try {
-            return [Convert]::ToBase64String($algo.ComputeHash($stream))
+            $buffer = [byte[]]::new($script:HashReadChunkBytes)
+            while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                $null = $algo.TransformBlock($buffer, 0, $read, $null, 0)
+            }
+            $null = $algo.TransformFinalBlock([byte[]]::new(0), 0, 0)
+            return [Convert]::ToBase64String($algo.Hash)
         } finally {
             $stream.Dispose()
         }
