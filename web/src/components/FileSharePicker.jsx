@@ -40,10 +40,13 @@ function fileIcon(name) {
 // Settings page; this component can only ever see what /api/fs/browse is
 // willing to show it.
 //
-// Selection shape handed to onSelect: { provider: 'filesystem', path, name } -
-// always a single folder (migrating a folder recreates the folder itself at
-// the target, same semantics as the SharePoint picker).
-export default function FileSharePicker({ label, onSelect }) {
+// Selection shape handed to onSelect:
+//   single: { provider: 'filesystem', path, name }
+//   multi:  { provider: 'filesystem', multi: true, items: [{type:'folder', path, name}, ...] }
+// `multi` (source only) lets several FOLDERS be ticked and migrated in one go
+// (one mapping each). Only folders are tickable, not files - a file-share
+// source is always a directory the engine walks; a single file can't be one.
+export default function FileSharePicker({ label, onSelect, multi = false }) {
   const [rootsInfo, setRootsInfo] = useState(null); // null = loading
   const [root, setRoot] = useState(null);
   // Breadcrumb segments under the root: [{name, path}]
@@ -53,6 +56,7 @@ export default function FileSharePicker({ label, onSelect }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [selected, setSelected] = useState(null);
+  const [ticked, setTicked] = useState(new Map()); // path -> {type, path, name}
 
   useEffect(() => {
     api.get('/api/fs/roots').then(setRootsInfo).catch(() => setRootsInfo({ enabled: false, roots: [] }));
@@ -85,12 +89,35 @@ export default function FileSharePicker({ label, onSelect }) {
   function choose(path, name) {
     const selection = { provider: 'filesystem', path, name };
     setSelected(selection);
+    setTicked(new Map()); // a single pick supersedes any ticked multi-selection
+    onSelect(selection);
+  }
+
+  // Ticks persist across navigation (keyed by absolute path), so folders can be
+  // gathered from different places under the share before confirming.
+  function toggleTick(f) {
+    setTicked((prev) => {
+      const next = new Map(prev);
+      if (next.has(f.path)) next.delete(f.path);
+      else next.set(f.path, { type: 'folder', path: f.path, name: f.name });
+      return next;
+    });
+  }
+
+  function confirmTicked() {
+    const selection = { provider: 'filesystem', multi: true, items: [...ticked.values()] };
+    setSelected(selection);
     onSelect(selection);
   }
 
   return (
     <div className="border border-slate-200 rounded-lg bg-white p-4 space-y-3">
-      <h3 className="text-sm font-semibold text-slate-700">{label}</h3>
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-slate-700">{label}</h3>
+        {multi && ticked.size > 0 && (
+          <span className="text-xs font-medium text-violet-700 bg-violet-50 rounded-full px-2 py-0.5">{ticked.size} ticked</span>
+        )}
+      </div>
 
       {/* ---- Empty state: no roots configured yet -------------------------- */}
       {rootsInfo && !root && rootsInfo.roots.length === 0 && (
@@ -176,11 +203,20 @@ export default function FileSharePicker({ label, onSelect }) {
 
           <ul className="max-h-64 overflow-y-auto text-sm pr-0.5">
             {shownFolders.map((f) => (
-              <li key={f.path} className="group flex items-center gap-2 px-2 py-1.5 rounded hover:bg-slate-50">
+              <li key={f.path} className={`group flex items-center gap-2 px-2 py-1.5 rounded hover:bg-slate-50 ${ticked.has(f.path) ? 'bg-violet-50/60' : ''}`}>
+                {multi && (
+                  <input
+                    type="checkbox"
+                    checked={ticked.has(f.path)}
+                    onChange={() => toggleTick(f)}
+                    className="shrink-0 accent-violet-600"
+                    title="Tick to migrate this folder"
+                  />
+                )}
                 <button
                   onClick={() => setPathStack([...pathStack, { name: f.name, path: f.path }])}
                   className="flex-1 min-w-0 text-left flex items-center gap-2 font-medium text-slate-700"
-                  title={f.path}
+                  title={`Open ${f.path}`}
                 >
                   <span className="shrink-0">📁</span>
                   <span className="truncate">{f.name}</span>
@@ -208,6 +244,18 @@ export default function FileSharePicker({ label, onSelect }) {
               <li className="text-slate-400 text-xs px-2 py-3">{filter ? 'No matches in this folder.' : 'Empty folder.'}</li>
             )}
           </ul>
+
+          {multi && ticked.size > 0 && (
+            <div className="flex items-center justify-between bg-violet-600 text-white rounded-md px-3 py-2">
+              <span className="text-xs font-medium">{ticked.size} folder(s) ticked across this share</span>
+              <div className="space-x-2">
+                <button onClick={() => setTicked(new Map())} className="text-xs opacity-80 hover:opacity-100 underline">clear</button>
+                <button onClick={confirmTicked} className="text-xs font-semibold bg-white text-violet-700 rounded px-2.5 py-1 hover:bg-violet-50">
+                  Use {ticked.size} selected
+                </button>
+              </div>
+            </div>
+          )}
           {loading && <div className="text-xs text-slate-400">Loading…</div>}
         </div>
       )}
@@ -216,7 +264,9 @@ export default function FileSharePicker({ label, onSelect }) {
 
       {selected && (
         <div className="text-xs bg-green-50 border border-green-200 text-green-800 rounded-md px-2 py-1.5">
-          Selected folder: <span className="font-mono">{selected.path}</span>
+          {selected.multi
+            ? <>Selected <span className="font-semibold">{selected.items.length} folder(s)</span>: {selected.items.map((i) => i.name).join(', ')}</>
+            : <>Selected folder: <span className="font-mono">{selected.path}</span></>}
         </div>
       )}
     </div>
