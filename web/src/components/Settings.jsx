@@ -252,6 +252,7 @@ export default function Settings() {
     ['Adaptive throttle trigger (retry rate)', `${(settings.retryRateBackoffThreshold * 100).toFixed(0)}%`],
     ['Slow-transfer threshold', `${settings.slowTransferThresholdMs / 1000}s`],
     ['Engine permission mode', settings.enginePermissionMode],
+    ['OneDrive target', settings.onedriveTargetEnabled ? 'Enabled' : 'Disabled'],
   ];
 
   return (

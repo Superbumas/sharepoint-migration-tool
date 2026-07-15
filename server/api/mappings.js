@@ -5,7 +5,9 @@ const { v4: uuid } = require('uuid');
 const { requireAuth, getActor, getTenantId } = require('../auth/middleware');
 const { getDb } = require('../db');
 const { ensureEngineSiteAccess } = require('../graph/siteAccess');
+const { verifyUserHasDrive } = require('../graph/onedriveAccess');
 const { fsSourceEnabled, isAllowedFsPath, normalizeFsPath } = require('../util/fsSource');
+const config = require('../config');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -35,6 +37,9 @@ function mapRow(row) {
     targetPath: row.target_path,
     targetContainer: row.target_container,
     targetBlobPrefix: row.target_blob_prefix,
+    targetOnedriveUpn: row.target_onedrive_upn,
+    targetOnedrivePath: row.target_onedrive_path,
+    targetOnedriveHostUrl: row.target_onedrive_host_url,
     action: row.action,
     confidence: row.confidence,
     origin: row.origin,
@@ -126,7 +131,7 @@ router.get('/mappings/:id', (req, res) => {
   res.json(mapRow(row));
 });
 
-const VALID_TARGET_PROVIDERS = new Set(['sharepoint', 'azure_blob']);
+const VALID_TARGET_PROVIDERS = new Set(['sharepoint', 'azure_blob', 'onedrive']);
 const VALID_SOURCE_PROVIDERS = new Set(['sharepoint', 'filesystem']);
 
 // Manual picker save: source + target (folder or file) chosen by hand in the UI.
@@ -161,8 +166,8 @@ router.post('/mappings', async (req, res) => {
     if (!isAllowedFsPath(b.sourcePath, getTenantId(req))) {
       return res.status(403).json({ error: 'path_not_allowed', message: 'That path is outside this project\'s allowed file-share roots (see Settings).' });
     }
-    if (targetProvider !== 'sharepoint') {
-      return res.status(400).json({ error: 'A file-share source can only migrate into SharePoint.' });
+    if (targetProvider !== 'sharepoint' && targetProvider !== 'onedrive') {
+      return res.status(400).json({ error: 'A file-share source can only migrate into SharePoint or a OneDrive.' });
     }
   }
   if (targetProvider === 'azure_blob' && !b.targetContainer) {
@@ -171,6 +176,26 @@ router.post('/mappings', async (req, res) => {
   if (targetProvider === 'sharepoint' && b.targetPath == null) {
     return res.status(400).json({ error: 'targetPath is required' });
   }
+  let onedriveHostUrl = null;
+  if (targetProvider === 'onedrive') {
+    if (!config.onedriveTargetEnabled) {
+      return res.status(409).json({ error: 'onedrive_target_disabled', message: 'The OneDrive target is not enabled on this server - see ENGINE_ONEDRIVE_TARGET_ENABLED in .env.' });
+    }
+    if (!b.targetOnedriveUpn) {
+      return res.status(400).json({ error: 'targetOnedriveUpn is required when targetProvider is onedrive' });
+    }
+    // Save-time sanity check so a typo'd UPN or an unlicensed user is caught
+    // here, not hours into a job run. Also resolves the real SharePoint URL
+    // for this user's OneDrive host (see server/graph/onedriveAccess.js) -
+    // stored so a filesystem-source job has something to hand
+    // Connect-PnPOnline for its Graph token (it has no SharePoint site of
+    // its own to connect to otherwise).
+    const driveCheck = await verifyUserHasDrive(req, b.targetOnedriveUpn);
+    if (!driveCheck.ok) {
+      return res.status(400).json({ error: 'onedrive_not_found', message: driveCheck.error });
+    }
+    onedriveHostUrl = driveCheck.hostUrl;
+  }
   if (b.action && !VALID_ACTIONS.has(b.action)) {
     return res.status(400).json({ error: `action must be one of ${[...VALID_ACTIONS].join(', ')}` });
   }
@@ -178,20 +203,23 @@ router.post('/mappings', async (req, res) => {
   const db = getDb();
   const id = uuid();
   // target_path stays NOT NULL for every row (a full SQLite table rebuild
-  // would be needed to relax it) - azure_blob rows write the blob prefix
-  // into it too, purely to satisfy that legacy constraint. All blob code
-  // reads target_blob_prefix, never target_path.
-  const targetPath = targetProvider === 'azure_blob' ? (b.targetBlobPrefix || '') : b.targetPath;
+  // would be needed to relax it) - azure_blob/onedrive rows write their own
+  // path field into it too, purely to satisfy that legacy constraint. All
+  // blob/onedrive code reads target_blob_prefix/target_onedrive_path, never
+  // target_path.
+  const targetPath = targetProvider === 'azure_blob' ? (b.targetBlobPrefix || '')
+    : targetProvider === 'onedrive' ? (b.targetOnedrivePath || '')
+    : b.targetPath;
   db.prepare(
     `INSERT INTO mappings (
       id, tenant_id, source_type, source_provider, source_site_url, source_site_name, source_library, source_path,
       target_type, target_site_url, target_site_name, target_library, target_path,
-      target_provider, target_container, target_blob_prefix,
+      target_provider, target_container, target_blob_prefix, target_onedrive_upn, target_onedrive_path, target_onedrive_host_url,
       action, confidence, origin, notes, created_by_name, created_by_email
     ) VALUES (
       @id, @tenantId, @sourceType, @sourceProvider, @sourceSiteUrl, @sourceSiteName, @sourceLibrary, @sourcePath,
       @targetType, @targetSiteUrl, @targetSiteName, @targetLibrary, @targetPath,
-      @targetProvider, @targetContainer, @targetBlobPrefix,
+      @targetProvider, @targetContainer, @targetBlobPrefix, @targetOnedriveUpn, @targetOnedrivePath, @targetOnedriveHostUrl,
       @action, @confidence, 'manual', @notes, @createdByName, @createdByEmail
     )`
   ).run({
@@ -204,13 +232,16 @@ router.post('/mappings', async (req, res) => {
     sourceLibrary: sourceProvider === 'filesystem' ? null : (b.sourceLibrary || null),
     sourcePath: sourceProvider === 'filesystem' ? normalizeFsPath(b.sourcePath) : b.sourcePath,
     targetType: b.targetType || 'folder',
-    targetSiteUrl: targetProvider === 'azure_blob' ? null : (b.targetSiteUrl || null),
-    targetSiteName: targetProvider === 'azure_blob' ? null : (b.targetSiteName || null),
-    targetLibrary: targetProvider === 'azure_blob' ? null : (b.targetLibrary || null),
+    targetSiteUrl: (targetProvider === 'azure_blob' || targetProvider === 'onedrive') ? null : (b.targetSiteUrl || null),
+    targetSiteName: (targetProvider === 'azure_blob' || targetProvider === 'onedrive') ? null : (b.targetSiteName || null),
+    targetLibrary: (targetProvider === 'azure_blob' || targetProvider === 'onedrive') ? null : (b.targetLibrary || null),
     targetPath,
     targetProvider,
     targetContainer: targetProvider === 'azure_blob' ? b.targetContainer : null,
     targetBlobPrefix: targetProvider === 'azure_blob' ? (b.targetBlobPrefix || '') : null,
+    targetOnedriveUpn: targetProvider === 'onedrive' ? b.targetOnedriveUpn : null,
+    targetOnedrivePath: targetProvider === 'onedrive' ? (b.targetOnedrivePath || '') : null,
+    targetOnedriveHostUrl: targetProvider === 'onedrive' ? onedriveHostUrl : null,
     action: b.action || 'Migrate',
     confidence: b.confidence || null,
     notes: b.notes || null,
@@ -223,8 +254,21 @@ router.post('/mappings', async (req, res) => {
   // display/fallback, but saving a mapping is now enough by itself. Failures
   // don't block the save (the mapping is already valid); they're reported so
   // the UI can surface them.
+  //
+  // Also attempted for onedrive (the derived personal site) even though the
+  // engine's actual reads/writes there go through Graph's Files.ReadWrite.All,
+  // never this grant - Connect-PnPOnline still needs its SharePoint-audience
+  // handshake to succeed to mint that connection at all for a filesystem
+  // source (see 015_onedrive_target.sql). If Sites.Selected on personal
+  // sites turns out not to be needed (or not to work) in a given tenant,
+  // this failing here is harmless - it's a best-effort belt-and-braces
+  // attempt, not a requirement the onedrive target depends on.
   const grantResults = [];
-  const sitesToEnsure = [b.sourceSiteUrl, targetProvider === 'sharepoint' ? b.targetSiteUrl : null].filter(Boolean);
+  const sitesToEnsure = [
+    b.sourceSiteUrl,
+    targetProvider === 'sharepoint' ? b.targetSiteUrl : null,
+    targetProvider === 'onedrive' ? onedriveHostUrl : null,
+  ].filter(Boolean);
   for (const siteUrl of [...new Set(sitesToEnsure)]) {
     try {
       grantResults.push(await ensureEngineSiteAccess(req, siteUrl));

@@ -49,16 +49,32 @@ param(
     # job created before this option existed and remains the default - that
     # whole code path is untouched by the branches below. 'azure_blob'
     # archives into a container instead (see engine/lib/BlobTarget.psm1).
-    [ValidateSet('sharepoint', 'azure_blob')][string]$TargetProvider = 'sharepoint',
+    # 'onedrive' writes into a specific named user's OneDrive instead (see
+    # engine/lib/OneDriveTarget.psm1).
+    [ValidateSet('sharepoint', 'azure_blob', 'onedrive')][string]$TargetProvider = 'sharepoint',
     [string]$TargetSiteUrl,
     [string]$TargetLibrary,
-    # No longer [Parameter(Mandatory)]: azure_blob jobs never pass this -
-    # TargetBlobPrefix is the equivalent field for that destination. Every
-    # sharepoint-provider job still gets it from the orchestrator exactly as
-    # before, so this relaxation changes nothing for the existing path.
+    # No longer [Parameter(Mandatory)]: azure_blob/onedrive jobs never pass
+    # this - TargetBlobPrefix/TargetOneDrivePath are the equivalent fields
+    # for those destinations. Every sharepoint-provider job still gets it
+    # from the orchestrator exactly as before, so this relaxation changes
+    # nothing for the existing path.
     [AllowEmptyString()][string]$TargetPath = '',
     [string]$TargetContainer,
     [string]$TargetBlobPrefix,
+    # onedrive-target only: the destination user's UPN, and the folder
+    # (drive-relative) their migrated content is placed under. HostUrl is a
+    # real, connectable SharePoint URL for the user's OneDrive host (e.g.
+    # https://contoso-my.sharepoint.com), derived server-side from Graph's
+    # /users/{upn}/drive response at mapping-save time - PnP.PowerShell's
+    # Connect-PnPOnline needs SOME site URL to establish a connection (and
+    # with it, a cached Graph-audience token) even though the actual
+    # read/write traffic goes through Graph, never that site's own CSOM/REST
+    # surface. Only used when there is no other SharePoint connection already
+    # open in this job (a filesystem source) - see the connection setup below.
+    [string]$TargetOneDriveUpn,
+    [AllowEmptyString()][string]$TargetOneDrivePath = '',
+    [string]$TargetOneDriveHostUrl,
     # Secret: defaults from the environment - the orchestrator passes it
     # there (buildEngineSpawnEnv) because command lines are readable by any
     # local process on Windows. The parameter form still works for manual
@@ -119,6 +135,7 @@ Import-Module "$PSScriptRoot/lib/Retry.psm1" -Force
 Import-Module "$PSScriptRoot/lib/Verification.psm1" -Force
 Import-Module "$PSScriptRoot/lib/SharePointTree.psm1" -Force
 Import-Module "$PSScriptRoot/lib/BlobTarget.psm1" -Force
+Import-Module "$PSScriptRoot/lib/OneDriveTarget.psm1" -Force
 Import-Module "$PSScriptRoot/lib/FileSystemSource.psm1" -Force
 Import-Module PnP.PowerShell -ErrorAction Stop
 Import-Module Microsoft.PowerShell.ThreadJob -ErrorAction SilentlyContinue
@@ -215,14 +232,34 @@ function Invoke-VerificationPhase {
         [string]$TargetLib,
         [AllowEmptyString()][string]$TargetPathInLib,
         # azure_blob-target only:
-        [hashtable]$BlobCtx
+        [hashtable]$BlobCtx,
+        # onedrive-target only: @{ Connection; DriveId; PathRoot }
+        [hashtable]$OneDriveCtx
     )
     try {
         $isBlob = $TargetProvider -eq 'azure_blob'
+        $isOneDrive = $TargetProvider -eq 'onedrive'
         $isFsSource = $SourceProvider -eq 'filesystem'
         $hashLabel = if ($isBlob) { 'MD5' } else { 'QuickXorHash' }
         Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Verifying migration: comparing existence, size and content hash ($hashLabel) of every source file against its copy..." }
-        $result = if ($isFsSource) {
+        $result = if ($isOneDrive) {
+            # Both sides come from Graph (Get-GraphFileMap), so this is the
+            # same generic hash-based comparator every SharePoint target
+            # verification already uses - only the two map RESOLUTIONS differ
+            # (source: filesystem hash walk or the source drive; target:
+            # OneDriveCtx's drive, resolved once at connection setup).
+            $srcMap = if ($isFsSource) {
+                Get-FileSystemFileMap -RootPath $SourcePathInLib -IncludeHash -OnProgress {
+                    param($count)
+                    Write-PhaseProgress -Phase 'hashing_source' -Data @{ files = $count }
+                }
+            } else {
+                $srcDriveId = Get-GraphDriveId -Connection $SourceConn -SiteUrl $SourceSite -Library $SourceLib
+                Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib
+            }
+            $tgtMap = Get-GraphFileMap -Connection $OneDriveCtx.Connection -DriveId $OneDriveCtx.DriveId -RootPath $OneDriveCtx.PathRoot
+            Compare-MigratedFileMaps -SourceMap $srcMap -TargetMap $tgtMap
+        } elseif ($isFsSource) {
             # Local QuickXorHash of every source file vs the hash SharePoint
             # computed server-side for the uploaded copy - reads every source
             # byte, which is exactly what makes this verification honest.
@@ -297,12 +334,19 @@ function Invoke-VerificationPhase {
 $jobFailed = $false
 try {
     $isBlobTarget = $TargetProvider -eq 'azure_blob'
+    $isOneDriveTarget = $TargetProvider -eq 'onedrive'
     $isFsSource = $SourceProvider -eq 'filesystem'
     if ($isBlobTarget -and -not $BlobConnectionString) {
         throw 'Azure Blob archiving is not configured on this server (AZURE_BLOB_CONNECTION_STRING is empty). Set it and restart the server before running this job.'
     }
     if ($isFsSource -and $isBlobTarget) {
         throw 'A filesystem (file share) source can only migrate into SharePoint - archiving a file share to Azure Blob is not supported.'
+    }
+    if ($isOneDriveTarget -and -not $TargetOneDriveUpn) {
+        throw 'TargetOneDriveUpn is required when TargetProvider is onedrive.'
+    }
+    if ($isOneDriveTarget -and $isFsSource -and -not $TargetOneDriveHostUrl) {
+        throw 'TargetOneDriveHostUrl is required for a filesystem source migrating into OneDrive (there is no other SharePoint connection in this job to mint a Graph token from).'
     }
     if ($isFsSource -and ($CleanupSource -or $PurgeRecycleBin)) {
         # The engine deletes source content only via SharePoint's recycle bin
@@ -336,6 +380,7 @@ try {
 
     $targetConn = $null
     $blobCtx = $null
+    $oneDriveCtx = $null
     $sameSite = $false
     $effTargetSite = $null
     $effTargetLib = $null
@@ -383,6 +428,37 @@ try {
             Container    = $TargetContainer
             Prefix       = Get-BlobKey -Segments @($TargetBlobPrefix, $sourceLeaf)
         }
+    } elseif ($isOneDriveTarget) {
+        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Target: OneDrive for '$TargetOneDriveUpn'" }
+        # Same transit-staging folder as the blob target - sweep leftovers a
+        # force-killed previous run may have orphaned before this run creates
+        # new ones (OneDriveTarget.psm1 stages a SharePoint source's download
+        # there too; a filesystem source uploads straight from the share with
+        # no staging at all).
+        $staleTemp = Clear-StaleBlobTempFiles
+        if ($staleTemp -gt 0) {
+            Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Removed $staleTemp stale temp file(s) left by a previously interrupted run." }
+        }
+        # A SharePoint source's own connection already proved it can reach
+        # this tenant (preflight/enumeration succeeded) and its cached
+        # Graph-audience token works for ANY Graph endpoint regardless of
+        # which site -Url named - reuse it rather than opening a second
+        # connection. A filesystem source has no such connection, so it opens
+        # one against the target OneDrive's own host purely to mint that
+        # token (see the -TargetOneDriveHostUrl parameter's comment).
+        $oneDriveAnchorConn = if (-not $isFsSource) {
+            $sourceConn
+        } else {
+            Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Connecting to $TargetOneDriveHostUrl to authenticate Microsoft Graph calls" }
+            Connect-PnPOnline -Url $TargetOneDriveHostUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection
+        }
+        $targetOneDriveDriveId = Get-OneDriveDriveId -Connection $oneDriveAnchorConn -Upn $TargetOneDriveUpn
+        $targetOneDrivePathRoot = Join-UrlSegments @($TargetOneDrivePath, $sourceLeaf)
+        $oneDriveCtx = @{
+            Connection = $oneDriveAnchorConn
+            DriveId    = $targetOneDriveDriveId
+            PathRoot   = $targetOneDrivePathRoot
+        }
     } else {
         $sameSite = $TargetSiteUrl -and ($TargetSiteUrl.TrimEnd('/') -eq $SourceSiteUrl.TrimEnd('/'))
         if ($sameSite) {
@@ -408,6 +484,8 @@ try {
     }
     if ($isBlobTarget) {
         $verifyArgs.BlobCtx = $blobCtx
+    } elseif ($isOneDriveTarget) {
+        $verifyArgs.OneDriveCtx = $oneDriveCtx
     } else {
         $verifyArgs.TargetConn = $targetConn
         $verifyArgs.TargetSite = $effTargetSite
@@ -462,6 +540,8 @@ try {
         }
         $tgtMap = if ($isBlobTarget) {
             Get-BlobKeyMap -BlobEndpoint $blobCtx.BlobEndpoint -Container $blobCtx.Container -Sas $blobCtx.Sas -Prefix $blobCtx.Prefix
+        } elseif ($isOneDriveTarget) {
+            Get-GraphFileMap -Connection $oneDriveCtx.Connection -DriveId $oneDriveCtx.DriveId -RootPath $oneDriveCtx.PathRoot
         } else {
             $tgtDriveId = Get-GraphDriveId -Connection $targetConn -SiteUrl $effTargetSite -Library $effTargetLib
             Get-GraphFileMap -Connection $targetConn -DriveId $tgtDriveId -RootPath $targetPathInLib
@@ -621,6 +701,10 @@ try {
             }
         }
         Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Preflight OK: engine can read source library and access blob container '$($blobCtx.Container)'." }
+    } elseif ($isOneDriveTarget) {
+        # The drive itself was already resolved (and would have thrown) when
+        # the connection was set up above - nothing left to probe here.
+        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Preflight OK: engine can read the source$(if ($isFsSource) { ' path' } else { ' library' }) and access the OneDrive for '$TargetOneDriveUpn'." }
     } else {
         try {
             Get-PnPFolderItem -FolderSiteRelativeUrl $effTargetLib -ItemType Folder -Connection $targetConn -ErrorAction Stop | Out-Null
@@ -652,7 +736,7 @@ try {
     # original format so caches from jobs paused before this feature existed
     # still validate on resume.
     $sourceKey = if ($isFsSource) { "filesystem|$SourcePath" } else { "$SourceSiteUrl|$SourceLibrary|$SourcePath" }
-    $targetKey = if ($isBlobTarget) { 'blob' } else { "$effTargetSite|$effTargetLib|$targetPathInLib" }
+    $targetKey = if ($isBlobTarget) { 'blob' } elseif ($isOneDriveTarget) { "onedrive|$TargetOneDriveUpn|$($oneDriveCtx.PathRoot)" } else { "$effTargetSite|$effTargetLib|$targetPathInLib" }
     $tree = $null
     $cachedFoldersEnsuredFor = $null
     if ($TreeCachePath -and (Test-Path $TreeCachePath)) {
@@ -736,6 +820,19 @@ try {
         # affected files fail visibly at copy time and a fresh run (cache
         # expires after 6h, or delete data/tree-cache/<jobId>.json) recreates them.
         Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Target folders were already created by a previous run of this job - skipping folder pre-creation." }
+    } elseif ($isOneDriveTarget) {
+        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Pre-creating $($tree.Folders.Count) target folder(s) in OneDrive under '$($oneDriveCtx.PathRoot)'" }
+        Initialize-GraphDriveFolders -Connection $oneDriveCtx.Connection -DriveId $oneDriveCtx.DriveId -TargetRootPath $oneDriveCtx.PathRoot -RelativeFolderPaths $tree.Folders -OnProgress {
+            param($done, $total)
+            Write-PhaseProgress -Phase 'preparing_folders' -Data @{ done = $done; total = $total }
+        }
+        if ($TreeCachePath -and (Test-Path $TreeCachePath)) {
+            try {
+                $cacheUpdate = Get-Content -Path $TreeCachePath -Raw | ConvertFrom-Json
+                $cacheUpdate | Add-Member -NotePropertyName 'foldersEnsuredFor' -NotePropertyValue $targetKey -Force
+                $cacheUpdate | ConvertTo-Json -Depth 4 -Compress | Set-Content -Path $TreeCachePath -Encoding utf8
+            } catch {}
+        }
     } else {
         Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Pre-creating $($tree.Folders.Count) target folder(s) under '$targetRoot'" }
         Initialize-PnPTargetFolders -Connection $targetConn -TargetRootSiteRelativeUrl $targetRoot -RelativeFolderPaths $tree.Folders -OnProgress {
@@ -782,6 +879,11 @@ try {
         }
         if ($isBlobTarget) {
             $targetFileMap = Get-BlobKeyMap -BlobEndpoint $blobCtx.BlobEndpoint -Container $blobCtx.Container -Sas $blobCtx.Sas -Prefix $blobCtx.Prefix
+        } elseif ($isOneDriveTarget) {
+            $targetFileMap = Get-GraphFileMap -Connection $oneDriveCtx.Connection -DriveId $oneDriveCtx.DriveId -RootPath $oneDriveCtx.PathRoot -IncludeDetails -OnProgress {
+                param($count)
+                Write-PhaseProgress -Phase 'indexing_target' -Data @{ files = $count }
+            }
         } else {
             $tgtDriveId = Get-GraphDriveId -Connection $targetConn -SiteUrl $effTargetSite -Library $effTargetLib
             $targetFileMap = Get-GraphFileMap -Connection $targetConn -DriveId $tgtDriveId -RootPath $targetPathInLib -IncludeDetails -OnProgress {
@@ -1129,6 +1231,180 @@ try {
         try { Disconnect-PnPOnline -Connection $laneSourceConn } catch {}
     }
 
+    # OneDrive-target lane: for a SharePoint source, downloads each file
+    # (reusing the lane's own PnP connection, same Get-PnPFile-with-Graph-
+    # fallback approach as the blob lane) then uploads it into the target
+    # user's OneDrive via Microsoft Graph (OneDriveTarget.psm1 - Copy-PnPFile
+    # has no cross-resource-audience equivalent; see that module's header
+    # comment for why this target can't reuse the SharePoint-target code
+    # path at all). For a filesystem source, uploads the local/UNC file
+    # directly - no download/temp-staging phase, no source PnP connection at
+    # all (only a nominal one purely to mint a Graph token - see
+    # -TargetOneDriveHostUrl). Pushes the identical item_start/item_success/
+    # item_retry/item_failed/item_skipped NDJSON event shapes onto the same
+    # $resultQueue as every other lane, so the drain loop, checkpointing and
+    # adaptive concurrency below need no changes to support this target.
+    #
+    # Unlike the other lanes, there is no per-file HEAD/existence fallback
+    # when the prefetched $TargetFileMap is unavailable (a rare prefetch
+    # failure) - every file is simply re-uploaded. Safe (Graph's
+    # conflictBehavior=replace on the upload just overwrites identically),
+    # just less efficient than the other lanes' fallback in that rare case.
+    $laneScriptOneDrive = {
+        param($LaneIndex, $WorkQueue, $ResultQueue, $Shared, $IsFsSource, $ClientId, $TenantId,
+              $CertThumbprint, $CertificateBase64Encoded, $CertificatePassword, $ControlFilePath,
+              $SourceSiteUrl, $SourceSiteServerRelative, $SourceRoot, $SourcePathInLib, $SrcDriveId,
+              $TargetOneDriveHostUrl, $TargetDriveId, $TargetOneDrivePathRoot, $TargetFileMap)
+
+        Import-Module PnP.PowerShell -ErrorAction Stop
+        # NO -Force - same in-process clobbering hazard as every other lane
+        # (see the SharePoint lane above for the full explanation).
+        Import-Module "$using:PSScriptRoot/lib/Events.psm1"
+        Import-Module "$using:PSScriptRoot/lib/Retry.psm1"
+        Import-Module "$using:PSScriptRoot/lib/OneDriveTarget.psm1"
+
+        function local:Read-Control {
+            param([string]$Path)
+            try {
+                return (Get-Content -Path $Path -Raw -ErrorAction Stop | ConvertFrom-Json)
+            } catch {
+                return [pscustomobject]@{ pauseRequested = $false; cancelRequested = $false }
+            }
+        }
+
+        $certArgs = if ($CertificateBase64Encoded) {
+            @{ CertificateBase64Encoded = $CertificateBase64Encoded; CertificatePassword = (ConvertTo-SecureString -String $CertificatePassword -AsPlainText -Force) }
+        } else {
+            @{ Thumbprint = $CertThumbprint }
+        }
+        # A SharePoint source's own connection doubles as the Graph-audience
+        # token vehicle for the OneDrive upload calls too - Invoke-PnPGraphMethod
+        # calls arbitrary Graph endpoints off ANY connection regardless of
+        # which site -Url named (see Verification.psm1's Get-GraphDriveId,
+        # which already relies on this to query other sites' drives). A
+        # filesystem source has no source connection at all, so it opens one
+        # against the target OneDrive's own host purely to mint that token.
+        $laneSourceConn = if (-not $IsFsSource) {
+            Connect-PnPOnline -Url $SourceSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection
+        } else { $null }
+        $laneOneDriveConn = if ($IsFsSource) {
+            Connect-PnPOnline -Url $TargetOneDriveHostUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection
+        } else { $laneSourceConn }
+
+        while (-not $Shared.Stop) {
+            if ($LaneIndex -ge $Shared.TargetLaneCount) { break }
+
+            $item = $null
+            if (-not $WorkQueue.TryDequeue([ref]$item)) { break }
+
+            $relFromRoot = $item.RelativeFromRoot
+            $leafName = if ($IsFsSource) { $item.TargetName } else { $item.Name }
+            $relKey = if ($relFromRoot) { "$relFromRoot/$leafName" } else { $leafName }
+            $targetRelPath = "$TargetOneDrivePathRoot/$relKey".Trim('/').Replace('//', '/')
+            $sourceDisplayPath = if ($IsFsSource) {
+                Join-Path $item.SourceFolder $item.Name
+            } else {
+                "$SourceSiteServerRelative/$SourceRoot/$relFromRoot/$($item.Name)".Replace('//', '/')
+            }
+            $targetDisplayPath = "onedrive:/$targetRelPath"
+
+            $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_start' -Data @{
+                sourcePath = $sourceDisplayPath; targetPath = $targetDisplayPath; itemType = 'file'; bytes = [long]$item.Size
+            }))
+            if ($IsFsSource -and $item.Renamed) {
+                $ResultQueue.Enqueue((New-EngineEventJson -Type 'log' -Data @{
+                    level = 'warn'; message = "'$($item.Name)' is not a legal SharePoint/OneDrive name - uploading as '$($item.TargetName)'."
+                }))
+            }
+
+            # Skip/delta check: prefer the prefetched target index (memory
+            # lookup, zero network) - same rule as every other lane: same size
+            # AND target at least as new as the source. See the module-level
+            # comment above for why there is no per-file fallback here.
+            $alreadyDone = $false
+            if ($null -ne $TargetFileMap) {
+                $existing = $TargetFileMap[$relKey]
+                $alreadyDone = $existing -and
+                    ([long]$existing.Size -eq [long]$item.Size) -and
+                    (-not $item.Modified -or -not $existing.Modified -or $existing.Modified -ge [datetime]$item.Modified)
+            }
+
+            if ($alreadyDone) {
+                $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_skipped' -Data @{
+                    sourcePath = $sourceDisplayPath; targetPath = $targetDisplayPath; bytes = [long]$item.Size
+                    reason     = 'target already has a file of the same name and size'
+                }))
+            } else {
+                $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                $script:attemptsUsed = 0
+                $inflight = [hashtable]::Synchronized(@{
+                    SourcePath = $sourceDisplayPath; TargetPath = $targetDisplayPath
+                    Total = [long]$item.Size; Phase = $(if ($IsFsSource) { 'uploading' } else { 'downloading' }); BytesDone = [long]0; TempPath = $null
+                })
+                $Shared.InFlight[$LaneIndex] = $inflight
+                # GetNewClosure: same reason as the blob lane - scriptblocks
+                # resolve variables dynamically at the CALL site (inside
+                # OneDriveTarget.psm1's module scope, where $inflight doesn't
+                # exist) - the closure pins this iteration's reference.
+                $progress = {
+                    param($phase, $bytes, $temp = $null)
+                    $inflight.Phase = $phase
+                    $inflight.BytesDone = [long]$bytes
+                    if ($temp) { $inflight.TempPath = $temp }
+                }.GetNewClosure()
+                try {
+                    Invoke-WithRetry -MaxAttempts 5 -Action {
+                        if ($IsFsSource) {
+                            $localPath = Join-Path $item.SourceFolder $item.Name
+                            Send-GraphDriveFile -Connection $laneOneDriveConn -TempPath $localPath -DriveId $TargetDriveId -RelPath $targetRelPath -OnProgress $progress
+                        } else {
+                            # Drive-addressed Graph fallback for the download:
+                            # kicks in for %/# names (which Get-PnPFile cannot
+                            # fetch at all) and after any Get-PnPFile failure.
+                            # Unavailable (null) only if the prefetch couldn't
+                            # resolve the source drive id.
+                            $graphSource = if ($SrcDriveId) {
+                                @{ DriveId = $SrcDriveId; RelPath = "$SourcePathInLib/$relFromRoot/$($item.Name)".Trim('/').Replace('//', '/') }
+                            } else { $null }
+                            Save-OneDriveFileFromSharePoint -SourceConnection $laneSourceConn -SourceServerRelativeUrl $sourceDisplayPath `
+                                -TargetConnection $laneOneDriveConn -TargetDriveId $TargetDriveId -TargetRelPath $targetRelPath `
+                                -GraphSource $graphSource -OnProgress $progress
+                        }
+                    } -OnRetry {
+                        param($attempt, $waitMs, $reason, $statusCode, $message)
+                        $script:attemptsUsed = $attempt
+                        $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_retry' -Data @{
+                            sourcePath = $sourceDisplayPath; targetPath = $targetDisplayPath
+                            attempt    = $attempt; reason = $reason; waitMs = $waitMs; httpStatus = $statusCode
+                        }))
+                    }
+
+                    $sw.Stop()
+                    $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_success' -Data @{
+                        sourcePath = $sourceDisplayPath; targetPath = $targetDisplayPath
+                        bytes      = [long]$item.Size; durationMs = [int]$sw.ElapsedMilliseconds; httpStatus = 200
+                    }))
+                } catch {
+                    $sw.Stop()
+                    $statusCode = Get-HttpStatusCode -Exception $_.Exception
+                    $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_failed' -Data @{
+                        sourcePath = $sourceDisplayPath; targetPath = $targetDisplayPath
+                        error      = $_.Exception.Message; httpStatus = $statusCode; retryCount = $script:attemptsUsed
+                    }))
+                } finally {
+                    $null = $Shared.InFlight.Remove($LaneIndex)
+                }
+            }
+
+            $ctrl = Read-Control -Path $ControlFilePath
+            if ($ctrl.cancelRequested) { $Shared.Cancelled = $true; $Shared.Stop = $true; break }
+            if ($ctrl.pauseRequested) { $Shared.Paused = $true; $Shared.Stop = $true; break }
+        }
+
+        try { if ($laneSourceConn) { Disconnect-PnPOnline -Connection $laneSourceConn } } catch {}
+        try { if ($IsFsSource -and $laneOneDriveConn) { Disconnect-PnPOnline -Connection $laneOneDriveConn } } catch {}
+    }
+
     # Filesystem-source lane: reads each file from the share and uploads it
     # with Add-PnPFile (PnP chunks large uploads internally - there is no
     # server-side copy from a file share the way Copy-PnPFile works for
@@ -1318,7 +1594,14 @@ try {
 
     $lanes = @()
     for ($i = 0; $i -lt $Concurrency; $i++) {
-        if ($isFsSource) {
+        if ($isOneDriveTarget) {
+            $lanes += Start-ThreadJob -ScriptBlock $laneScriptOneDrive -ArgumentList @(
+                $i, $workQueue, $resultQueue, $shared, $isFsSource, $ClientId, $TenantId,
+                $CertThumbprint, $CertificateBase64Encoded, $CertificatePassword, $ControlFilePath,
+                $SourceSiteUrl, $sourceSiteServerRelative, $sourceRoot, $SourcePath, $srcDriveId,
+                $TargetOneDriveHostUrl, $oneDriveCtx.DriveId, $oneDriveCtx.PathRoot, $targetFileMap
+            )
+        } elseif ($isFsSource) {
             $lanes += Start-ThreadJob -ScriptBlock $laneScriptFileUpload -ArgumentList @(
                 $i, $workQueue, $resultQueue, $shared, $effTargetSite, $ClientId, $TenantId,
                 $CertThumbprint, $CertificateBase64Encoded, $CertificatePassword, $ControlFilePath,
@@ -1533,7 +1816,21 @@ try {
                     "$sourceSiteServerRelative/$sourceRoot/$relFromRoot/$($file.Name)".Replace('//', '/')
                 }
                 try {
-                    if ($isFsSource) {
+                    if ($isOneDriveTarget) {
+                        Invoke-WithRetry -MaxAttempts 3 -Action {
+                            $relPath = "$($oneDriveCtx.PathRoot)/$rel".Trim('/').Replace('//', '/')
+                            if ($isFsSource) {
+                                Send-GraphDriveFile -Connection $oneDriveCtx.Connection -TempPath $srcRel -DriveId $oneDriveCtx.DriveId -RelPath $relPath
+                            } else {
+                                $graphSource = if ($srcDriveId) {
+                                    @{ DriveId = $srcDriveId; RelPath = (Get-BlobKey -Segments @($SourcePath, $relFromRoot, $file.Name)) }
+                                } else { $null }
+                                Save-OneDriveFileFromSharePoint -SourceConnection $sourceConn -SourceServerRelativeUrl $srcRel `
+                                    -TargetConnection $oneDriveCtx.Connection -TargetDriveId $oneDriveCtx.DriveId -TargetRelPath $relPath `
+                                    -GraphSource $graphSource | Out-Null
+                            }
+                        }
+                    } elseif ($isFsSource) {
                         Invoke-WithRetry -MaxAttempts 3 -Action {
                             $tgtFolderSiteRel = "$targetRoot/$relFromRoot".TrimEnd('/').Replace('//', '/')
                             $repairStream = [System.IO.File]::OpenRead($srcRel)

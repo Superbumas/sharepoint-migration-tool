@@ -38,6 +38,18 @@
   for some source sites - it trades least-privilege for simplicity and
   requires tenant-wide admin consent.
 
+.PARAMETER EnableOneDriveTarget
+  Adds Microsoft Graph's Files.ReadWrite.All application permission, needed
+  for the "migrate into a specific user's OneDrive" target. This is a
+  TENANT-WIDE standing grant to every OneDrive and SharePoint site's file
+  content, a materially bigger blast radius than the per-site Sites.Selected
+  model everything else here uses - Sites.Selected does not reliably extend
+  to personal OneDrive site collections, which is why this exists as a
+  separate, deliberately opt-in switch rather than being requested by
+  default. See COMPLIANCE.md before enabling this in production. Also set
+  ENGINE_ONEDRIVE_TARGET_ENABLED=true in .env (this script does that for you)
+  and toggle it on the Settings page.
+
 .EXAMPLE
   ./New-AppRegistration.ps1 -SiteUrls "https://yourtenant.sharepoint.com/sites/HRLegacy","https://yourtenant.sharepoint.com/sites/Hub"
 #>
@@ -57,6 +69,7 @@ param(
     [int]$SecretValidityMonths = 12,
     [string]$EnvFilePath = "$PSScriptRoot/../.env",
     [switch]$UseTenantWideFallback,
+    [switch]$EnableOneDriveTarget,
     [switch]$ForceNewSecret
 )
 
@@ -131,6 +144,10 @@ $appRoleNames = @('Sites.Selected')
 if ($UseTenantWideFallback) {
     Write-Host 'UseTenantWideFallback set - adding Sites.ReadWrite.All application permission alongside Sites.Selected.' -ForegroundColor Yellow
     $appRoleNames += 'Sites.ReadWrite.All'
+}
+if ($EnableOneDriveTarget) {
+    Write-Host 'EnableOneDriveTarget set - adding Microsoft Graph Files.ReadWrite.All (tenant-wide file access; see the parameter help before using this in production).' -ForegroundColor Yellow
+    $appRoleNames += 'Files.ReadWrite.All'
 }
 
 $resourceAccess = @()
@@ -368,6 +385,7 @@ $managed = [ordered]@{
     ENGINE_CERT_THUMBPRINT       = $thumbprint
     ENGINE_CERT_PATH             = './setup/certs/migration-engine.pfx'
     ENGINE_PERMISSION_MODE       = $(if ($UseTenantWideFallback) { 'Sites.ReadWrite.All' } else { 'Sites.Selected' })
+    ENGINE_ONEDRIVE_TARGET_ENABLED = $(if ($EnableOneDriveTarget) { 'true' } else { 'false' })
     SESSION_SECRET               = (& $keep 'SESSION_SECRET' (New-RandomPassword -Length 32))
     # Generated here on first run so SETUP.md needs no separate openssl step;
     # NEVER regenerated on re-runs - changing it makes every already-stored
@@ -431,6 +449,18 @@ Write-Host '3) Fallback (this shared app only - not the per-project apps step 2 
 Write-Host '   if Sites.Selected proves too restrictive for some source sites (e.g. a huge number of sites,'
 Write-Host '   or a site with unusual sharing settings), re-run this script with -UseTenantWideFallback to'
 Write-Host '   add the Sites.ReadWrite.All application permission instead - consent is granted automatically.'
+
+if ($EnableOneDriveTarget) {
+    Write-Host ''
+    Write-Host '4) OneDrive target enabled: Files.ReadWrite.All was granted and ENGINE_ONEDRIVE_TARGET_ENABLED=true' -ForegroundColor Green
+    Write-Host '   was written to .env - the "OneDrive" target option will now appear in the UI. Each project'
+    Write-Host '   auto-provisions its own app (server/graph/provisionTenantApp.js); re-run that project''s'
+    Write-Host '   sign-in once more if it was provisioned before this permission existed.'
+} else {
+    Write-Host ''
+    Write-Host '4) OneDrive target: not enabled. Re-run this script with -EnableOneDriveTarget to add it -'
+    Write-Host '   see the parameter help for the tenant-wide permission tradeoff before doing so.'
+}
 
 Write-Host ''
 Write-Host 'This script is idempotent - re-run any time to repair a partial setup.' -ForegroundColor DarkGray

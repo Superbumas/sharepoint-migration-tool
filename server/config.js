@@ -71,6 +71,17 @@ module.exports = {
   // and rejected server-side if a job somehow requests it anyway.
   azureBlobConnectionString: required('AZURE_BLOB_CONNECTION_STRING', ''),
 
+  // Optional: migrate-into-a-user's-OneDrive target. Unlike the blob target
+  // this needs no stored secret - it rides the engine's existing app-only
+  // cert - but it DOES require the app registration to hold the
+  // Files.ReadWrite.All Graph permission (tenant-wide standing file access,
+  // a much bigger grant than the per-site Sites.Selected model everything
+  // else here uses - see setup/New-AppRegistration.ps1 -EnableOneDriveTarget
+  // and COMPLIANCE.md). Defaults off; hidden in the UI (see /api/settings
+  // onedriveTargetEnabled) and rejected server-side if a job somehow
+  // requests it anyway.
+  onedriveTargetEnabled: process.env.ENGINE_ONEDRIVE_TARGET_ENABLED === 'true',
+
   // Optional server-wide FALLBACK roots for the file-share (DFS) migration
   // source - the normal way is per-project via the Settings page
   // (projects.fs_source_roots); server/util/fsSource.js merges both.

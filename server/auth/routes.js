@@ -236,7 +236,7 @@ router.get('/auth/redirect', async (req, res, next) => {
         return res.redirect(`/auth/login?project=${project.id}`);
       } else {
         try {
-          const provisioned = await provisionTenantApp(result.accessToken, project.name);
+          const provisioned = await provisionTenantApp(result.accessToken, project.name, config.onedriveTargetEnabled);
           db.prepare(
             `UPDATE projects SET engine_client_id = ?, engine_cert_base64_encrypted = ?, engine_cert_password_encrypted = ?, engine_cert_expires_at = ? WHERE id = ?`
           ).run(

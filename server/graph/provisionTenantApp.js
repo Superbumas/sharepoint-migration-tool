@@ -87,7 +87,18 @@ function generateSelfSignedCertificate(commonName) {
 //
 // Every step uses the caller's own token, in their own tenant - Knowall IT's
 // shared app and credentials are never involved in any of this.
-async function provisionTenantApp(accessToken, projectName) {
+//
+// enableOneDriveTarget (from config.onedriveTargetEnabled) additionally
+// requests and grants Microsoft Graph's Files.ReadWrite.All - a Graph-only
+// permission (no SharePoint Online equivalent to request/grant, unlike
+// Sites.Selected below) needed for the "migrate into a specific user's
+// OneDrive" target, since Sites.Selected does not reliably extend to
+// personal OneDrive site collections. This is a TENANT-WIDE standing grant
+// to every OneDrive/SharePoint site's file content - see
+// setup/New-AppRegistration.ps1's -EnableOneDriveTarget parameter help and
+// COMPLIANCE.md for the tradeoff. Off by default; every project this server
+// provisions gets it only when the operator has turned the feature on.
+async function provisionTenantApp(accessToken, projectName, enableOneDriveTarget = false) {
   // Display name avoids product-name words (SharePoint, Microsoft, Office,
   // Azure, ...) - some client tenants' Entra ID admin-configured
   // "prohibited words" policy rejects app registration names containing
@@ -113,6 +124,11 @@ async function provisionTenantApp(accessToken, projectName) {
   );
   const sitesSelectedRole = graphSp.appRoles?.find((r) => r.value === 'Sites.Selected');
   if (!sitesSelectedRole) throw new Error("Could not find the 'Sites.Selected' application permission on Microsoft Graph's service principal.");
+  let filesReadWriteRole = null;
+  if (enableOneDriveTarget) {
+    filesReadWriteRole = graphSp.appRoles?.find((r) => r.value === 'Files.ReadWrite.All');
+    if (!filesReadWriteRole) throw new Error("Could not find the 'Files.ReadWrite.All' application permission on Microsoft Graph's service principal.");
+  }
 
   // 1b. Same lookup against SharePoint Online's own service principal - its
   // Sites.Selected is a different permission with a different role id, and
@@ -129,6 +145,9 @@ async function provisionTenantApp(accessToken, projectName) {
   // permission") and attaching its public certificate as a keyCredential -
   // only the public cert ever goes to Graph; the private key (inside the
   // PFX below) never leaves this function's return value.
+  const graphResourceAccess = [{ id: sitesSelectedRole.id, type: 'Role' }];
+  if (filesReadWriteRole) graphResourceAccess.push({ id: filesReadWriteRole.id, type: 'Role' });
+
   const app = await graphCall(accessToken, 'POST', '/applications', {
     displayName,
     signInAudience: 'AzureADMyOrg',
@@ -136,7 +155,7 @@ async function provisionTenantApp(accessToken, projectName) {
       { type: 'AsymmetricX509Cert', usage: 'Verify', key: certDerBase64, displayName: 'migration-engine' },
     ],
     requiredResourceAccess: [
-      { resourceAppId: MICROSOFT_GRAPH_APP_ID, resourceAccess: [{ id: sitesSelectedRole.id, type: 'Role' }] },
+      { resourceAppId: MICROSOFT_GRAPH_APP_ID, resourceAccess: graphResourceAccess },
       { resourceAppId: SHAREPOINT_ONLINE_APP_ID, resourceAccess: [{ id: spoSitesSelectedRole.id, type: 'Role' }] },
     ],
   });
@@ -159,6 +178,13 @@ async function provisionTenantApp(accessToken, projectName) {
     resourceId: spoSp.id,
     appRoleId: spoSitesSelectedRole.id,
   });
+  if (filesReadWriteRole) {
+    await graphCall(accessToken, 'POST', `/servicePrincipals/${sp.id}/appRoleAssignedTo`, {
+      principalId: sp.id,
+      resourceId: graphSp.id,
+      appRoleId: filesReadWriteRole.id,
+    });
+  }
 
   return { clientId: app.appId, certBase64: pfxBase64, certPassword: pfxPassword, certExpiresAt: expiresAt.toISOString() };
 }

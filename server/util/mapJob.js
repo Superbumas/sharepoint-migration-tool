@@ -23,6 +23,7 @@ function mapJob(row) {
     target: {
       type: row.target_type, siteUrl: row.target_site_url, library: row.target_library, path: row.target_path,
       provider: row.target_provider || 'sharepoint', container: row.target_container, blobPrefix: row.target_blob_prefix,
+      onedriveUpn: row.target_onedrive_upn, onedrivePath: row.target_onedrive_path, onedriveHostUrl: row.target_onedrive_host_url,
     },
     action: row.action,
     concurrency: row.concurrency,

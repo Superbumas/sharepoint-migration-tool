@@ -22,6 +22,7 @@ doubt; file paths are given for that purpose.
 | SharePoint → SharePoint | **No** - `Copy-PnPFile` is a server-side copy inside SharePoint Online | No |
 | File share → SharePoint | Yes - streamed from the share through the engine process to SharePoint (memory only) | No |
 | SharePoint → Azure Blob | Yes - each file is downloaded, hashed, and uploaded | **Transiently**: one file at a time under `%TEMP%\spmigrator-tmp`, deleted after its transfer; stale leftovers from a killed process are swept at the start of every blob run (`engine/lib/BlobTarget.psm1`) |
+| SharePoint or file share → a user's OneDrive (optional feature) | Yes for a SharePoint source (downloaded then uploaded via Microsoft Graph); a file-share source uploads directly from the share, nothing staged | **Transiently** for a SharePoint source only, same `%TEMP%\spmigrator-tmp` staging/sweep as the blob path (`engine/lib/OneDriveTarget.psm1`); nothing at rest for a file-share source |
 
 All Microsoft 365 / Azure traffic is HTTPS. Nothing is sent to any third
 party besides Microsoft (Graph/SharePoint Online) and, for blob archiving,
@@ -60,7 +61,15 @@ the same classification as the customer metadata inside it.
   `Sites.Selected` model: each tenant's dedicated app can only touch sites
   explicitly granted to it, with grants visible in that tenant's own
   Entra ID / SharePoint admin surface. No client secrets (SharePoint rejects
-  them), no tenant-wide standing content permission.
+  them), no tenant-wide standing content permission - **except** when the
+  optional OneDrive target is enabled (`ENGINE_ONEDRIVE_TARGET_ENABLED`,
+  SETUP.md): that feature requires Microsoft Graph's `Files.ReadWrite.All`,
+  a **tenant-wide standing read/write grant to every OneDrive and SharePoint
+  site's file content**, because `Sites.Selected` does not reliably extend to
+  personal OneDrive site collections. This is a deliberate, opt-in exception
+  to the per-site model above - review whether it's acceptable for a given
+  engagement before turning it on, and note it in that engagement's own
+  security documentation.
 
 ## 5. Access control
 
@@ -123,4 +132,6 @@ Customer file content stays within Microsoft 365 / the operator's Azure
 tenancy end-to-end, except the transient blob-staging file in §2 and the
 in-memory streaming of file-share uploads. Customer file *metadata* and the
 audit trail reside in SQLite on the operator's server for as long as the
-operator retains them.
+operator retains them. The optional OneDrive target does not change this
+residency picture - it only changes the *permission scope* used to reach it
+(§4).

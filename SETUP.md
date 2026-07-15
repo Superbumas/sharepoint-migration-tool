@@ -206,6 +206,50 @@ already holds a connection to that file server under a different user — run
 `net use \\server\share /delete` on the machine running the tool (as the account the
 tool runs under), or use the same user for every root on that server.
 
+### OneDrive target (SharePoint or file share → a specific user's OneDrive)
+
+Adds "A user's OneDrive" as a target choice on the Mappings page — the source can be
+either a SharePoint site/library or a file share (DFS/UNC/local disk).
+
+**The tradeoff, up front:** every other target in this tool uses Microsoft's
+`Sites.Selected` model — the engine can only touch sites explicitly granted to it,
+one at a time. `Sites.Selected` does not reliably extend to personal OneDrive site
+collections, so this target instead uses Microsoft Graph's **`Files.ReadWrite.All`**
+application permission — **tenant-wide standing read/write access to every OneDrive
+and SharePoint site's file content**, not just the ones this tool has been granted.
+This is a materially bigger blast radius than everything else in this tool. Read
+COMPLIANCE.md's note on this before enabling it in production, and enable it only if
+the OneDrive-migration use case is one you actually need.
+
+To enable it:
+
+1. Re-run the app registration script with the extra switch:
+   ```
+   pwsh -File setup/New-AppRegistration.ps1 -EnableOneDriveTarget
+   ```
+   This grants `Files.ReadWrite.All` (with automatic admin consent, same as every
+   other permission this script manages) and writes `ENGINE_ONEDRIVE_TARGET_ENABLED=true`
+   to `.env`. Restart the server afterward.
+2. Each project's own auto-provisioned engine app (created the first time someone signs
+   into that project) picks up the same permission automatically on its **next sign-in**
+   after the server restart — if a project was provisioned before this was enabled, have
+   someone from that project sign out and back in once.
+3. The "A user's OneDrive" target option now appears on the Mappings page. Search for the
+   destination person by name or email, optionally set a subfolder, and save the mapping
+   — the tool checks up front that the user actually has a provisioned OneDrive.
+
+**Troubleshooting:** a file-share-source job migrating into OneDrive needs the engine to
+open one connection purely to obtain a Microsoft Graph token (there's no SharePoint site
+of its own in that job otherwise) — it uses the target OneDrive's own site collection for
+this. If such a job fails at startup with an access-denied error establishing that
+connection, granting the engine's app `Sites.Selected` access to that specific personal
+site (the same "grant migration engine access" mechanism used for regular sites) is the
+fix; a SharePoint-source job never hits this since it reuses its own source connection.
+
+To disable it again: re-run the script **without** `-EnableOneDriveTarget` (this removes
+the permission grant from the app's declared scopes on the next Portal sync) and set
+`ENGINE_ONEDRIVE_TARGET_ENABLED=false` in `.env`, then restart the server.
+
 File-share jobs upload with live per-file progress bars, sanitize names SharePoint
 would reject (reported per file, deterministic so resume still works), skip
 `Thumbs.db`/`desktop.ini`/Office `~$` lock temps, and are verified with the same

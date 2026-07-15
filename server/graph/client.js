@@ -3,7 +3,7 @@ const { getGraphToken } = require('../auth/msal');
 
 const GRAPH_ROOT = 'https://graph.microsoft.com/v1.0';
 
-async function graphRequest(req, method, urlPath, { params, body } = {}) {
+async function graphRequest(req, method, urlPath, { params, body, headers } = {}) {
   const token = await getGraphToken(req);
   if (!token) {
     const err = new Error('No valid Graph token for signed-in user');
@@ -14,7 +14,7 @@ async function graphRequest(req, method, urlPath, { params, body } = {}) {
     const { data } = await axios.request({
       url: `${GRAPH_ROOT}${urlPath}`,
       method,
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${token}`, ...headers },
       params,
       data: body,
     });
@@ -32,8 +32,10 @@ async function graphRequest(req, method, urlPath, { params, body } = {}) {
 
 // All SharePoint browsing uses the signed-in user's own delegated token, so
 // the picker only ever shows sites/libraries/folders that user can already see.
-function graphGet(req, urlPath, params = {}) {
-  return graphRequest(req, 'GET', urlPath, { params });
+// `headers` is optional - only the OneDrive user search needs it so far
+// (Graph's $search on /users requires ConsistencyLevel: eventual).
+function graphGet(req, urlPath, params = {}, headers) {
+  return graphRequest(req, 'GET', urlPath, { params, headers });
 }
 
 function graphPost(req, urlPath, body) {

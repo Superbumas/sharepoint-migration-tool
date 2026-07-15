@@ -13,6 +13,7 @@ and broadcast live to the browser.
 | SharePoint site/library/folder | SharePoint (same or another site) | Server-side `Copy-PnPFile` — nothing passes through the tool |
 | File share (DFS / UNC / local disk) | SharePoint | Chunked upload with live per-file progress bars |
 | SharePoint site/library/folder | Azure Blob Storage container | Streamed download → block upload (archive/decommission scenario) |
+| SharePoint site/library/folder, or a file share (DFS / UNC / local disk) | A specific user's OneDrive | Download/read → Microsoft Graph upload (optional feature, needs the tenant-wide `Files.ReadWrite.All` permission — see SETUP.md) |
 
 Every path is **copy-only by design**: the engine never deletes or modifies source
 content during migration. Deleting a verified source afterward is a separate, explicit,
@@ -81,8 +82,8 @@ so the DB, the live UI, and the server console can never disagree about what hap
 
 **[SETUP.md](SETUP.md)** is the full operational guide — one-time operator setup,
 onboarding each client tenant (a couple of minutes, no scripts), optional features
-(Azure Blob archiving, file-share sources), and troubleshooting for the exact errors
-people actually hit.
+(Azure Blob archiving, file-share sources, OneDrive target), and troubleshooting for
+the exact errors people actually hit.
 
 The short version:
 
