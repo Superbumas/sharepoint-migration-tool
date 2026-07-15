@@ -38,6 +38,7 @@ function mapJob(row) {
     cleanup: safeParse(row.cleanup_json),
     cleanedAt: row.cleaned_at,
     createdBy: { name: row.created_by_name, email: row.created_by_email, upn: row.created_by_upn },
+    ownerUserId: row.owner_user_id,
     createdAt: row.created_at,
     approvedBy: row.approved_by_name ? { name: row.approved_by_name, email: row.approved_by_email, at: row.approved_at } : null,
     startedAt: row.started_at,

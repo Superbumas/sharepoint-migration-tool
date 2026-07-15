@@ -2,7 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const XLSX = require('xlsx');
 const { v4: uuid } = require('uuid');
-const { requireAuth, getActor, getTenantId } = require('../auth/middleware');
+const { requireAuth, getActor, getTenantId, ownerScope } = require('../auth/middleware');
 const { getDb } = require('../db');
 const { ensureEngineSiteAccess } = require('../graph/siteAccess');
 const { verifyUserHasDrive } = require('../graph/onedriveAccess');
@@ -48,13 +48,16 @@ function mapRow(row) {
     notes: row.notes,
     createdByName: row.created_by_name,
     createdByEmail: row.created_by_email,
+    ownerUserId: row.owner_user_id,
     createdAt: row.created_at,
   };
 }
 
 router.get('/mappings', (req, res) => {
   const db = getDb();
-  const rows = db.prepare('SELECT * FROM mappings WHERE tenant_id = ? ORDER BY created_at DESC').all(getTenantId(req));
+  const owner = ownerScope(req);
+  const rows = db.prepare(`SELECT * FROM mappings WHERE tenant_id = ?${owner.sql} ORDER BY created_at DESC`)
+    .all(getTenantId(req), ...owner.params);
   // Latest job per mapping (any status, including soft-deleted jobs - the
   // question "has this mapping been migrated?" doesn't reset when the job is
   // cleaned out of the queue view).
@@ -126,7 +129,9 @@ router.get('/mappings/crosswalk-template', (req, res) => {
 
 router.get('/mappings/:id', (req, res) => {
   const db = getDb();
-  const row = db.prepare('SELECT * FROM mappings WHERE id = ? AND tenant_id = ?').get(req.params.id, getTenantId(req));
+  const owner = ownerScope(req);
+  const row = db.prepare(`SELECT * FROM mappings WHERE id = ? AND tenant_id = ?${owner.sql}`)
+    .get(req.params.id, getTenantId(req), ...owner.params);
   if (!row) return res.status(404).json({ error: 'not_found' });
   res.json(mapRow(row));
 });
@@ -212,12 +217,12 @@ router.post('/mappings', async (req, res) => {
     : b.targetPath;
   db.prepare(
     `INSERT INTO mappings (
-      id, tenant_id, source_type, source_provider, source_site_url, source_site_name, source_library, source_path,
+      id, tenant_id, owner_user_id, source_type, source_provider, source_site_url, source_site_name, source_library, source_path,
       target_type, target_site_url, target_site_name, target_library, target_path,
       target_provider, target_container, target_blob_prefix, target_onedrive_upn, target_onedrive_path, target_onedrive_host_url,
       action, confidence, origin, notes, created_by_name, created_by_email
     ) VALUES (
-      @id, @tenantId, @sourceType, @sourceProvider, @sourceSiteUrl, @sourceSiteName, @sourceLibrary, @sourcePath,
+      @id, @tenantId, @ownerUserId, @sourceType, @sourceProvider, @sourceSiteUrl, @sourceSiteName, @sourceLibrary, @sourcePath,
       @targetType, @targetSiteUrl, @targetSiteName, @targetLibrary, @targetPath,
       @targetProvider, @targetContainer, @targetBlobPrefix, @targetOnedriveUpn, @targetOnedrivePath, @targetOnedriveHostUrl,
       @action, @confidence, 'manual', @notes, @createdByName, @createdByEmail
@@ -225,6 +230,7 @@ router.post('/mappings', async (req, res) => {
   ).run({
     id,
     tenantId: getTenantId(req),
+    ownerUserId: actor.id,
     sourceType: b.sourceType || 'folder',
     sourceProvider,
     sourceSiteUrl: sourceProvider === 'filesystem' ? null : (b.sourceSiteUrl || null),
@@ -282,7 +288,9 @@ router.post('/mappings', async (req, res) => {
 
 router.delete('/mappings/:id', (req, res) => {
   const db = getDb();
-  const mapping = db.prepare('SELECT id FROM mappings WHERE id = ? AND tenant_id = ?').get(req.params.id, getTenantId(req));
+  const owner = ownerScope(req);
+  const mapping = db.prepare(`SELECT id FROM mappings WHERE id = ? AND tenant_id = ?${owner.sql}`)
+    .get(req.params.id, getTenantId(req), ...owner.params);
   if (!mapping) return res.status(404).json({ error: 'not_found' });
   const inUse = db.prepare('SELECT COUNT(*) AS n FROM jobs WHERE mapping_id = ?').get(mapping.id);
   if (inUse.n > 0) {
@@ -335,10 +343,10 @@ router.post('/mappings/import', upload.single('file'), (req, res) => {
   const batchId = uuid();
   const insert = db.prepare(
     `INSERT INTO mappings (
-      id, tenant_id, source_type, source_path, target_type, target_site_url, target_library, target_path,
+      id, tenant_id, owner_user_id, source_type, source_path, target_type, target_site_url, target_library, target_path,
       action, confidence, origin, crosswalk_batch_id, crosswalk_row_ref, notes, created_by_name, created_by_email
     ) VALUES (
-      @id, @tenantId, 'folder', @sourcePath, 'folder', @targetSiteUrl, @targetLibrary, @targetPath,
+      @id, @tenantId, @ownerUserId, 'folder', @sourcePath, 'folder', @targetSiteUrl, @targetLibrary, @targetPath,
       @action, @confidence, 'crosswalk', @batchId, @rowRef, @notes, @createdByName, @createdByEmail
     )`
   );
@@ -377,6 +385,7 @@ router.post('/mappings/import', upload.single('file'), (req, res) => {
       insert.run({
         id,
         tenantId,
+        ownerUserId: actor.id,
         sourcePath: String(sourcePath).trim(),
         targetSiteUrl: targetSiteUrl ? String(targetSiteUrl).trim() : null,
         targetLibrary: String(targetLibrary).trim(),

@@ -1,6 +1,6 @@
 const express = require('express');
 const PDFDocument = require('pdfkit');
-const { requireAuth, getTenantId } = require('../auth/middleware');
+const { requireAuth, getTenantId, canAccessRow } = require('../auth/middleware');
 const { getDb } = require('../db');
 
 const router = express.Router();
@@ -139,7 +139,7 @@ router.get('/jobs/:id/report.pdf', (req, res, next) => {
   try {
     const db = getDb();
     const job = db.prepare('SELECT * FROM jobs WHERE id = ? AND tenant_id = ?').get(req.params.id, getTenantId(req));
-    if (!job) return res.status(404).json({ error: 'not_found' });
+    if (!job || !canAccessRow(req, job)) return res.status(404).json({ error: 'not_found' });
     const mapping = job.mapping_id ? db.prepare('SELECT * FROM mappings WHERE id = ?').get(job.mapping_id) : null;
     const items = db.prepare('SELECT source_path, target_path, status, size_bytes, duration_ms, error_message FROM job_items WHERE job_id = ? ORDER BY source_path').all(job.id);
     const lifecycle = db.prepare(

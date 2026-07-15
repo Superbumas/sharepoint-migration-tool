@@ -33,6 +33,45 @@ function engineCredentialUsable(project) {
 // actually requested.
 const PROJECT_PROVISION_SCOPES = [...config.delegatedScopes, 'Application.ReadWrite.All', 'AppRoleAssignment.ReadWrite.All'];
 
+// Every identity string this sign-in could be known by, normalized to plain
+// user@domain lowercase. B2B guests matter here: a knowall.net user signing
+// into a client tenant they're a guest in authenticates fine, but their UPN
+// *in that tenant* is the mangled `user_knowall.net#EXT#@client.onmicrosoft.com`
+// form - un-mangle it so the domain allowlist still recognizes them.
+function accountIdentities(account) {
+  const candidates = [
+    account?.username,
+    account?.idTokenClaims?.preferred_username,
+    account?.idTokenClaims?.email,
+    account?.idTokenClaims?.upn,
+  ].filter(Boolean).map((s) => String(s).toLowerCase());
+  const out = new Set();
+  for (const c of candidates) {
+    out.add(c);
+    const extIdx = c.indexOf('#ext#');
+    if (extIdx > 0) {
+      // user_domain#EXT#@tenant -> user@domain (last '_' before #EXT# is the
+      // mangled '@'; earlier underscores belong to the username itself).
+      const mangled = c.slice(0, extIdx);
+      const lastUnderscore = mangled.lastIndexOf('_');
+      if (lastUnderscore > 0) out.add(`${mangled.slice(0, lastUnderscore)}@${mangled.slice(lastUnderscore + 1)}`);
+    }
+  }
+  return [...out];
+}
+
+// The "only our team may sign in" gate (ALLOWED_LOGIN_DOMAINS in .env).
+// Checked on every sign-in leg - ordinary, project-bound, provisioning and
+// repair alike - so a client-tenant GA account can only use this instance if
+// its domain is explicitly listed. Empty list = no restriction.
+function loginAllowed(account) {
+  if (!config.allowedLoginDomains.length) return true;
+  return accountIdentities(account).some((id) => {
+    const domain = id.split('@')[1];
+    return domain && config.allowedLoginDomains.includes(domain);
+  });
+}
+
 router.get('/auth/login', async (req, res, next) => {
   try {
     const { verifier, challenge } = generatePkcePair();
@@ -164,6 +203,14 @@ router.get('/auth/redirect', async (req, res, next) => {
       codeVerifier: req.session.pkceVerifier,
     });
     persistMsalCache(req.session, client);
+
+    // Team allowlist gate - BEFORE anything is written to the session or DB.
+    // A disallowed account gets a clean signed-out state and a clear message,
+    // never a half-authenticated session.
+    if (!loginAllowed(result.account)) {
+      console.warn('[auth] Rejected sign-in for', result.account?.username, '- not in ALLOWED_LOGIN_DOMAINS');
+      return req.session.destroy(() => res.redirect('/?authError=account_not_allowed'));
+    }
 
     req.session.account = result.account;
     // MSAL's AccountInfo already carries the real tenant GUID - this is the
@@ -348,16 +395,31 @@ async function hydrateUserProfile(req) {
     upn: me.userPrincipalName,
     photoDataUrl,
   };
-  req.session.profile = profile;
+
+  // Role resolution: ADMIN_UPNS force-promotes on every login (so promoting
+  // a teammate is a .env edit + their next sign-in, no DB surgery). An
+  // existing row's role is otherwise preserved - the CASE keeps a manually
+  // promoted admin an admin even though this login computed 'member'.
+  // Guests: match ADMIN_UPNS against every identity form of the account
+  // (home UPN and mangled #EXT# UPN), same as the login allowlist.
+  const identities = accountIdentities(req.session.account)
+    .concat([profile.upn, profile.email].filter(Boolean).map((s) => s.toLowerCase()));
+  const computedRole = config.adminUpns.some((u) => identities.includes(u)) ? 'admin' : 'member';
 
   const db = getDb();
   db.prepare(
-    `INSERT INTO users (id, display_name, email, upn, photo_data_url, tenant_id, last_login_at)
-     VALUES (@id, @displayName, @email, @upn, @photoDataUrl, @tenantId, datetime('now'))
+    `INSERT INTO users (id, display_name, email, upn, photo_data_url, tenant_id, role, last_login_at)
+     VALUES (@id, @displayName, @email, @upn, @photoDataUrl, @tenantId, @role, datetime('now'))
      ON CONFLICT(id) DO UPDATE SET
        display_name=excluded.display_name, email=excluded.email, upn=excluded.upn,
-       photo_data_url=excluded.photo_data_url, tenant_id=excluded.tenant_id, last_login_at=excluded.last_login_at`
-  ).run({ ...profile, tenantId: req.session.tenantId });
+       photo_data_url=excluded.photo_data_url, tenant_id=excluded.tenant_id, last_login_at=excluded.last_login_at,
+       role=CASE WHEN excluded.role='admin' THEN 'admin' ELSE users.role END`
+  ).run({ ...profile, tenantId: req.session.tenantId, role: computedRole });
+
+  // Read back rather than trusting computedRole - the CASE above may have
+  // kept a stored 'admin' this login didn't compute.
+  profile.role = db.prepare('SELECT role FROM users WHERE id = ?').get(profile.id)?.role || 'member';
+  req.session.profile = profile;
 }
 
 router.get('/api/me', (req, res) => {
@@ -393,7 +455,13 @@ router.get('/api/me', (req, res) => {
       },
     };
   }
-  res.json({ ...req.session.profile, project: projectInfo });
+  // Role is read live from the DB (not the login-time session snapshot) so a
+  // promotion/demotion takes effect on the next page load, not the next login.
+  const role = db.prepare('SELECT role FROM users WHERE id = ?').get(req.session.profile.id)?.role || 'member';
+  res.json({ ...req.session.profile, role, project: projectInfo });
 });
 
 module.exports = router;
+// Exported for tests (engine/tests) - not used by any other runtime module.
+module.exports.accountIdentities = accountIdentities;
+module.exports.loginAllowed = loginAllowed;

@@ -48,6 +48,25 @@ module.exports = {
 
   sessionSecret: required('SESSION_SECRET', 'dev-only-insecure-secret'),
 
+  // Restricts who may sign in at all, by the DOMAIN of the authenticated
+  // account (e.g. `ALLOWED_LOGIN_DOMAINS=knowall.net`) - the "only our team
+  // uses this instance" control. Comma/space-separated, case-insensitive,
+  // matched against the account's UPN/email including the un-mangled home
+  // UPN of B2B guest accounts (user_domain#EXT#@tenant... forms). Empty =
+  // no restriction (the pre-existing behaviour). NOTE: this is checked on
+  // EVERY sign-in leg, including client-tenant project sign-ins - a client's
+  // own GA account can only sign in if its domain is listed here too.
+  allowedLoginDomains: (process.env.ALLOWED_LOGIN_DOMAINS || '')
+    .split(/[,\s]+/).map((d) => d.trim().toLowerCase()).filter(Boolean),
+
+  // UPNs (comma/space-separated, case-insensitive) force-promoted to the
+  // 'admin' role at every login - admins see every user's mappings/jobs,
+  // members only their own. Users that existed before roles were introduced
+  // are grandfathered as admin (see server/db/index.js); everyone else
+  // defaults to 'member'.
+  adminUpns: (process.env.ADMIN_UPNS || '')
+    .split(/[,\s]+/).map((u) => u.trim().toLowerCase()).filter(Boolean),
+
   sqliteDbPath: required('SQLITE_DB_PATH', './data/migration.db'),
 
   defaultJobConcurrency: parseInt(process.env.DEFAULT_JOB_CONCURRENCY || '4', 10),

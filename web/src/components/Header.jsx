@@ -66,7 +66,14 @@ export default function Header() {
           <div className="flex items-center gap-3">
             <ThemeToggle />
             <div className="text-right leading-tight">
-              <div className="text-sm font-medium text-slate-800">{user.displayName}</div>
+              <div className="text-sm font-medium text-slate-800 flex items-center justify-end gap-1.5">
+                {user.displayName}
+                {user.role === 'admin' && (
+                  <span className="text-[10px] font-semibold uppercase tracking-wide text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-px" title="Admin - sees every user's mappings and jobs">
+                    Admin
+                  </span>
+                )}
+              </div>
               <div className="text-xs text-slate-500">{user.email}</div>
             </div>
             {user.photoDataUrl ? (
