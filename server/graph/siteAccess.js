@@ -51,4 +51,18 @@ async function ensureEngineSiteAccess(req, siteUrl) {
   return { siteUrl, ...result };
 }
 
-module.exports = { ensureEngineSiteAccess, ensureEngineSiteAccessBySiteId, resolveEngineClientId };
+// Read-only counterpart of the above, for the permissions health check:
+// reports whether this project's engine identity already holds a fullcontrol
+// grant on the site, WITHOUT creating or upgrading one. Uses the same
+// Sites.FullControl.All delegated read the grant path already relies on.
+async function checkEngineSiteAccess(req, siteUrl) {
+  const engineClientId = resolveEngineClientId(req);
+  const siteId = await resolveSiteId(req, siteUrl);
+  const existing = await graphGet(req, `/sites/${siteId}/permissions`);
+  const ourGrant = (existing.value || []).find((p) =>
+    (p.grantedToIdentitiesV2 || p.grantedToIdentities || []).some((g) => g.application?.id === engineClientId)
+  );
+  return { siteUrl, granted: !!(ourGrant && (ourGrant.roles || []).includes('fullcontrol')) };
+}
+
+module.exports = { ensureEngineSiteAccess, ensureEngineSiteAccessBySiteId, checkEngineSiteAccess, resolveEngineClientId };

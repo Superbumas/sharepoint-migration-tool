@@ -147,7 +147,13 @@ if ($UseTenantWideFallback) {
 }
 if ($EnableOneDriveTarget) {
     Write-Host 'EnableOneDriveTarget set - adding Microsoft Graph Files.ReadWrite.All (tenant-wide file access; see the parameter help before using this in production).' -ForegroundColor Yellow
+    # App-only: what the ENGINE uses to write into a user's OneDrive.
     $appRoleNames += 'Files.ReadWrite.All'
+    # Delegated: what the signed-in admin's BROWSER uses to FIND the target
+    # user in the OneDrive target picker (GET /users?$search=). Without this
+    # the picker's search box 403s even though the engine could write fine -
+    # the two are separate permissions on separate token audiences.
+    $delegatedScopeNames += 'User.Read.All'
 }
 
 $resourceAccess = @()
@@ -381,7 +387,7 @@ $managed = [ordered]@{
     CLIENT_SECRET                = $clientSecret
     REDIRECT_URI                 = $RedirectUri
     POST_LOGOUT_REDIRECT_URI     = $PostLogoutRedirectUri
-    DELEGATED_SCOPES             = 'openid profile email offline_access User.Read Sites.Read.All Files.Read.All Sites.FullControl.All'
+    DELEGATED_SCOPES             = $(if ($EnableOneDriveTarget) { 'openid profile email offline_access User.Read User.Read.All Sites.Read.All Files.Read.All Sites.FullControl.All' } else { 'openid profile email offline_access User.Read Sites.Read.All Files.Read.All Sites.FullControl.All' })
     ENGINE_CERT_THUMBPRINT       = $thumbprint
     ENGINE_CERT_PATH             = './setup/certs/migration-engine.pfx'
     ENGINE_PERMISSION_MODE       = $(if ($UseTenantWideFallback) { 'Sites.ReadWrite.All' } else { 'Sites.Selected' })

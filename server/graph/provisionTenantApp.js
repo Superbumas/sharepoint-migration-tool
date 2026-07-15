@@ -189,4 +189,80 @@ async function provisionTenantApp(accessToken, projectName, enableOneDriveTarget
   return { clientId: app.appId, certBase64: pfxBase64, certPassword: pfxPassword, certExpiresAt: expiresAt.toISOString() };
 }
 
-module.exports = { provisionTenantApp };
+// Idempotently brings an EXISTING project's own engine app up to the current
+// required app-only permission set, WITHOUT re-provisioning (no new app
+// identity, so the per-site Sites.Selected grants that app already holds all
+// survive). This is the "Re-sync engine app permissions" repair: the fix for
+// a project that was provisioned before a permission existed - most
+// concretely, the projects provisioned before the OneDrive target added
+// Files.ReadWrite.All, which otherwise can't write to OneDrive at all.
+//
+// Requires an access token carrying Application.ReadWrite.All +
+// AppRoleAssignment.ReadWrite.All (the same provisioning-leg scopes
+// provisionTenantApp needs) - the caller obtains it via the repair login leg
+// in server/auth/routes.js.
+//
+// Two things are ensured, because either alone is insufficient: the app's
+// requiredResourceAccess MANIFEST must DECLARE the roles (SharePoint's own
+// CSOM/REST authorization was observed not to honor an assignment with no
+// matching declaration), and the service principal must actually be ASSIGNED
+// them. Both are idempotent.
+async function ensureEngineAppRoles(accessToken, project, enableOneDriveTarget = false) {
+  if (!project?.engine_client_id) {
+    // A legacy project still on the shared engine app has no per-project app
+    // to repair - the shared app's permissions are managed by re-running
+    // setup/New-AppRegistration.ps1, not from here.
+    return { ok: true, skipped: true, reason: 'This project uses the shared engine app - change its permissions by re-running setup/New-AppRegistration.ps1.' };
+  }
+
+  const graphSp = await graphCall(accessToken, 'GET', `/servicePrincipals(appId='${MICROSOFT_GRAPH_APP_ID}')?$select=id,appRoles`);
+  const spoSp = await graphCall(accessToken, 'GET', `/servicePrincipals(appId='${SHAREPOINT_ONLINE_APP_ID}')?$select=id,appRoles`);
+  const graphSitesSelected = graphSp.appRoles?.find((r) => r.value === 'Sites.Selected');
+  const spoSitesSelected = spoSp.appRoles?.find((r) => r.value === 'Sites.Selected');
+  if (!graphSitesSelected || !spoSitesSelected) throw new Error('Could not resolve the required Sites.Selected app roles.');
+  const graphFilesReadWrite = enableOneDriveTarget ? graphSp.appRoles?.find((r) => r.value === 'Files.ReadWrite.All') : null;
+  if (enableOneDriveTarget && !graphFilesReadWrite) throw new Error("Could not resolve the 'Files.ReadWrite.All' app role on Microsoft Graph's service principal.");
+
+  // Desired Graph roles: Sites.Selected always, plus Files.ReadWrite.All when
+  // the OneDrive target is on. The SPO block is always just Sites.Selected.
+  const graphRoleIds = [graphSitesSelected.id];
+  if (graphFilesReadWrite) graphRoleIds.push(graphFilesReadWrite.id);
+
+  // 1. Manifest: overwrite this app's requiredResourceAccess for the two
+  // resources to exactly the desired set. Safe to overwrite wholesale - these
+  // engine apps are created by provisionTenantApp with only these two
+  // resources and nothing else.
+  const appObj = await graphCall(accessToken, 'GET', `/applications(appId='${project.engine_client_id}')?$select=id,requiredResourceAccess`);
+  await graphCall(accessToken, 'PATCH', `/applications/${appObj.id}`, {
+    requiredResourceAccess: [
+      { resourceAppId: MICROSOFT_GRAPH_APP_ID, resourceAccess: graphRoleIds.map((id) => ({ id, type: 'Role' })) },
+      { resourceAppId: SHAREPOINT_ONLINE_APP_ID, resourceAccess: [{ id: spoSitesSelected.id, type: 'Role' }] },
+    ],
+  });
+
+  // 2. Assignments: add any missing app-role assignment on the app's own
+  // service principal. Reading the existing assignments first keeps this a
+  // no-op when everything is already granted.
+  const engineSp = await graphCall(accessToken, 'GET', `/servicePrincipals(appId='${project.engine_client_id}')?$select=id`);
+  const existing = await graphCall(accessToken, 'GET', `/servicePrincipals/${engineSp.id}/appRoleAssignments?$top=200`);
+  const have = new Set((existing.value || []).map((a) => `${a.resourceId}:${a.appRoleId}`));
+
+  const required = [
+    { resourceId: graphSp.id, appRoleId: graphSitesSelected.id, label: 'Microsoft Graph / Sites.Selected' },
+    { resourceId: spoSp.id, appRoleId: spoSitesSelected.id, label: 'SharePoint Online / Sites.Selected' },
+  ];
+  if (graphFilesReadWrite) required.push({ resourceId: graphSp.id, appRoleId: graphFilesReadWrite.id, label: 'Microsoft Graph / Files.ReadWrite.All' });
+
+  const added = [];
+  const alreadyHad = [];
+  for (const r of required) {
+    if (have.has(`${r.resourceId}:${r.appRoleId}`)) { alreadyHad.push(r.label); continue; }
+    await graphCall(accessToken, 'POST', `/servicePrincipals/${engineSp.id}/appRoleAssignedTo`, {
+      principalId: engineSp.id, resourceId: r.resourceId, appRoleId: r.appRoleId,
+    });
+    added.push(r.label);
+  }
+  return { ok: true, clientId: project.engine_client_id, added, alreadyHad };
+}
+
+module.exports = { provisionTenantApp, ensureEngineAppRoles };
