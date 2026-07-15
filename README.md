@@ -45,6 +45,13 @@ deletion time).
   as a "Project" via a Global Admin sign-in. Every project gets its own auto-provisioned
   Azure AD app (certificate auth, `Sites.Selected` model) inside the client's own
   tenant — per-site grants, no tenant-wide standing access, no shared credentials.
+- **Team accounts and roles.** Sign-in can be locked to your own staff domains
+  (`ALLOWED_LOGIN_DOMAINS` — B2B-guest aware, so your people are recognized inside
+  client tenants too). Each user gets their own mappings, jobs, and dashboard;
+  admins (`ADMIN_UPNS`) see and manage everything. A team member's identity sign-in
+  asks only for `User.Read` — the heavy Graph scopes are requested only when opening
+  a project. Client-tenant GAs onboard through their project's own sign-in link
+  without needing to be on the domain list.
 - **File-share sources handle real-world DFS mess.** Names SharePoint rejects
   (trailing dots/spaces, `"*:<>?/\|`, reserved device names) are deterministically
   sanitized and reported per file; Office lock temps and `Thumbs.db`/`desktop.ini`

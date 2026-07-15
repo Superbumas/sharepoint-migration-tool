@@ -24,6 +24,18 @@ The tool uses two kinds of Azure AD apps, and mixing them up is the #1 setup mis
   project still on the setup script's shared certificate - it keeps working via a
   fallback and upgrades itself to a dedicated app on its next admin sign-in.)
 
+There are also two kinds of **sign-in**, with different consent footprints:
+
+- **Identity sign-in** (the generic "Sign in with Microsoft" button): establishes who
+  the team member is. Asks only for `User.Read` - a one-line consent. If
+  `ALLOWED_LOGIN_DOMAINS` is set (Part 4), only your own staff domains may use it.
+- **Project sign-in** (a specific project's own "Sign in" link on the Projects page):
+  working against that tenant. Asks for the full delegated scopes (site browsing,
+  file reads, `Sites.FullControl.All` for engine grants) and, on a project's first
+  sign-in, the app-creation scopes that provision its engine app. This is the leg a
+  client tenant's GA uses - it works for them even when the domain allowlist is on,
+  as long as the project exists and is bound to (or being bound to) their tenant.
+
 The rule that follows: **the setup script is run once, signed into your own company
 tenant - never a client's.** Tenants are onboarded just by signing in (Part 2).
 Running the setup script signed into a client's tenant no longer breaks anything
@@ -131,14 +143,17 @@ Open `http://localhost:<PORT>` (default 3000).
 This is the part that's genuinely just clicking through the browser - no scripts, no
 Azure Portal, nothing outside the app.
 
-1. Open the tool and click **Sign in with Microsoft**, using the tenant's **Global
-   Admin account** (for a client migration, that means the client's GA - not your own
-   tenant's account). That's it: the tool finds that tenant's project or creates one
-   automatically (named after the sign-in domain), and switching between tenants later
-   is the **Projects** page in the nav bar - every project has its own "Sign in" link.
-2. Prefer a friendlier project name than the domain? Create it first: **Projects →
-   + New project**, type the name (e.g. "Contoso Ltd"), then sign in with the tenant's
-   GA when redirected - the project binds to whatever tenant signs into it first.
+1. Create the project first: **Projects → + New project**, type the name (e.g.
+   "Contoso Ltd"). (With `ALLOWED_LOGIN_DOMAINS` set - see Part 4 - this order is
+   required, not just nicer: the client's GA account isn't on your domain list, so
+   the generic sign-in button rejects them; only their project's own sign-in link
+   lets them through, and only for the tenant that project is bound to.)
+2. Sign into that project with the tenant's **Global Admin account** (for a client
+   migration, that means the client's GA - not your own tenant's account) - either
+   click the project's "Sign in" link yourself with their credentials, or send the
+   link (`/auth/login?project=<id>`) to the client's GA to click. The project binds
+   to whichever tenant signs into it first. Switching between tenants later is the
+   **Projects** page in the nav bar - every project has its own "Sign in" link.
 3. On a tenant's first sign-in, Azure AD asks the GA to consent to a few permissions.
    Most Global Admins see this as a single "Accept" click (their tenant's own sign-in
    auto-offers "consent on behalf of your organization" for admin-restricted scopes).
@@ -305,6 +320,34 @@ can't do without mount gymnastics. One VM, one service, everyone uses the browse
    ```
    (A Task Scheduler "At startup" task running `node server\index.js` in `C:\migrator`
    works too.) Team members browse to `http://YOUR-VM-NAME:3000` and sign in.
+
+### Locking sign-in to your team, and who sees what
+
+Two `.env` settings turn a shared instance into a proper team tool:
+
+```
+ALLOWED_LOGIN_DOMAINS=yourcompany.com
+ADMIN_UPNS=you@yourcompany.com
+```
+
+- **`ALLOWED_LOGIN_DOMAINS`** (comma/space-separated, case-insensitive) restricts the
+  generic sign-in to accounts from your own domains. It recognizes B2B guests: a
+  team member signing into a client tenant they're a guest in authenticates with a
+  mangled UPN (`user_yourcompany.com#EXT#@client.onmicrosoft.com`), which is
+  un-mangled before matching - so one list covers your people everywhere. Client
+  tenant GAs do **not** need to be listed: they sign in through their project's own
+  link (see Part 2). Empty/unset = anyone with a Microsoft work account may sign in.
+- **Per-user visibility.** Every mapping and job belongs to the user who created it.
+  Members see (and can act on) only their own, plus anything created before this
+  feature existed; the dashboard, KPIs, live updates, and audit export follow the
+  same rule. A teammate's job UUID returns 404, exactly like a foreign tenant's.
+- **Roles.** `admin` sees and manages everything; `member` only their own. Users who
+  existed before roles were introduced are grandfathered as admin. **`ADMIN_UPNS`**
+  force-promotes at every login, and promotion takes effect on the next page load -
+  no re-login, no database surgery. The header shows an "Admin" badge.
+- **Consent tip:** the first team member to sign in sees a small one-line consent
+  (`User.Read` only). Tick **"Consent on behalf of your organization"** on it (or
+  have an admin do so) and the rest of the team gets no prompt at all.
 
 Two service-account notes:
 - File-share sources are read by the account the service runs under - either give

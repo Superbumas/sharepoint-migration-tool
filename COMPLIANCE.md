@@ -83,10 +83,22 @@ the same classification as the customer metadata inside it.
   bound what any project's allowlist may contain - without it, any signed-in
   project user can point the service account at any path it can read.
   Allowlist changes are logged to the server console with the actor.
-- There is **no role model within a project**: every signed-in user of a
-  tenant has full rights over that tenant's migrations (including the
-  gated source-deletion actions). Compensating controls: keep the tool on an
-  internal network, and treat sign-in ability as operator-level access.
+- Sign-in itself can be restricted to the operator's own staff domains
+  (`ALLOWED_LOGIN_DOMAINS`, B2B-guest aware). A client tenant's GA may still
+  complete a project-scoped sign-in, but only for an existing project bound
+  to (or being bound to) their own tenant - never the generic sign-in, a
+  foreign project, or a guessed project id.
+- **Role model within a team:** every mapping/job records its owning user
+  (Azure AD oid). `member` users see and act on only their own rows (plus
+  rows predating ownership); `admin` users (`ADMIN_UPNS`, or grandfathered
+  pre-existing users) see everything in the tenant. Enforced on every REST
+  read/list/action (foreign UUIDs return 404), on Socket.IO event routing,
+  and on KPI/export aggregates. Gated source-deletion actions follow the
+  same ownership rule. Compensating controls still apply: keep the tool on
+  an internal network.
+- A bare identity sign-in is consented only for `User.Read`; the delegated
+  working scopes (`Sites.Read.All`, `Files.Read.All`, `Sites.FullControl.All`)
+  are requested only on project-scoped sign-ins, where they are used.
 
 ## 6. Integrity
 
