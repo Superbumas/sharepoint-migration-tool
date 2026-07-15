@@ -1,5 +1,5 @@
 const express = require('express');
-const { requireAuth, getTenantId } = require('../auth/middleware');
+const { requireAuth, getTenantId, ownerScope } = require('../auth/middleware');
 const { getDb } = require('../db');
 
 const router = express.Router();
@@ -31,9 +31,12 @@ router.get('/export/audit', (req, res, next) => {
     // 004_tenants.sql), so without this every tenant's entire audit
     // history would be exportable by any authenticated user regardless of
     // which other filters they passed.
-    let sql = `SELECT l.*, j.name AS job_name FROM job_log l JOIN jobs j ON j.id = l.job_id WHERE j.tenant_id = ?`;
+    // The owner clause rides the same unconditional join - a member's
+    // "export everything" must not include teammates' job histories.
+    const owner = ownerScope(req, 'j');
+    let sql = `SELECT l.*, j.name AS job_name FROM job_log l JOIN jobs j ON j.id = l.job_id WHERE j.tenant_id = ?${owner.sql}`;
     const where = [];
-    const params = [getTenantId(req)];
+    const params = [getTenantId(req), ...owner.params];
     if (jobId) { where.push('l.job_id = ?'); params.push(jobId); }
     if (since) { where.push('l.ts >= ?'); params.push(since); }
     if (until) { where.push('l.ts <= ?'); params.push(until); }

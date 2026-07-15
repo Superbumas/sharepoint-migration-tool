@@ -15,6 +15,9 @@ export const AUTH_ERROR_MESSAGES = {
   // authenticated with a different tenant's account than that project is
   // already bound to.
   wrong_tenant_for_project: 'That project is connected to a different Microsoft 365 tenant - sign in with the Global Admin account for the tenant this project belongs to.',
+  // Set when ALLOWED_LOGIN_DOMAINS is configured and the authenticated
+  // account's domain isn't on the list - this instance is team-only.
+  account_not_allowed: 'That account is not allowed to use this tool - sign in with your team account (ask the operator to add your domain to ALLOWED_LOGIN_DOMAINS if you believe this is wrong).',
 };
 
 // Lists every Project (server/api/projects.js) and lets you sign into one or

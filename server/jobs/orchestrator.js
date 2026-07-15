@@ -158,8 +158,24 @@ function emitJob(jobId, event) {
 // can never accidentally reach every tenant's dashboard - see server/index.js
 // for the matching per-tenant room join, which is derived from the socket's
 // own authenticated session, never anything client-supplied.
-function emitDashboard(event, tenantId) {
-  if (io && tenantId) io.to(`dashboard:${tenantId}`).emit('dashboard:event', normalizeJobEvent(event));
+//
+// Owner routing mirrors the REST API's per-user visibility (see
+// auth/middleware.js ownerScope): an owned job's events go only to that
+// owner's sockets plus admins; a legacy NULL-owner job broadcasts to the
+// whole tenant, exactly as it's visible to everyone via the API. The owner
+// is read from the event's own raw job row (every call site passes one)
+// unless passed explicitly (job_deleted has no row on the event).
+function emitDashboard(event, tenantId, ownerUserId) {
+  if (!io || !tenantId) return;
+  const owner = ownerUserId !== undefined ? ownerUserId : event?.job?.owner_user_id;
+  const payload = normalizeJobEvent(event);
+  if (owner) {
+    // .to(a).to(b) targets the union and dedupes - an admin who owns the job
+    // still receives the event exactly once.
+    io.to(`dashboard:${tenantId}:user:${owner}`).to(`dashboard:${tenantId}:admins`).emit('dashboard:event', payload);
+  } else {
+    io.to(`dashboard:${tenantId}`).emit('dashboard:event', payload);
+  }
 }
 
 // If Node restarted while a job's engine process was running, reconcile on
@@ -297,14 +313,14 @@ function createJobFromMapping(mapping, actor, overrides = {}) {
   const name = overrides.name || `${sourceLabel} -> ${targetLabel}`;
   db.prepare(
     `INSERT INTO jobs (
-      id, mapping_id, name, status, tenant_id,
+      id, mapping_id, name, status, tenant_id, owner_user_id,
       source_type, source_provider, source_site_url, source_library, source_path,
       target_type, target_site_url, target_library, target_path,
       target_provider, target_container, target_blob_prefix, target_onedrive_upn, target_onedrive_path, target_onedrive_host_url,
       action, concurrency,
       created_by_name, created_by_email, created_by_upn
     ) VALUES (
-      @id, @mapping_id, @name, 'queued', @tenant_id,
+      @id, @mapping_id, @name, 'queued', @tenant_id, @owner_user_id,
       @source_type, @source_provider, @source_site_url, @source_library, @source_path,
       @target_type, @target_site_url, @target_library, @target_path,
       @target_provider, @target_container, @target_blob_prefix, @target_onedrive_upn, @target_onedrive_path, @target_onedrive_host_url,
@@ -315,6 +331,10 @@ function createJobFromMapping(mapping, actor, overrides = {}) {
     id,
     mapping_id: mapping.id,
     name,
+    // The job belongs to whoever CREATED it (the actor clicking "create job"),
+    // not to the mapping's owner - an admin creating a job from a teammate's
+    // mapping owns that run.
+    owner_user_id: actor.id || null,
     // Trusted from the mapping row, not re-derived here: the caller
     // (server/api/jobs.js) already fetched this mapping tenant-scoped to
     // the signed-in session, so a job can never be created against a
@@ -1390,7 +1410,7 @@ function deleteJob(jobId, actor, tenantId) {
   getDb().prepare(`UPDATE jobs SET deleted_at = datetime('now'), deleted_by_name = ? WHERE id = ?`).run(actor.name, jobId);
   insertLog(jobId, { event_type: 'job_deleted', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
   removeTreeCache(jobId);
-  emitDashboard({ type: 'job_deleted', jobId }, job.tenant_id);
+  emitDashboard({ type: 'job_deleted', jobId }, job.tenant_id, job.owner_user_id);
 }
 
 function httpError(status, message) {

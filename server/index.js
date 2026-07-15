@@ -103,14 +103,33 @@ io.use((socket, next) => {
 
 io.on('connection', (socket) => {
   const tenantId = socket.request.session.tenantId;
-  // Server-derived from the authenticated session, never client-supplied -
-  // a socket only ever joins its own tenant's dashboard room.
+  const userId = socket.request.session.profile?.id || null;
+  // Role read once per connection (not per event) - a promotion takes effect
+  // on the next reconnect, which Socket.IO does on its own anyway.
+  const role = userId
+    ? getDb().prepare('SELECT role FROM users WHERE id = ?').get(userId)?.role || 'member'
+    : 'member';
+  const isAdmin = role === 'admin';
+
+  // All server-derived from the authenticated session, never client-supplied.
+  // Three dashboard rooms mirror the REST API's per-user visibility
+  // (auth/middleware.js ownerScope + orchestrator emitDashboard):
+  //   dashboard:{tenant}            - legacy NULL-owner job events (visible to all)
+  //   dashboard:{tenant}:user:{id}  - this user's own jobs' events
+  //   dashboard:{tenant}:admins     - every owned job's events, admins only
   socket.join(`dashboard:${tenantId}`);
+  if (userId) socket.join(`dashboard:${tenantId}:user:${userId}`);
+  if (isAdmin) socket.join(`dashboard:${tenantId}:admins`);
+
   socket.on('job:subscribe', (jobId) => {
     // A job:{uuid} room is per-job, not per-tenant, so a guessed/foreign
-    // UUID must be checked against this socket's own tenant before joining
-    // - orchestrator.getJob is already tenant-aware for exactly this reason.
-    if (orchestrator.getJob(jobId, tenantId)) socket.join(`job:${jobId}`);
+    // UUID must be checked against this socket's own tenant AND owner
+    // visibility before joining - same rule as GET /jobs/:id (a member
+    // never confirms a teammate's job UUID exists).
+    const job = orchestrator.getJob(jobId, tenantId);
+    if (job && (isAdmin || !job.owner_user_id || job.owner_user_id === userId)) {
+      socket.join(`job:${jobId}`);
+    }
   });
   socket.on('job:unsubscribe', (jobId) => socket.leave(`job:${jobId}`));
 });

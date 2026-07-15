@@ -78,6 +78,17 @@ function backfillLegacyProject(db) {
   console.log(`[db] created default project for pre-existing tenant ${config.tenantId}`);
 }
 
+// Grandfathers every user that existed before 016_user_ownership.sql as an
+// admin: they had full visibility before roles existed, so demoting them to
+// 'member' on upgrade would silently hide data they could already see. NULL
+// role only ever means "row predates the migration" - every login since then
+// writes an explicit role (see hydrateUserProfile in server/auth/routes.js) -
+// so this is a no-op on every run after the first.
+function backfillLegacyUserRoles(db) {
+  const n = db.prepare(`UPDATE users SET role = 'admin' WHERE role IS NULL`).run().changes;
+  if (n) console.log(`[db] grandfathered ${n} pre-existing user(s) as admin`);
+}
+
 function getDb() {
   if (dbInstance) return dbInstance;
 
@@ -97,6 +108,7 @@ function getDb() {
   runMigrations(db);
   backfillLegacyTenant(db);
   backfillLegacyProject(db);
+  backfillLegacyUserRoles(db);
 
   dbInstance = db;
   return dbInstance;
