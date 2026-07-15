@@ -62,9 +62,10 @@ module.exports = {
   // uses this instance" control. Comma/space-separated, case-insensitive,
   // matched against the account's UPN/email including the un-mangled home
   // UPN of B2B guest accounts (user_domain#EXT#@tenant... forms). Empty =
-  // no restriction (the pre-existing behaviour). NOTE: this is checked on
-  // EVERY sign-in leg, including client-tenant project sign-ins - a client's
-  // own GA account can only sign in if its domain is listed here too.
+  // no restriction (the pre-existing behaviour). Gates bare identity
+  // sign-ins; a client tenant's own GA may still complete a PROJECT-scoped
+  // sign-in for an existing project bound to (or being bound to) their
+  // tenant - see nonTeamProjectSignInAllowed in server/auth/routes.js.
   allowedLoginDomains: (process.env.ALLOWED_LOGIN_DOMAINS || '')
     .split(/[,\s]+/).map((d) => d.trim().toLowerCase()).filter(Boolean),
 

@@ -61,15 +61,31 @@ function accountIdentities(account) {
 }
 
 // The "only our team may sign in" gate (ALLOWED_LOGIN_DOMAINS in .env).
-// Checked on every sign-in leg - ordinary, project-bound, provisioning and
-// repair alike - so a client-tenant GA account can only use this instance if
-// its domain is explicitly listed. Empty list = no restriction.
+// Applies to bare identity sign-ins; project-scoped sign-ins have a narrow
+// exception (see nonTeamProjectSignInAllowed). Empty list = no restriction.
 function loginAllowed(account) {
   if (!config.allowedLoginDomains.length) return true;
   return accountIdentities(account).some((id) => {
     const domain = id.split('@')[1];
     return domain && config.allowedLoginDomains.includes(domain);
   });
+}
+
+// The one sanctioned path for a NON-team account: a project-scoped sign-in
+// with a client tenant's own (usually GA) account - that's how a client
+// tenant gets consented and its engine app provisioned, and clients can't
+// be expected to appear in ALLOWED_LOGIN_DOMAINS. Deliberately narrow so it
+// isn't a backdoor around the team gate:
+//   - the project must already EXIST (a teammate created it on /projects;
+//     project ids are unguessable UUIDs, and a bogus ?project= id fails here
+//     instead of falling through to auto-create-a-project like a bare login)
+//   - and the account's tenant must MATCH the project's bound tenant, or the
+//     project must be unbound (this sign-in is the one that binds it).
+function nonTeamProjectSignInAllowed(pendingProjectId, account) {
+  if (!pendingProjectId) return false;
+  const project = getDb().prepare('SELECT id, tenant_id FROM projects WHERE id = ?').get(pendingProjectId);
+  if (!project) return false;
+  return !project.tenant_id || project.tenant_id === account.tenantId;
 }
 
 router.get('/auth/login', async (req, res, next) => {
@@ -222,9 +238,11 @@ router.get('/auth/redirect', async (req, res, next) => {
 
     // Team allowlist gate - BEFORE anything is written to the session or DB.
     // A disallowed account gets a clean signed-out state and a clear message,
-    // never a half-authenticated session.
-    if (!loginAllowed(result.account)) {
-      console.warn('[auth] Rejected sign-in for', result.account?.username, '- not in ALLOWED_LOGIN_DOMAINS');
+    // never a half-authenticated session. Non-team accounts pass only through
+    // the narrow project-scoped exception (a client GA connecting the tenant
+    // their project is for - see nonTeamProjectSignInAllowed).
+    if (!loginAllowed(result.account) && !nonTeamProjectSignInAllowed(req.session.pendingProjectId, result.account)) {
+      console.warn('[auth] Rejected sign-in for', result.account?.username, '- not in ALLOWED_LOGIN_DOMAINS and not a valid project-scoped client sign-in');
       return req.session.destroy(() => res.redirect('/?authError=account_not_allowed'));
     }
 
@@ -485,3 +503,4 @@ module.exports = router;
 // Exported for tests (engine/tests) - not used by any other runtime module.
 module.exports.accountIdentities = accountIdentities;
 module.exports.loginAllowed = loginAllowed;
+module.exports.nonTeamProjectSignInAllowed = nonTeamProjectSignInAllowed;
