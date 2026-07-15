@@ -131,16 +131,17 @@ function Initialize-GraphDriveFolders {
 # BlobTarget.psm1's Save-GraphFileToPath already relies on for its
 # pre-authenticated downloadUrl).
 #
-# NOTE ON -Content <byte[]>: Invoke-PnPGraphMethod is documented (and used in
-# Microsoft's own PnP samples) to send a byte[] -Content as a raw binary
-# body rather than JSON-serializing it - this is the officially supported
-# way to PUT file content through it. If a future PnP.PowerShell version
-# changes that behavior, uploads of files at or under the threshold would
-# start failing with a content-mismatch error at the target (the same
-# failure signature BlobTarget.psm1's Send-BlobFile documents for its own
-# historical Object[]-vs-byte[] Azure incident) - verify this against the
-# installed PnP.PowerShell version if OneDrive uploads start silently
-# corrupting small files.
+# The small-file path (simple content PUT) goes through Invoke-PnPGraphMethod,
+# which has been seen to throw "Nullable object must have a value" on some
+# files (observed live migrating a user-documents share to OneDrive: a handful
+# of small PDFs failed while everything else copied). That is an error inside
+# the compiled cmdlet's own request/response handling, NOT a real upload
+# problem - the file and connection are fine. So on ANY failure of the simple
+# PUT we fall back to the resumable upload SESSION path below, which uploads
+# the bytes with our own Invoke-WebRequest and is unaffected by whatever the
+# cmdlet trips over. The lane's own retry loop can't recover these on its own:
+# the simple PUT fails deterministically for such a file, so retrying the same
+# call just fails again - switching mechanisms is what actually recovers it.
 function Send-GraphDriveFile {
     param(
         [Parameter(Mandatory)]$Connection,
@@ -152,13 +153,22 @@ function Send-GraphDriveFile {
         [scriptblock]$OnProgress
     )
     $itemPath = "v1.0/drives/$DriveId/root:/$(ConvertTo-GraphDrivePath -Path $RelPath)"
-    $fileInfo = Get-Item -Path $TempPath
+    # -LiteralPath: filenames legitimately contain [ and ] (PowerShell wildcard
+    # metacharacters) - -Path would mis-glob them and fail to find the file.
+    $fileInfo = Get-Item -LiteralPath $TempPath
 
     if ($fileInfo.Length -le $script:OneDriveSimpleUploadThresholdBytes) {
-        $bytes = [System.IO.File]::ReadAllBytes($TempPath)
-        Invoke-PnPGraphMethod -Connection $Connection -Method Put -Url "${itemPath}:/content" `
-            -Content $bytes -ContentType 'application/octet-stream' -ErrorAction Stop | Out-Null
-        return
+        try {
+            $bytes = [System.IO.File]::ReadAllBytes($TempPath)
+            Invoke-PnPGraphMethod -Connection $Connection -Method Put -Url "${itemPath}:/content" `
+                -Content $bytes -ContentType 'application/octet-stream' -ErrorAction Stop | Out-Null
+            return
+        } catch {
+            # A 0-byte file can only go via the simple PUT (an upload session
+            # has no byte range to send), so there is nothing to fall back to.
+            if ($fileInfo.Length -eq 0) { throw }
+            # Otherwise fall through to the upload-session path below.
+        }
     }
 
     $session = Invoke-PnPGraphMethod -Connection $Connection -Method Post -Url "${itemPath}:/createUploadSession" `

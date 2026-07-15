@@ -1389,7 +1389,11 @@ try {
                     $statusCode = Get-HttpStatusCode -Exception $_.Exception
                     $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_failed' -Data @{
                         sourcePath = $sourceDisplayPath; targetPath = $targetDisplayPath
-                        error      = $_.Exception.Message; httpStatus = $statusCode; retryCount = $script:attemptsUsed
+                        # Prefix the .NET exception type: a bare message like
+                        # "Nullable object must have a value" is unactionable,
+                        # but "InvalidOperationException: ..." pins down where
+                        # it came from for the next round of diagnosis.
+                        error      = "$($_.Exception.GetType().Name): $($_.Exception.Message)"; httpStatus = $statusCode; retryCount = $script:attemptsUsed
                     }))
                 } finally {
                     $null = $Shared.InFlight.Remove($LaneIndex)
