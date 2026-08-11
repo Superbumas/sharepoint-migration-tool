@@ -111,6 +111,21 @@ module.exports = {
   // requests it anyway.
   onedriveTargetEnabled: process.env.ENGINE_ONEDRIVE_TARGET_ENABLED === 'true',
 
+  // Upload chunk size for the OneDrive target's resumable session PUTs
+  // (engine/lib/OneDriveTarget.psm1's Send-GraphDriveFile) - a bigger chunk
+  // means fewer round trips per file, which mainly matters for large-file
+  // jobs (e.g. old .pst archives): a 1.7 GB file is ~350 requests at 5 MiB
+  // but ~85 at 20 MiB. Graph requires each chunk be a multiple of 320 KiB
+  // (except the final one) and recommends staying at or under 60 MiB per
+  // request, so this is clamped to that range - a bad .env value rounds
+  // rather than breaking every OneDrive upload.
+  oneDriveUploadChunkSizeMB: (() => {
+    const raw = parseInt(process.env.ONEDRIVE_UPLOAD_CHUNK_SIZE_MB || '5', 10);
+    const mb = Number.isFinite(raw) && raw > 0 ? raw : 5;
+    const bytes = Math.round((mb * 1024 * 1024) / 327680) * 327680; // nearest 320 KiB multiple
+    return Math.min(60, Math.max(320 / 1024, bytes / (1024 * 1024)));
+  })(),
+
   // Optional server-wide FALLBACK roots for the file-share (DFS) migration
   // source - the normal way is per-project via the Settings page
   // (projects.fs_source_roots); server/util/fsSource.js merges both.

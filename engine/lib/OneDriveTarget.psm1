@@ -26,7 +26,10 @@ Import-Module "$PSScriptRoot/Retry.psm1"
 # Every non-empty file is uploaded via a resumable upload session (see
 # Send-GraphDriveFile for why the simpler small-file content PUT is avoided).
 # Session chunks must be a multiple of 320 KiB except the final one - 5 MiB
-# (16 * 320 KiB) satisfies that exactly.
+# (16 * 320 KiB) satisfies that exactly. Send-GraphDriveFile's own
+# -ChunkSizeBytes parameter (server-configurable via
+# ONEDRIVE_UPLOAD_CHUNK_SIZE_MB) is what every real caller actually uses -
+# this is only the fallback for a direct/manual invocation that omits it.
 $script:OneDriveChunkSizeBytes = 5 * 1024 * 1024
 
 # Shared with BlobTarget.psm1's $script:BlobTempRoot by convention (same
@@ -203,7 +206,12 @@ function Send-GraphDriveFile {
         $Modified = $null,
         # Invoked with ('uploading', <cumulative bytes sent>) after each
         # staged chunk - small single-PUT files finish too fast to matter.
-        [scriptblock]$OnProgress
+        [scriptblock]$OnProgress,
+        # Server-configurable (ONEDRIVE_UPLOAD_CHUNK_SIZE_MB) - see
+        # Invoke-MigrationJob.ps1's -OneDriveChunkSizeMB. Falls back to the
+        # original hardcoded 5 MiB for any direct/manual caller (e.g. tests)
+        # that doesn't pass one.
+        [long]$ChunkSizeBytes = $script:OneDriveChunkSizeBytes
     )
     $itemPath = "v1.0/drives/$DriveId/root:/$(ConvertTo-GraphDrivePath -Path $RelPath)"
     # -LiteralPath: filenames legitimately contain [ and ] (PowerShell wildcard
@@ -269,7 +277,7 @@ function Send-GraphDriveFile {
     $stream = [System.IO.File]::OpenRead($TempPath)
     try {
         $total = [long]$fileInfo.Length
-        $buffer = New-Object byte[] $script:OneDriveChunkSizeBytes
+        $buffer = New-Object byte[] $ChunkSizeBytes
         [long]$offset = 0
         while ($offset -lt $total) {
             # Explicit [long] on BOTH arguments: PowerShell's overload binder
@@ -283,7 +291,7 @@ function Send-GraphDriveFile {
             # 5.99 GB .pst file failed on its very first chunk with
             # "Cannot convert argument 'val2', with value: '5990237184' ...
             # to type System.Int32".
-            $toRead = [int][Math]::Min([long]$script:OneDriveChunkSizeBytes, [long]($total - $offset))
+            $toRead = [int][Math]::Min([long]$ChunkSizeBytes, [long]($total - $offset))
             $read = $stream.Read($buffer, 0, $toRead)
             if ($read -le 0) { break }
             # Plain assignment, not an expression form - see BlobTarget.psm1's
@@ -346,7 +354,8 @@ function Save-OneDriveFileFromSharePoint {
         # cannot fetch those at all), and as the fallback after any
         # Get-PnPFile failure.
         [hashtable]$GraphSource,
-        [scriptblock]$OnProgress
+        [scriptblock]$OnProgress,
+        [long]$ChunkSizeBytes = $script:OneDriveChunkSizeBytes
     )
     $tempDir = $script:OneDriveTempRoot
     if (-not (Test-Path $tempDir)) { New-Item -ItemType Directory -Path $tempDir -Force | Out-Null }
@@ -365,7 +374,7 @@ function Save-OneDriveFileFromSharePoint {
             }
         }
         if ($OnProgress) { & $OnProgress 'uploading' 0 }
-        Send-GraphDriveFile -Connection $TargetConnection -TempPath $tempPath -DriveId $TargetDriveId -RelPath $TargetRelPath -OnProgress $OnProgress
+        Send-GraphDriveFile -Connection $TargetConnection -TempPath $tempPath -DriveId $TargetDriveId -RelPath $TargetRelPath -OnProgress $OnProgress -ChunkSizeBytes $ChunkSizeBytes
     } finally {
         Remove-Item -Path $tempPath -Force -ErrorAction SilentlyContinue
     }
