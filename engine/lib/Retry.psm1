@@ -98,6 +98,12 @@ function Test-IsRetryableStatus {
     # chunk PUT) that otherwise had nothing distinguishing it from the many
     # adjacent files that succeeded - a retry is expected to just work.
     if ($Message -match 'Nullable object must have a value') { return $true }
+    # OneDrive/Graph 409 on createUploadSession when a session for the same
+    # path is already open - normally another lane/process finishing (or a
+    # stale session expiring) within a few backoff attempts, and Graph's own
+    # message literally says "try to save again." Genuinely never reflects a
+    # bad file - always retryable.
+    if ($Message -match 'currently being uploaded') { return $true }
     return $false
 }
 
