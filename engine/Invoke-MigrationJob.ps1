@@ -241,7 +241,11 @@ function Invoke-VerificationPhase {
         # azure_blob-target only:
         [hashtable]$BlobCtx,
         # onedrive-target only: @{ Connection; DriveId; PathRoot }
-        [hashtable]$OneDriveCtx
+        [hashtable]$OneDriveCtx,
+        # Passed straight through to Get-FileSystemFileMap's -ThrottleLimit
+        # for a filesystem source's hashing lanes - matches the job's own
+        # copy concurrency by convention, not a separate setting to tune.
+        [int]$Concurrency = 4
     )
     try {
         $isBlob = $TargetProvider -eq 'azure_blob'
@@ -256,7 +260,7 @@ function Invoke-VerificationPhase {
             # (source: filesystem hash walk or the source drive; target:
             # OneDriveCtx's drive, resolved once at connection setup).
             $srcMap = if ($isFsSource) {
-                Get-FileSystemFileMap -RootPath $SourcePathInLib -IncludeHash -OnProgress {
+                Get-FileSystemFileMap -RootPath $SourcePathInLib -IncludeHash -ThrottleLimit $Concurrency -OnProgress {
                     param($count)
                     Write-PhaseProgress -Phase 'hashing_source' -Data @{ files = $count }
                 }
@@ -270,7 +274,7 @@ function Invoke-VerificationPhase {
             # Local QuickXorHash of every source file vs the hash SharePoint
             # computed server-side for the uploaded copy - reads every source
             # byte, which is exactly what makes this verification honest.
-            $srcMap = Get-FileSystemFileMap -RootPath $SourcePathInLib -IncludeHash -OnProgress {
+            $srcMap = Get-FileSystemFileMap -RootPath $SourcePathInLib -IncludeHash -ThrottleLimit $Concurrency -OnProgress {
                 param($count)
                 Write-PhaseProgress -Phase 'hashing_source' -Data @{ files = $count }
             }
@@ -494,6 +498,7 @@ try {
         SourceSite      = $SourceSiteUrl
         SourceLib       = $SourceLibrary
         SourcePathInLib = $SourcePath
+        Concurrency     = $Concurrency
     }
     if ($isBlobTarget) {
         $verifyArgs.BlobCtx = $blobCtx

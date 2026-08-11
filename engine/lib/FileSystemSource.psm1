@@ -427,29 +427,92 @@ function Get-FileSystemFileMap {
         [switch]$IncludeHash,
         # Invoked with the cumulative file count - hashing a big tree can run
         # for many minutes and must not look hung.
-        [scriptblock]$OnProgress
+        [scriptblock]$OnProgress,
+        # Only used with -IncludeHash (see below) - matches the job's own
+        # copy concurrency by convention at the call site, not a separate
+        # setting to tune.
+        [int]$ThrottleLimit = 4
     )
     $tree = Get-FileSystemTree -RootPath $RootPath
-    $map = @{}
-    foreach ($f in $tree.Files) {
-        $rel = if ($f.RelativeFromRoot) { "$($f.RelativeFromRoot)/$($f.TargetName)" } else { $f.TargetName }
-        $fullPath = Join-Path $f.SourceFolder $f.Name
-        $entry = @{
-            Size     = [long]$f.Size
-            Hash     = $null
-            Created  = $f.Created
-            Modified = $f.Modified
-            FullPath = $fullPath
+
+    if (-not $IncludeHash) {
+        # No file bytes get read at all in this branch - nothing to gain by
+        # parallelizing it, so it stays a plain sequential loop.
+        $map = @{}
+        foreach ($f in $tree.Files) {
+            $rel = if ($f.RelativeFromRoot) { "$($f.RelativeFromRoot)/$($f.TargetName)" } else { $f.TargetName }
+            $map[$rel] = @{
+                Size = [long]$f.Size; Hash = $null; Created = $f.Created; Modified = $f.Modified
+                FullPath = Join-Path $f.SourceFolder $f.Name
+            }
+            if ($OnProgress) { & $OnProgress $map.Count }
         }
-        if ($IncludeHash) {
+        return $map
+    }
+
+    # -IncludeHash reads every byte of every source file - unlike the target-
+    # writing copy lanes, purely local/LAN reads with no Graph throttling to
+    # respect, so this scales well with concurrency. Same lane pattern as the
+    # copy phase (Start-ThreadJob workers pulling from a shared queue,
+    # Invoke-MigrationJob.ps1's laneScript* functions) rather than a one-off
+    # construct - workers NEVER touch $OnProgress/stdout directly (only this
+    # function's own draining loop may, so NDJSON output can't interleave);
+    # they push completed entries onto a thread-safe queue this drains.
+    # Observed live: hashing an 18,000+ file tree sequentially, one file at a
+    # time, made post-migration verification the slowest phase of the whole
+    # job by a wide margin - far slower than the copy phase's own multi-lane
+    # upload of the same tree.
+    $workQueue = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+    foreach ($f in $tree.Files) { $workQueue.Enqueue($f) }
+    $resultQueue = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+    $laneCount = [Math]::Max(1, [Math]::Min($ThrottleLimit, $tree.Files.Count))
+
+    $laneScript = {
+        param($WorkQueue, $ResultQueue)
+        # NO -Force - same in-process clobbering hazard as every lane in
+        # Invoke-MigrationJob.ps1: a forced re-import here would remove this
+        # module out from under every other runspace that already loaded it.
+        Import-Module "$using:PSScriptRoot/FileSystemSource.psm1"
+        $f = $null
+        while ($WorkQueue.TryDequeue([ref]$f)) {
+            $rel = if ($f.RelativeFromRoot) { "$($f.RelativeFromRoot)/$($f.TargetName)" } else { $f.TargetName }
+            $fullPath = Join-Path $f.SourceFolder $f.Name
+            $entry = @{
+                Size     = [long]$f.Size
+                Hash     = $null
+                Created  = $f.Created
+                Modified = $f.Modified
+                FullPath = $fullPath
+            }
             # A file that vanished or became unreadable mid-verification
             # degrades that one file to a size-only check (Hash stays $null,
-            # which Compare-MigratedFileMaps counts as hashUnavailable) rather
-            # than killing the whole verification pass.
+            # which Compare-MigratedFileMaps counts as hashUnavailable)
+            # rather than killing the whole verification pass.
             try { $entry.Hash = Get-FileQuickXorHash -Path $fullPath } catch {}
+            $ResultQueue.Enqueue(@{ Rel = $rel; Entry = $entry })
         }
-        $map[$rel] = $entry
-        if ($OnProgress) { & $OnProgress $map.Count }
+    }
+
+    $lanes = 1..$laneCount | ForEach-Object { Start-ThreadJob -ScriptBlock $laneScript -ArgumentList $workQueue, $resultQueue }
+    $map = @{}
+    try {
+        # Same "NotStarted counts as active too" rule as the copy phase's own
+        # drain loop (Invoke-MigrationJob.ps1) - checking only 'Running'
+        # races lane spin-up and can exit before any lane has produced a
+        # single result.
+        $laneActive = { ($lanes | Where-Object { $_.State -in @('NotStarted', 'Running') }).Count -gt 0 }
+        while ((& $laneActive) -or $resultQueue.Count -gt 0) {
+            $item = $null
+            $drained = 0
+            while ($drained -lt 500 -and $resultQueue.TryDequeue([ref]$item)) {
+                $map[$item.Rel] = $item.Entry
+                $drained++
+                if ($OnProgress) { & $OnProgress $map.Count }
+            }
+            if ($drained -eq 0) { Start-Sleep -Milliseconds 100 }
+        }
+    } finally {
+        $lanes | Remove-Job -Force -ErrorAction SilentlyContinue
     }
     return $map
 }
