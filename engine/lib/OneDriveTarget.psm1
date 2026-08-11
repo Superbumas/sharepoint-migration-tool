@@ -245,6 +245,44 @@ function Send-GraphDriveFile {
         return
     }
 
+    # Fast path for small files (Graph's own documented cutoff for the
+    # simple, non-session upload): a single PUT straight to
+    # graph.microsoft.com instead of createUploadSession + a chunk PUT
+    # against a SEPARATE, session-specific uploadUrl host that changes on
+    # every file. That host-hop matters: a lane processing many small files
+    # in a row can reuse one warm connection across repeated calls to the
+    # SAME host (graph.microsoft.com, here and for the timestamp PATCH
+    # below), but can never reuse anything across the session path's
+    # per-file uploadUrl, which pays a full fresh TLS handshake (measured
+    # live: ~800ms cold vs ~200-300ms warm) on every single file regardless
+    # of lane count or bandwidth. Falls through to the existing session path
+    # on any failure rather than failing the file outright - this is a speed
+    # optimization, not the only correct way to land the bytes.
+    if ($fileInfo.Length -le 4MB) {
+        try {
+            $graphToken = Get-PnPAccessToken -ResourceTypeName Graph -Connection $Connection
+            Invoke-WebRequest -Uri "https://graph.microsoft.com/${itemPath}:/content?`@microsoft.graph.conflictBehavior=replace" -Method Put `
+                -Headers @{ Authorization = "Bearer $graphToken" } -InFile $TempPath `
+                -ContentType 'application/octet-stream' -ErrorAction Stop | Out-Null
+            if ($Created -or $Modified) {
+                $fsInfo = @{}
+                if ($Created) { $fsInfo.createdDateTime = ([datetime]$Created).ToUniversalTime().ToString('o') }
+                if ($Modified) { $fsInfo.lastModifiedDateTime = ([datetime]$Modified).ToUniversalTime().ToString('o') }
+                # Best-effort, same as the session path's own fileSystemInfo
+                # handling - a file already landed correctly is never worth
+                # failing over a timestamp-only follow-up call. It lands
+                # with OneDrive's own upload-time stamp instead on failure.
+                try {
+                    Invoke-WebRequest -Uri "https://graph.microsoft.com/$itemPath" -Method Patch `
+                        -Headers @{ Authorization = "Bearer $graphToken" } -Body (@{ fileSystemInfo = $fsInfo } | ConvertTo-Json -Compress) `
+                        -ContentType 'application/json' -ErrorAction Stop | Out-Null
+                } catch {}
+            }
+            if ($OnProgress) { & $OnProgress 'uploading' ([long]$fileInfo.Length) }
+            return
+        } catch {}
+    }
+
     $uploadItem = @{ '@microsoft.graph.conflictBehavior' = 'replace' }
     $fsInfo = @{}
     # ISO 8601 with an explicit Z; the source tree hands us UTC DateTimes, and
