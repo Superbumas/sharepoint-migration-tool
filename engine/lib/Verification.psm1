@@ -1,5 +1,10 @@
 #Requires -Version 7.0
 
+# NO -Force. See BlobTarget.psm1's identical note: a forced re-import from
+# inside a module first REMOVES the already-loaded Retry module out from
+# under every runspace that imported it.
+Import-Module "$PSScriptRoot/Retry.psm1"
+
 # Resume must never trust an index blindly - it re-checks the actual target
 # state. A file is treated as already-done only if the target copy has the
 # same size AND is at least as new as the source (delta rule: a source file
@@ -78,7 +83,11 @@ function Get-GraphFileMap {
         # Invoked after each Graph page with the cumulative file count - lets
         # the caller surface progress during a prefetch that can run for many
         # minutes on large trees. Throttling is the callback's job.
-        [scriptblock]$OnProgress
+        [scriptblock]$OnProgress,
+        # Forwarded to Invoke-WithRetry - see its own doc comment. Optional:
+        # a caller that doesn't care about visibility into individual page
+        # retries can simply omit it.
+        [scriptblock]$OnRetry
     )
     $root = $RootPath.Trim('/')
     $select = 'name,size,file,folder'
@@ -94,7 +103,16 @@ function Get-GraphFileMap {
             "v1.0/drives/$DriveId/root/children?`$select=$select&`$top=999"
         }
         do {
-            $resp = Invoke-PnPGraphMethod -Url $url -Connection $Connection
+            # A single bad page (throttling, a truncated/corrupted response -
+            # see Test-IsRetryableStatus's "Failure to parse near offset"
+            # case) used to abort the ENTIRE tree walk outright, losing every
+            # page already fetched. This is the only Graph call in the whole
+            # engine that wasn't already wrapped in Invoke-WithRetry.
+            # Observed live: a 27,000+ file OneDrive-target prefetch died
+            # here after 23,391 files, with the lane's own missing fallback
+            # (fixed separately) then blindly re-uploading everything past
+            # that point instead of skipping what was already at the target.
+            $resp = Invoke-WithRetry -Action { Invoke-PnPGraphMethod -Url $url -Connection $Connection } -OnRetry $OnRetry
             foreach ($item in $resp.value) {
                 $childPath = if ($current) { "$current/$($item.name)" } else { $item.name }
                 if ($item.folder) {
