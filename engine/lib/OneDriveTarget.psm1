@@ -201,8 +201,24 @@ function Send-GraphDriveFile {
     if ($Modified) { $fsInfo.lastModifiedDateTime = ([datetime]$Modified).ToUniversalTime().ToString('o') }
     if ($fsInfo.Count -gt 0) { $uploadItem.fileSystemInfo = $fsInfo }
 
-    $session = Invoke-PnPGraphMethod -Connection $Connection -Method Post -Url "${itemPath}:/createUploadSession" `
-        -Content (@{ item = $uploadItem }) -ErrorAction Stop
+    try {
+        $session = Invoke-PnPGraphMethod -Connection $Connection -Method Post -Url "${itemPath}:/createUploadSession" `
+            -Content (@{ item = $uploadItem }) -ErrorAction Stop
+    } catch {
+        # Graph rejects some source files' Created/Modified values outright
+        # with a generic "The request is malformed or incorrect" and no
+        # further detail - observed live on an old file-share source where a
+        # large fraction of files (copied server-to-server over many years)
+        # have corrupted/out-of-range NTFS timestamp metadata. Not transient
+        # (retrying the identical request never helps), but the upload itself
+        # is fine without fileSystemInfo - fall back to that once rather than
+        # failing the file outright, at the cost of that file landing with
+        # OneDrive's own upload-time stamp instead of its real one.
+        $status = Get-HttpStatusCode -Exception $_.Exception
+        if ($status -ne 400 -or $fsInfo.Count -eq 0) { throw }
+        $session = Invoke-PnPGraphMethod -Connection $Connection -Method Post -Url "${itemPath}:/createUploadSession" `
+            -Content (@{ item = @{ '@microsoft.graph.conflictBehavior' = 'replace' } }) -ErrorAction Stop
+    }
     $uploadUrl = $session.uploadUrl
     if (-not $uploadUrl) { throw "Microsoft Graph did not return an upload session URL for '$RelPath'." }
 
