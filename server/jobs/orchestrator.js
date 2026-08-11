@@ -461,6 +461,7 @@ function runJob(jobId, actor, tenantId) {
     '-TargetProvider', job.target_provider || 'sharepoint',
     '-Action', job.action,
     '-Concurrency', String(effectiveConcurrency),
+    '-OneDriveChunkSizeMB', String(config.oneDriveUploadChunkSizeMB),
     '-ControlFilePath', controlFilePath(jobId),
     '-TreeCachePath', treeCachePath(jobId),
     '-ClientId', engineIdentity.clientId,
@@ -1105,6 +1106,7 @@ function verifyJob(jobId, actor, tenantId) {
     '-ClientId', engineIdentity.clientId,
     '-TenantId', job.tenant_id || config.tenantId,
     '-VerifyOnly',
+    '-OneDriveChunkSizeMB', String(config.oneDriveUploadChunkSizeMB),
   ];
   // Certificate secrets travel via buildEngineSpawnEnv, not argv; the
   // thumbprint is a public identifier, so it may stay an argument.

@@ -75,6 +75,13 @@ param(
     [string]$TargetOneDriveUpn,
     [AllowEmptyString()][string]$TargetOneDrivePath = '',
     [string]$TargetOneDriveHostUrl,
+    # onedrive-target only: upload chunk size in MiB for each createUploadSession
+    # PUT (engine/lib/OneDriveTarget.psm1's Send-GraphDriveFile) - a bigger
+    # chunk means fewer round trips per file, set server-side via
+    # ONEDRIVE_UPLOAD_CHUNK_SIZE_MB (server/config.js clamps it to a valid
+    # Graph chunk size before it ever reaches here). Ignored by every other
+    # target.
+    [int]$OneDriveChunkSizeMB = 5,
     # Secret: defaults from the environment - the orchestrator passes it
     # there (buildEngineSpawnEnv) because command lines are readable by any
     # local process on Windows. The parameter form still works for manual
@@ -380,6 +387,12 @@ try {
 
     $targetConn = $null
     $blobCtx = $null
+    # Bytes, rounded to a valid Graph upload-session chunk size (a multiple
+    # of 320 KiB, capped at 60 MiB) - the server already clamps the .env
+    # value before it gets here, but a manual invocation could pass anything.
+    $oneDriveChunkSizeBytes = [Math]::Min(60MB, [Math]::Max(320KB,
+        [Math]::Round(([long]$OneDriveChunkSizeMB * 1MB) / 320KB) * 320KB))
+
     $oneDriveCtx = $null
     $sameSite = $false
     $effTargetSite = $null
@@ -1275,7 +1288,7 @@ try {
         param($LaneIndex, $WorkQueue, $ResultQueue, $Shared, $IsFsSource, $ClientId, $TenantId,
               $CertThumbprint, $CertificateBase64Encoded, $CertificatePassword, $ControlFilePath,
               $SourceSiteUrl, $SourceSiteServerRelative, $SourceRoot, $SourcePathInLib, $SrcDriveId,
-              $TargetOneDriveHostUrl, $TargetDriveId, $TargetOneDrivePathRoot, $TargetFileMap)
+              $TargetOneDriveHostUrl, $TargetDriveId, $TargetOneDrivePathRoot, $TargetFileMap, $OneDriveChunkSizeBytes)
 
         Import-Module PnP.PowerShell -ErrorAction Stop
         # NO -Force - same in-process clobbering hazard as every other lane
@@ -1382,7 +1395,7 @@ try {
                         if ($IsFsSource) {
                             $localPath = Join-Path $item.SourceFolder $item.Name
                             Send-GraphDriveFile -Connection $laneOneDriveConn -TempPath $localPath -DriveId $TargetDriveId -RelPath $targetRelPath `
-                                -Created $item.Created -Modified $item.Modified -OnProgress $progress
+                                -Created $item.Created -Modified $item.Modified -OnProgress $progress -ChunkSizeBytes $OneDriveChunkSizeBytes
                         } else {
                             # Drive-addressed Graph fallback for the download:
                             # kicks in for %/# names (which Get-PnPFile cannot
@@ -1394,7 +1407,7 @@ try {
                             } else { $null }
                             Save-OneDriveFileFromSharePoint -SourceConnection $laneSourceConn -SourceServerRelativeUrl $sourceDisplayPath `
                                 -TargetConnection $laneOneDriveConn -TargetDriveId $TargetDriveId -TargetRelPath $targetRelPath `
-                                -GraphSource $graphSource -OnProgress $progress
+                                -GraphSource $graphSource -OnProgress $progress -ChunkSizeBytes $OneDriveChunkSizeBytes
                         }
                     } -OnRetry {
                         param($attempt, $waitMs, $reason, $statusCode, $message)
@@ -1629,7 +1642,8 @@ try {
                 $i, $workQueue, $resultQueue, $shared, $isFsSource, $ClientId, $TenantId,
                 $CertThumbprint, $CertificateBase64Encoded, $CertificatePassword, $ControlFilePath,
                 $SourceSiteUrl, $sourceSiteServerRelative, $sourceRoot, $SourcePath, $srcDriveId,
-                $TargetOneDriveHostUrl, $oneDriveCtx.DriveId, $oneDriveCtx.PathRoot, $targetFileMap
+                $TargetOneDriveHostUrl, $oneDriveCtx.DriveId, $oneDriveCtx.PathRoot, $targetFileMap,
+                $oneDriveChunkSizeBytes
             )
         } elseif ($isFsSource) {
             $lanes += Start-ThreadJob -ScriptBlock $laneScriptFileUpload -ArgumentList @(
@@ -1850,14 +1864,14 @@ try {
                         Invoke-WithRetry -MaxAttempts 3 -Action {
                             $relPath = "$($oneDriveCtx.PathRoot)/$rel".Trim('/').Replace('//', '/')
                             if ($isFsSource) {
-                                Send-GraphDriveFile -Connection $oneDriveCtx.Connection -TempPath $srcRel -DriveId $oneDriveCtx.DriveId -RelPath $relPath
+                                Send-GraphDriveFile -Connection $oneDriveCtx.Connection -TempPath $srcRel -DriveId $oneDriveCtx.DriveId -RelPath $relPath -ChunkSizeBytes $oneDriveChunkSizeBytes
                             } else {
                                 $graphSource = if ($srcDriveId) {
                                     @{ DriveId = $srcDriveId; RelPath = (Get-BlobKey -Segments @($SourcePath, $relFromRoot, $file.Name)) }
                                 } else { $null }
                                 Save-OneDriveFileFromSharePoint -SourceConnection $sourceConn -SourceServerRelativeUrl $srcRel `
                                     -TargetConnection $oneDriveCtx.Connection -TargetDriveId $oneDriveCtx.DriveId -TargetRelPath $relPath `
-                                    -GraphSource $graphSource | Out-Null
+                                    -GraphSource $graphSource -ChunkSizeBytes $oneDriveChunkSizeBytes | Out-Null
                             }
                         }
                     } elseif ($isFsSource) {
