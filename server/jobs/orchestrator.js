@@ -219,8 +219,18 @@ function reconcileOrphanedJobs() {
       ).run(job.id);
       insertLog(job.id, { event_type: 'job_paused', error_message: 'Pause was requested before the server restarted - completed on startup. Progress up to the last checkpoint is preserved.', actor_name: 'system' });
     } else {
+      // 'paused', not 'approved' - this branch's own log line already
+      // promises "resume when ready", but runJob() only threads the saved
+      // checkpoint_json through to the engine (and only shows "Resume"
+      // instead of "Run" in the UI - see JobQueue.jsx/JobDetail.jsx) when
+      // status is 'paused'. Landing here as 'approved' silently discarded
+      // that promise: checkpoint_json was still sitting right there in the
+      // row, untouched by this UPDATE, but the next run ignored it entirely
+      // and re-scanned the whole source tree from scratch. Observed live:
+      // a job restarted mid-migration (Ctrl+C on the server to pull a fix)
+      // came back as a full fresh run instead of a resume.
       db.prepare(
-        `UPDATE jobs SET status = 'approved', pid = NULL, phase_json = NULL WHERE id = ?`
+        `UPDATE jobs SET status = 'paused', paused_at = datetime('now'), pid = NULL, phase_json = NULL WHERE id = ?`
       ).run(job.id);
       insertLog(job.id, {
         event_type: 'job_interrupted',
