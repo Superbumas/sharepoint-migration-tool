@@ -249,19 +249,45 @@ function Send-GraphDriveFile {
         $session = Invoke-PnPGraphMethod -Connection $Connection -Method Post -Url "${itemPath}:/createUploadSession" `
             -Content (@{ item = $uploadItem }) -ErrorAction Stop
     } catch {
-        # Graph rejects some source files' Created/Modified values outright
-        # with a generic "The request is malformed or incorrect" and no
-        # further detail - observed live on an old file-share source where a
-        # large fraction of files (copied server-to-server over many years)
-        # have corrupted/out-of-range NTFS timestamp metadata. Not transient
-        # (retrying the identical request never helps), but the upload itself
-        # is fine without fileSystemInfo - fall back to that once rather than
-        # failing the file outright, at the cost of that file landing with
-        # OneDrive's own upload-time stamp instead of its real one.
         $status = Get-HttpStatusCode -Exception $_.Exception
-        if ($status -ne 400 -or $fsInfo.Count -eq 0) { throw }
-        $session = Invoke-PnPGraphMethod -Connection $Connection -Method Post -Url "${itemPath}:/createUploadSession" `
-            -Content (@{ item = @{ '@microsoft.graph.conflictBehavior' = 'replace' } }) -ErrorAction Stop
+        if ($status -eq 400 -and $fsInfo.Count -gt 0) {
+            # Graph rejects some source files' Created/Modified values
+            # outright with a generic "The request is malformed or
+            # incorrect" and no further detail - observed live on an old
+            # file-share source where a large fraction of files (copied
+            # server-to-server over many years) have corrupted/out-of-range
+            # NTFS timestamp metadata. Not transient (retrying the identical
+            # request never helps), but the upload itself is fine without
+            # fileSystemInfo - fall back to that once rather than failing
+            # the file outright, at the cost of that file landing with
+            # OneDrive's own upload-time stamp instead of its real one.
+            $session = Invoke-PnPGraphMethod -Connection $Connection -Method Post -Url "${itemPath}:/createUploadSession" `
+                -Content (@{ item = @{ '@microsoft.graph.conflictBehavior' = 'replace' } }) -ErrorAction Stop
+        } elseif ($status -eq 409 -and $_.Exception.Message -match 'currently being uploaded') {
+            # "A file with the same name is currently being uploaded" from
+            # an EARLIER attempt at this exact path (interrupted mid-session
+            # by a restart, cancel, or crash) can persist as a stale
+            # reservation - conflictBehavior=replace only overrides a
+            # COMPLETED item, never a still-open upload session, so blind
+            # retries (Test-IsRetryableStatus does mark this retryable, for
+            # the genuinely-transient case of another lane/process about to
+            # finish) never resolve a truly stale one; they just fail
+            # identically every time. Observed live: a single file surviving
+            # a job's verification+repair pass with this exact error,
+            # nothing else touching that path. Best-effort clear: delete
+            # whatever's sitting at the path (even a partial/invisible item
+            # a stale session left behind - Graph reserves the name before
+            # any bytes are visible) and create a fresh session. A 404 on
+            # the delete is expected and harmless when nothing visible is
+            # there yet; if the reservation truly isn't tied to a deletable
+            # item, this still throws and the caller's own retry/failure
+            # handling takes over.
+            try { Invoke-PnPGraphMethod -Connection $Connection -Method Delete -Url $itemPath -ErrorAction Stop | Out-Null } catch {}
+            $session = Invoke-PnPGraphMethod -Connection $Connection -Method Post -Url "${itemPath}:/createUploadSession" `
+                -Content (@{ item = $uploadItem }) -ErrorAction Stop
+        } else {
+            throw
+        }
     }
     $uploadUrl = $session.uploadUrl
     if (-not $uploadUrl) { throw "Microsoft Graph did not return an upload session URL for '$RelPath'." }
