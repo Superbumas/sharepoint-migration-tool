@@ -228,7 +228,18 @@ function Send-GraphDriveFile {
         $buffer = New-Object byte[] $script:OneDriveChunkSizeBytes
         [long]$offset = 0
         while ($offset -lt $total) {
-            $toRead = [int][Math]::Min($script:OneDriveChunkSizeBytes, ($total - $offset))
+            # Explicit [long] on BOTH arguments: PowerShell's overload binder
+            # for [Math]::Min doesn't widen the way C# would - given one
+            # Int32 arg (the chunk size) and one Int64 arg (bytes remaining),
+            # it can bind to Min(Int32,Int32) and then try to NARROW the
+            # Int64 down to fit, which throws outright once bytes-remaining
+            # exceeds Int32.MaxValue (~2 GB). Forcing both to [long] pins the
+            # Min(Int64,Int64) overload so the result (always <= chunk size)
+            # is safe to narrow back to [int] afterwards. Observed live: a
+            # 5.99 GB .pst file failed on its very first chunk with
+            # "Cannot convert argument 'val2', with value: '5990237184' ...
+            # to type System.Int32".
+            $toRead = [int][Math]::Min([long]$script:OneDriveChunkSizeBytes, [long]($total - $offset))
             $read = $stream.Read($buffer, 0, $toRead)
             if ($read -le 0) { break }
             # Plain assignment, not an expression form - see BlobTarget.psm1's
