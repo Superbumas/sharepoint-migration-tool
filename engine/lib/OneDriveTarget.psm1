@@ -186,7 +186,19 @@ function Send-GraphDriveFile {
     # authorized with the connection's Graph token. -InFile on a 0-byte file
     # sends nothing, producing a true 0-byte item.
     if ($fileInfo.Length -eq 0) {
-        $graphToken = Get-PnPGraphAccessToken -Connection $Connection
+        # Get-PnPGraphAccessToken doesn't exist in PnP.PowerShell (the
+        # correct cmdlet is Get-PnPAccessToken -ResourceTypeName Graph) -
+        # calling the wrong name doesn't just fail cleanly, it makes
+        # PowerShell's command resolution fall back to searching every OTHER
+        # installed module for a same-named command, which on a machine that
+        # also has the old deprecated SharePointPnPPowerShellOnline module
+        # installed finds ITS same-named cmdlet and tries to load THAT
+        # module instead - which then fails outright from an assembly
+        # version clash with the already-loaded PnP.PowerShell. Only ever
+        # hit on a 0-byte file (the one path that needs a raw bearer token
+        # instead of going through Invoke-PnPGraphMethod), so it went
+        # unnoticed until a real migration's source tree finally included one.
+        $graphToken = Get-PnPAccessToken -ResourceTypeName Graph -Connection $Connection
         Invoke-WebRequest -Uri "https://graph.microsoft.com/${itemPath}:/content" -Method Put `
             -Headers @{ Authorization = "Bearer $graphToken" } -InFile $TempPath `
             -ContentType 'application/octet-stream' -ErrorAction Stop | Out-Null
