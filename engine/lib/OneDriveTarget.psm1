@@ -127,7 +127,11 @@ function Initialize-GraphDriveFolders {
         [Parameter(Mandatory)][string]$DriveId,
         [Parameter(Mandatory)][AllowEmptyString()][string]$TargetRootPath,
         [Parameter(Mandatory)][AllowEmptyString()][string[]]$RelativeFolderPaths,
-        [scriptblock]$OnProgress
+        [scriptblock]$OnProgress,
+        # Matches the job's own copy concurrency by convention at the call
+        # site, not a separate setting to tune. See the depth-wave comment
+        # below for why this can't just be "throw every path at N lanes".
+        [int]$ThrottleLimit = 4
     )
     $root = $TargetRootPath.Trim('/')
     $allPaths = [System.Collections.Generic.List[string]]::new()
@@ -144,31 +148,135 @@ function Initialize-GraphDriveFolders {
         if (-not $p) { continue }
         $allPaths.Add($(if ($root) { "$root/$p" } else { $p }))
     }
-    $done = 0
-    $total = $allPaths.Count
+
+    # Grouped into depth "waves" rather than one flat queue: creating a
+    # folder requires its PARENT to already exist (Graph 404s otherwise), so
+    # unlike hashing (every file independent) this can't just hand every
+    # path to N lanes at once - a lane could race ahead to a deep path
+    # before another lane finishes its shallower parent. Folders WITHIN one
+    # wave (same depth) have no dependency on each other and are safe to
+    # create concurrently; each wave still fully completes before the next
+    # one starts. Depth is computed explicitly per path rather than trusted
+    # from input order.
+    $waves = [System.Collections.Generic.SortedDictionary[int, System.Collections.Generic.List[string]]]::new()
     foreach ($path in $allPaths) {
         $trimmed = $path.Trim('/')
         if (-not $trimmed) { continue }
-        $parent = if ($trimmed.Contains('/')) { $trimmed.Substring(0, $trimmed.LastIndexOf('/')) } else { '' }
-        $leaf = ($trimmed -split '/')[-1]
-        $parentUrl = if ($parent) {
-            "v1.0/drives/$DriveId/root:/$(ConvertTo-GraphDrivePath -Path $parent):/children"
-        } else {
-            "v1.0/drives/$DriveId/root/children"
+        $depth = ($trimmed -split '/').Count
+        if (-not $waves.ContainsKey($depth)) { $waves[$depth] = [System.Collections.Generic.List[string]]::new() }
+        $waves[$depth].Add($trimmed)
+    }
+    $total = ($waves.Values | ForEach-Object { $_.Count } | Measure-Object -Sum).Sum
+    $done = 0
+
+    # Lanes authorize with a raw bearer token, not a shared PnP $Connection
+    # object - nothing else in this codebase ever uses one PnP connection
+    # concurrently from multiple threads (every copy-phase lane mints its
+    # OWN via Connect-PnPOnline), and there's no documented guarantee doing
+    # so here is safe. Minting a full connection per lane instead would work
+    # too, but costs a real auth round-trip per lane for no benefit - a
+    # bearer token is an immutable string, trivially safe to read from
+    # multiple threads, and this exact pattern (raw Invoke-WebRequest with
+    # an extracted token, not Invoke-PnPGraphMethod) is already how this
+    # module handles a 0-byte file's upload and every BlobTarget.psm1 call -
+    # Get-HttpStatusCode already understands the exception shape it throws.
+    $graphToken = Get-PnPAccessToken -ResourceTypeName Graph -Connection $Connection
+
+    $laneScript = {
+        param($WorkQueue, $ResultQueue, $DriveId, $GraphToken)
+        # NO -Force - same in-process clobbering hazard as every lane in
+        # Invoke-MigrationJob.ps1: a forced re-import here would remove this
+        # module (and the Retry.psm1 it imports, for Get-HttpStatusCode) out
+        # from under every other runspace that already loaded it. No
+        # PnP.PowerShell import needed here at all - see the token comment
+        # above.
+        Import-Module "$using:PSScriptRoot/OneDriveTarget.psm1"
+        $trimmed = $null
+        while ($WorkQueue.TryDequeue([ref]$trimmed)) {
+            $parent = if ($trimmed.Contains('/')) { $trimmed.Substring(0, $trimmed.LastIndexOf('/')) } else { '' }
+            $leaf = ($trimmed -split '/')[-1]
+            $parentPath = if ($parent) {
+                "v1.0/drives/$DriveId/root:/$(ConvertTo-GraphDrivePath -Path $parent):/children"
+            } else {
+                "v1.0/drives/$DriveId/root/children"
+            }
+            $body = @{ name = $leaf; folder = @{}; '@microsoft.graph.conflictBehavior' = 'fail' } | ConvertTo-Json -Compress
+            $errorMessage = $null
+            try {
+                Invoke-WebRequest -Uri "https://graph.microsoft.com/${parentPath}" -Method Post `
+                    -Headers @{ Authorization = "Bearer $GraphToken" } -Body $body -ContentType 'application/json' -ErrorAction Stop | Out-Null
+            } catch {
+                # 409 = the folder already exists, which is exactly what we want.
+                $status = Get-HttpStatusCode -Exception $_.Exception
+                if ($status -ne 409) { $errorMessage = "Could not create OneDrive folder '$trimmed': $($_.Exception.Message)" }
+            }
+            $ResultQueue.Enqueue(@{ Error = $errorMessage })
         }
+    }
+
+    foreach ($depth in $waves.Keys) {
+        $wavePaths = $waves[$depth]
+        if ($wavePaths.Count -eq 1 -or $ThrottleLimit -le 1) {
+            # Not worth thread-spinup overhead for a single-item wave. Inline
+            # directly rather than reusing $laneScript - that scriptblock's
+            # $using:PSScriptRoot only resolves inside a real Start-ThreadJob
+            # context, not a plain same-runspace invocation (and there's
+            # nothing to re-import here anyway - this IS that module).
+            foreach ($trimmed in $wavePaths) {
+                $parent = if ($trimmed.Contains('/')) { $trimmed.Substring(0, $trimmed.LastIndexOf('/')) } else { '' }
+                $leaf = ($trimmed -split '/')[-1]
+                $parentUrl = if ($parent) {
+                    "v1.0/drives/$DriveId/root:/$(ConvertTo-GraphDrivePath -Path $parent):/children"
+                } else {
+                    "v1.0/drives/$DriveId/root/children"
+                }
+                try {
+                    Invoke-PnPGraphMethod -Connection $Connection -Method Post -Url $parentUrl -Content (@{
+                        name                                = $leaf
+                        folder                              = @{}
+                        '@microsoft.graph.conflictBehavior' = 'fail'
+                    }) -ErrorAction Stop | Out-Null
+                } catch {
+                    $status = Get-HttpStatusCode -Exception $_.Exception
+                    if ($status -ne 409) { throw "Could not create OneDrive folder '$trimmed': $($_.Exception.Message)" }
+                }
+                $done++
+                if ($OnProgress) { & $OnProgress $done $total }
+            }
+            continue
+        }
+
+        $workQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+        foreach ($trimmed in $wavePaths) { $workQueue.Enqueue($trimmed) }
+        $resultQueue = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+        $laneCount = [Math]::Max(1, [Math]::Min($ThrottleLimit, $wavePaths.Count))
+        $lanes = 1..$laneCount | ForEach-Object { Start-ThreadJob -ScriptBlock $laneScript -ArgumentList $workQueue, $resultQueue, $DriveId, $graphToken }
         try {
-            Invoke-PnPGraphMethod -Connection $Connection -Method Post -Url $parentUrl -Content (@{
-                name                                = $leaf
-                folder                              = @{}
-                '@microsoft.graph.conflictBehavior' = 'fail'
-            }) -ErrorAction Stop | Out-Null
-        } catch {
-            # 409 = the folder already exists, which is exactly what we want.
-            $status = Get-HttpStatusCode -Exception $_.Exception
-            if ($status -ne 409) { throw "Could not create OneDrive folder '$trimmed': $($_.Exception.Message)" }
+            # Same "NotStarted counts as active too" rule as every other
+            # lane drain loop in this codebase - checking only 'Running'
+            # races lane spin-up.
+            $laneActive = { ($lanes | Where-Object { $_.State -in @('NotStarted', 'Running') }).Count -gt 0 }
+            $firstError = $null
+            while ((& $laneActive) -or $resultQueue.Count -gt 0) {
+                $item = $null
+                $drained = 0
+                while ($drained -lt 500 -and $resultQueue.TryDequeue([ref]$item)) {
+                    $drained++
+                    if ($item.Error -and -not $firstError) { $firstError = $item.Error }
+                    $done++
+                    if ($OnProgress) { & $OnProgress $done $total }
+                }
+                if ($drained -eq 0) { Start-Sleep -Milliseconds 100 }
+            }
+            # Surfaced AFTER the wave fully drains (not the instant one lane
+            # hits it) - simpler than signaling every other lane to stop
+            # early, and errors here are the rare/exceptional case, not the
+            # common path. Thrown before the next (deeper) wave ever starts,
+            # which is the safety invariant that actually matters.
+            if ($firstError) { throw $firstError }
+        } finally {
+            $lanes | Remove-Job -Force -ErrorAction SilentlyContinue
         }
-        $done++
-        if ($OnProgress) { & $OnProgress $done $total }
     }
 }
 
