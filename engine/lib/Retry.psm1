@@ -22,6 +22,37 @@ function Get-HttpStatusCode {
     if ($Exception.Message -match '\((\d{3})\)' ) { return [int]$Matches[1] }
     if ($Exception.Message -match '\b(429|503|502|504|403|401|404|423)\b') { return [int]$Matches[1] }
 
+    # Invoke-PnPGraphMethod's own error text names the HTTP reason phrase, not
+    # the numeric code (".../root/children failed with status code Conflict:
+    # Name already exists") - none of the numeric fallbacks above ever match
+    # it, so every PnP-Graph caller here (409-is-fine folder/file creation,
+    # 404-means-no-drive, Invoke-WithRetry's retry check) silently treated
+    # every Graph failure as unrecognized and re-threw or gave up instead of
+    # handling it. Observed live: OneDrive-target jobs failing hard on the
+    # very first pre-existing folder (e.g. a user's OneDrive already has a
+    # "Documents" folder from Known Folder Move) instead of treating the 409
+    # as "already there".
+    if ($Exception.Message -match 'status code (\w+)') {
+        $reasonPhrase = $Matches[1]
+        $code = switch ($reasonPhrase) {
+            'BadRequest'          { 400; break }
+            'Unauthorized'        { 401; break }
+            'Forbidden'           { 403; break }
+            'NotFound'            { 404; break }
+            'Conflict'            { 409; break }
+            'PreconditionFailed'  { 412; break }
+            'Locked'              { 423; break }
+            'TooManyRequests'     { 429; break }
+            'InternalServerError' { 500; break }
+            'NotImplemented'      { 501; break }
+            'BadGateway'          { 502; break }
+            'ServiceUnavailable'  { 503; break }
+            'GatewayTimeout'      { 504; break }
+            default               { $null }
+        }
+        if ($code) { return $code }
+    }
+
     return $null
 }
 
