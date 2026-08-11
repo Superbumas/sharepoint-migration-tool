@@ -256,6 +256,15 @@ function Get-FileQuickXorHash {
 $script:ReservedDeviceNames = @('CON', 'PRN', 'AUX', 'NUL') +
     @(0..9 | ForEach-Object { "COM$_"; "LPT$_" })
 
+# SharePoint reserves this exact base name (case-insensitive) at ANY level of
+# a document library - including a OneDrive personal library, which is the
+# same engine - for its own internal list-forms folder. A source item
+# literally named "Forms" (an old FrontPage/Outlook artifact, or just a
+# folder someone named that) is rejected with "Name is reserved for list
+# forms folder" no matter how deep it's nested. Observed live on an EACH
+# OneDrive-target job: .../Documents/Documents/Forms.
+$script:ReservedSharePointNames = @('FORMS')
+
 # Makes one path segment (file or folder name) legal for SharePoint Online.
 # Deterministic - the same input always sanitizes identically, which is what
 # keeps resume/skip checks and verification keys stable across runs. Returns
@@ -271,7 +280,10 @@ function ConvertTo-SharePointSafeName {
     # '_vti_' is reserved anywhere in a SharePoint URL (FrontPage legacy).
     $safe = $safe -replace '_vti_', '_vti-'
     $base = [System.IO.Path]::GetFileNameWithoutExtension($safe)
-    if ($base -and $script:ReservedDeviceNames -contains $base.ToUpperInvariant()) { $safe = "_$safe" }
+    if ($base -and (
+        $script:ReservedDeviceNames -contains $base.ToUpperInvariant() -or
+        $script:ReservedSharePointNames -contains $base.ToUpperInvariant()
+    )) { $safe = "_$safe" }
     if (-not $safe) { $safe = '_' }
     return $safe
 }
