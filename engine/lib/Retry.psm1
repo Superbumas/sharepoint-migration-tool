@@ -91,6 +91,13 @@ function Test-IsRetryableStatus {
     # them; neither string occurs in genuine permission/validation errors.
     if ($Message -match 'Cannot access a closed file') { return $true }
     if ($Message -match "has not been initialized\. It has not been requested") { return $true }
+    # Same class of client-side PnP hiccup as the two above (no HTTP status,
+    # no Graph URL in the message - it never left the SDK): a Nullable<T>
+    # unboxed without a HasValue check while PnP parses a call's own result.
+    # Observed live on a OneDrive-target upload (createUploadSession or a
+    # chunk PUT) that otherwise had nothing distinguishing it from the many
+    # adjacent files that succeeded - a retry is expected to just work.
+    if ($Message -match 'Nullable object must have a value') { return $true }
     return $false
 }
 
