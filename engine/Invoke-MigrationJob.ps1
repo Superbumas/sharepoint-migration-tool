@@ -853,7 +853,7 @@ try {
         Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Target folders were already created by a previous run of this job - skipping folder pre-creation." }
     } elseif ($isOneDriveTarget) {
         Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Pre-creating $($tree.Folders.Count) target folder(s) in OneDrive under '$($oneDriveCtx.PathRoot)'" }
-        Initialize-GraphDriveFolders -Connection $oneDriveCtx.Connection -DriveId $oneDriveCtx.DriveId -TargetRootPath $oneDriveCtx.PathRoot -RelativeFolderPaths $tree.Folders -OnProgress {
+        Initialize-GraphDriveFolders -Connection $oneDriveCtx.Connection -DriveId $oneDriveCtx.DriveId -TargetRootPath $oneDriveCtx.PathRoot -RelativeFolderPaths $tree.Folders -ThrottleLimit $Concurrency -OnProgress {
             param($done, $total)
             Write-PhaseProgress -Phase 'preparing_folders' -Data @{ done = $done; total = $total }
         }
