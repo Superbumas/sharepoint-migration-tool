@@ -650,7 +650,20 @@ try {
         # is NDJSON-reserved - and a non-zero exit only matters if the path
         # is genuinely unreadable afterward (e.g. "already connected" while
         # the session is in fact fine).
-        if ($env:FS_SOURCE_USERNAME -and $env:FS_SOURCE_SHARE) {
+        #
+        # `net use` is tried ONLY if the path isn't already readable - not
+        # unconditionally on every job start/resume. `/persistent:no`
+        # sessions are shared across the whole Windows logon session (see
+        # server/util/fsSource.js's identical note and its own 10-minute
+        # reconnect cache for the same reason) - including every OTHER
+        # concurrently-running engine process for a different job against
+        # the same share. Blindly re-issuing `net use` while another job is
+        # actively mid-copy can disrupt its in-flight session. Observed
+        # live: three jobs running concurrently against different
+        # subfolders of \\10.5.53.10\users$ (same share) all started
+        # failing "Access is denied" on OpenRead in a burst right as one of
+        # them resumed and unconditionally reconnected.
+        if ($env:FS_SOURCE_USERNAME -and $env:FS_SOURCE_SHARE -and -not (Test-Path -LiteralPath $SourcePath)) {
             $netOutput = & net use $env:FS_SOURCE_SHARE $env:FS_SOURCE_PASSWORD "/user:$($env:FS_SOURCE_USERNAME)" /persistent:no 2>&1
             if ($LASTEXITCODE -eq 0) {
                 Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Connected to $($env:FS_SOURCE_SHARE) as $($env:FS_SOURCE_USERNAME)." }

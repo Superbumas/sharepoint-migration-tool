@@ -104,6 +104,15 @@ function Test-IsRetryableStatus {
     # message literally says "try to save again." Genuinely never reflects a
     # bad file - always retryable.
     if ($Message -match 'currently being uploaded') { return $true }
+    # A filesystem source's SMB session is shared across every concurrently-
+    # running engine process on this machine (see Invoke-MigrationJob.ps1's
+    # preflight comment and fsSource.js's identical note) - another job
+    # reconnecting to the same share can transiently deny an in-flight
+    # OpenRead here even though the file and the account's permissions are
+    # both fine. Observed live: three jobs against different subfolders of
+    # the same \\server\share all hit a burst of "Access to the path ...
+    # is denied" right as one of them resumed and reconnected.
+    if ($Message -match "Access to the path '.*' is denied") { return $true }
     return $false
 }
 
