@@ -888,6 +888,9 @@ try {
             $sourceMetaMap = Get-GraphFileMap -Connection $sourceConn -DriveId $srcDriveId -RootPath $SourcePath -IncludeDetails -OnProgress {
                 param($count)
                 Write-PhaseProgress -Phase 'indexing_source' -Data @{ files = $count }
+            } -OnRetry {
+                param($attempt, $waitMs, $reason, $statusCode, $message)
+                Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Prefetch (source index) retry $attempt`: $reason - $message" }
             }
         }
         if ($isBlobTarget) {
@@ -896,12 +899,18 @@ try {
             $targetFileMap = Get-GraphFileMap -Connection $oneDriveCtx.Connection -DriveId $oneDriveCtx.DriveId -RootPath $oneDriveCtx.PathRoot -IncludeDetails -OnProgress {
                 param($count)
                 Write-PhaseProgress -Phase 'indexing_target' -Data @{ files = $count }
+            } -OnRetry {
+                param($attempt, $waitMs, $reason, $statusCode, $message)
+                Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Prefetch (target index) retry $attempt`: $reason - $message" }
             }
         } else {
             $tgtDriveId = Get-GraphDriveId -Connection $targetConn -SiteUrl $effTargetSite -Library $effTargetLib
             $targetFileMap = Get-GraphFileMap -Connection $targetConn -DriveId $tgtDriveId -RootPath $targetPathInLib -IncludeDetails -OnProgress {
                 param($count)
                 Write-PhaseProgress -Phase 'indexing_target' -Data @{ files = $count }
+            } -OnRetry {
+                param($attempt, $waitMs, $reason, $statusCode, $message)
+                Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Prefetch (target index) retry $attempt`: $reason - $message" }
             }
         }
         $prefetchNote = if ($isFsSource) { '' } else { ", metadata cached for $($sourceMetaMap.Count) source file(s)" }

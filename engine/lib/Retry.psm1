@@ -113,6 +113,15 @@ function Test-IsRetryableStatus {
     # the same \\server\share all hit a burst of "Access to the path ...
     # is denied" right as one of them resumed and reconnected.
     if ($Message -match "Access to the path '.*' is denied") { return $true }
+    # .NET's own low-level JSON reader message ("Failure to parse near
+    # offset N. Expected an ASCII digit.") - not a PowerShell type-conversion
+    # error, and not anything a specific file's metadata could deterministically
+    # trigger every time. Points at a truncated/corrupted HTTP response body
+    # (throttling, a dropped connection mid-stream) rather than a permanently
+    # malformed one - a retry gets a fresh response. Observed live: a 27,000+
+    # file OneDrive target-index prefetch died on this, with no HTTP status in
+    # the exception at all, aborting the whole bulk scan after 23,391 files.
+    if ($Message -match 'Failure to parse near offset|Expected an ASCII digit') { return $true }
     return $false
 }
 
