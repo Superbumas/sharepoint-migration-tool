@@ -126,6 +126,19 @@ module.exports = {
     return Math.min(60, Math.max(320 / 1024, bytes / (1024 * 1024)));
   })(),
 
+  // Concurrency for hashing a filesystem (DFS/UNC) source's files during
+  // verification (engine/lib/FileSystemSource.psm1's Get-FileSystemFileMap)
+  // - deliberately NOT tied to DEFAULT_JOB_CONCURRENCY/GLOBAL_MAX_CONCURRENCY.
+  // Those bound the copy phase's Graph API calls, which have real throttling
+  // limits to respect; hashing is pure local/LAN file reads with no Graph
+  // traffic at all, and observed live to be latency-bound on the per-file
+  // SMB open, not bandwidth or CPU - a plain multiple of the job's own
+  // concurrency undersells how much more of this a typical file server can
+  // sustain. Defaults higher than job concurrency for exactly that reason;
+  // lower it if a particular file server can't handle this many concurrent
+  // opens (older/smaller servers, or heavy antivirus-on-open scanning).
+  fsSourceHashConcurrency: parseInt(process.env.FS_SOURCE_HASH_CONCURRENCY || '16', 10),
+
   // Optional server-wide FALLBACK roots for the file-share (DFS) migration
   // source - the normal way is per-project via the Settings page
   // (projects.fs_source_roots); server/util/fsSource.js merges both.

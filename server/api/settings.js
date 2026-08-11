@@ -28,6 +28,7 @@ router.get('/settings', (req, res) => {
     defaultJobConcurrency: config.defaultJobConcurrency,
     globalMaxConcurrency: config.globalMaxConcurrency,
     oneDriveUploadChunkSizeMB: config.oneDriveUploadChunkSizeMB,
+    fsSourceHashConcurrency: config.fsSourceHashConcurrency,
     retryRateBackoffThreshold: config.retryRateBackoffThreshold,
     slowTransferThresholdMs: config.slowTransferThresholdMs,
     enginePermissionMode: config.enginePermissionMode,
