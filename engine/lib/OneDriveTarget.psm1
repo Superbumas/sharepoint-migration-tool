@@ -71,6 +71,38 @@ function Get-OneDriveDriveId {
     return $drive.id
 }
 
+# Per-file existence/match fallback for when the bulk target-index prefetch
+# (Get-GraphFileMap) is unavailable - mirrors BlobTarget.psm1's
+# Test-BlobTargetMatches, which every OTHER lane already falls back to in
+# this situation. The OneDrive lane used to have no equivalent at all and
+# would blindly re-upload every remaining file instead - "safe" (Graph's
+# conflictBehavior=replace just overwrites identically) but, on a large
+# tree, catastrophically wasteful: a single bad page deep into a 27,000-file
+# prefetch (observed live: a JSON parse error from Invoke-PnPGraphMethod,
+# "Failure to parse near offset 178. Expected an ASCII digit") aborted the
+# WHOLE prefetch and re-uploaded everything after that point, including
+# many-hundred-MB files already sitting correctly at the target. A single
+# GET by path (not a full listing) - 404 cleanly means "not there yet".
+function Test-OneDriveTargetMatches {
+    param(
+        [Parameter(Mandatory)]$Connection,
+        [Parameter(Mandatory)][string]$DriveId,
+        [Parameter(Mandatory)][string]$RelPath,
+        [Parameter(Mandatory)][long]$ExpectedSize,
+        $SourceModified = $null
+    )
+    try {
+        $item = Invoke-PnPGraphMethod -Url "v1.0/drives/$DriveId/root:/$(ConvertTo-GraphDrivePath -Path $RelPath)?`$select=size,lastModifiedDateTime" -Connection $Connection -ErrorAction Stop
+    } catch {
+        return $false
+    }
+    if ([long]$item.size -ne $ExpectedSize) { return $false }
+    if ($SourceModified -and $item.lastModifiedDateTime) {
+        if ([datetime]$item.lastModifiedDateTime -lt [datetime]$SourceModified) { return $false }
+    }
+    return $true
+}
+
 # Ensures every folder under the drive that the migration needs exists:
 # $TargetRootPath itself AND all of its own ancestor segments, then every
 # entry in $RelativeFolderPaths (each relative to the root). Created shallow-
@@ -341,4 +373,4 @@ function Save-OneDriveFileFromSharePoint {
 
 Export-ModuleMember -Function `
     Get-OneDriveDriveId, Initialize-GraphDriveFolders, Send-GraphDriveFile, `
-    Save-OneDriveSourceFileToPath, Save-OneDriveFileFromSharePoint
+    Save-OneDriveSourceFileToPath, Save-OneDriveFileFromSharePoint, Test-OneDriveTargetMatches
