@@ -394,6 +394,26 @@ function runJob(jobId, actor, tenantId) {
     throw httpError(409, `Cannot run a job in status "${job.status}". It must be "approved" (first run) or "paused" (resume).`);
   }
   if (runningJobs.has(jobId)) throw httpError(409, 'Job already has a running engine process.');
+
+  // releaseRunningState() (see its own comment below) frees a job for a new
+  // run as soon as the engine SELF-REPORTS pausing/cancelling/finishing,
+  // without waiting for the OS to confirm the old process actually exited -
+  // a deliberate tradeoff to avoid a resume-right-after-pause false "already
+  // running" error. That leaves a real window where the old engine process
+  // can still be alive (and still mid-upload) when a new one spawns for the
+  // same job, both writing to the same target simultaneously. Observed live:
+  // two engines racing OneDrive createUploadSession for the same files, one
+  // losing every single call with "A file with the same name is currently
+  // being uploaded." Same belt-and-braces kill reconcileOrphanedJobs already
+  // does at startup, applied here too since the identical gap exists at
+  // resume time - killing an already-dead pid is a harmless no-op.
+  if (job.pid) {
+    try {
+      process.kill(job.pid);
+      clog.warn('jobs', `Killed a still-alive engine process ${job.pid} left over from before this run (job "${job.name}").`);
+    } catch { /* already gone - the normal case */ }
+  }
+
   const blobConnectionString = job.target_provider === 'azure_blob'
     ? resolveBlobConnectionString(job.tenant_id || config.tenantId) : null;
   if (job.target_provider === 'azure_blob' && !blobConnectionString) {
@@ -834,6 +854,14 @@ function handleEngineEvent(jobId, event, state) {
       break;
     }
     case 'paused': {
+      // Deliberately does NOT null pid here, unlike the other terminal-state
+      // UPDATEs in this file - those all run from the OS 'close' event (via
+      // finalizeJobProcess), once the process is confirmed dead, so nulling
+      // pid there is safe. This handler instead fires on the ENGINE's OWN
+      // NDJSON self-report, which can arrive before the OS actually confirms
+      // the process exited (see releaseRunningState's comment) - keeping the
+      // pid around here is exactly what lets runJob()'s kill-before-resume
+      // check above catch a process that didn't really finish dying.
       db.prepare(
         `UPDATE jobs SET status = 'paused', paused_at = datetime('now'), pause_requested = 0, phase_json = NULL, checkpoint_json = ? WHERE id = ?`
       ).run(JSON.stringify(event.checkpoint || {}), jobId);
