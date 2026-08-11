@@ -1258,11 +1258,10 @@ try {
     # $resultQueue as every other lane, so the drain loop, checkpointing and
     # adaptive concurrency below need no changes to support this target.
     #
-    # Unlike the other lanes, there is no per-file HEAD/existence fallback
-    # when the prefetched $TargetFileMap is unavailable (a rare prefetch
-    # failure) - every file is simply re-uploaded. Safe (Graph's
-    # conflictBehavior=replace on the upload just overwrites identically),
-    # just less efficient than the other lanes' fallback in that rare case.
+    # Same per-file HEAD/existence fallback as the other lanes (see
+    # Test-OneDriveTargetMatches) when the prefetched $TargetFileMap is
+    # unavailable - a prefetch failure partway through a large tree used to
+    # mean every remaining file got blindly re-uploaded.
     $laneScriptOneDrive = {
         param($LaneIndex, $WorkQueue, $ResultQueue, $Shared, $IsFsSource, $ClientId, $TenantId,
               $CertThumbprint, $CertificateBase64Encoded, $CertificatePassword, $ControlFilePath,
@@ -1332,14 +1331,18 @@ try {
 
             # Skip/delta check: prefer the prefetched target index (memory
             # lookup, zero network) - same rule as every other lane: same size
-            # AND target at least as new as the source. See the module-level
-            # comment above for why there is no per-file fallback here.
+            # AND target at least as new as the source. Falls back to a
+            # single per-file Graph GET (Test-OneDriveTargetMatches) when the
+            # prefetch itself failed, same as the other lanes already do.
             $alreadyDone = $false
             if ($null -ne $TargetFileMap) {
                 $existing = $TargetFileMap[$relKey]
                 $alreadyDone = $existing -and
                     ([long]$existing.Size -eq [long]$item.Size) -and
                     (-not $item.Modified -or -not $existing.Modified -or $existing.Modified -ge [datetime]$item.Modified)
+            } else {
+                $alreadyDone = Test-OneDriveTargetMatches -Connection $laneOneDriveConn -DriveId $TargetDriveId `
+                    -RelPath $targetRelPath -ExpectedSize $item.Size -SourceModified $item.Modified
             }
 
             if ($alreadyDone) {
