@@ -82,6 +82,13 @@ param(
     # Graph chunk size before it ever reaches here). Ignored by every other
     # target.
     [int]$OneDriveChunkSizeMB = 5,
+    # A filesystem source's verification hashing (Get-FileSystemFileMap)
+    # deliberately runs at its OWN concurrency, not -Concurrency - that one
+    # bounds Graph API calls (real throttling limits to respect), while
+    # hashing is pure local/LAN file reads with no Graph traffic at all and
+    # was observed live to be bound by per-file SMB open latency, not
+    # bandwidth or CPU. Set via FS_SOURCE_HASH_CONCURRENCY (server/config.js).
+    [int]$FsHashConcurrency = 16,
     # Secret: defaults from the environment - the orchestrator passes it
     # there (buildEngineSpawnEnv) because command lines are readable by any
     # local process on Windows. The parameter form still works for manual
@@ -243,9 +250,10 @@ function Invoke-VerificationPhase {
         # onedrive-target only: @{ Connection; DriveId; PathRoot }
         [hashtable]$OneDriveCtx,
         # Passed straight through to Get-FileSystemFileMap's -ThrottleLimit
-        # for a filesystem source's hashing lanes - matches the job's own
-        # copy concurrency by convention, not a separate setting to tune.
-        [int]$Concurrency = 4
+        # for a filesystem source's hashing lanes - deliberately its own
+        # setting, not the job's Graph-bound copy concurrency (see
+        # -FsHashConcurrency's own doc comment on the main param block).
+        [int]$FsHashConcurrency = 16
     )
     try {
         $isBlob = $TargetProvider -eq 'azure_blob'
@@ -260,7 +268,7 @@ function Invoke-VerificationPhase {
             # (source: filesystem hash walk or the source drive; target:
             # OneDriveCtx's drive, resolved once at connection setup).
             $srcMap = if ($isFsSource) {
-                Get-FileSystemFileMap -RootPath $SourcePathInLib -IncludeHash -ThrottleLimit $Concurrency -OnProgress {
+                Get-FileSystemFileMap -RootPath $SourcePathInLib -IncludeHash -ThrottleLimit $FsHashConcurrency -OnProgress {
                     param($count)
                     Write-PhaseProgress -Phase 'hashing_source' -Data @{ files = $count }
                 }
@@ -274,7 +282,7 @@ function Invoke-VerificationPhase {
             # Local QuickXorHash of every source file vs the hash SharePoint
             # computed server-side for the uploaded copy - reads every source
             # byte, which is exactly what makes this verification honest.
-            $srcMap = Get-FileSystemFileMap -RootPath $SourcePathInLib -IncludeHash -ThrottleLimit $Concurrency -OnProgress {
+            $srcMap = Get-FileSystemFileMap -RootPath $SourcePathInLib -IncludeHash -ThrottleLimit $FsHashConcurrency -OnProgress {
                 param($count)
                 Write-PhaseProgress -Phase 'hashing_source' -Data @{ files = $count }
             }
@@ -498,7 +506,7 @@ try {
         SourceSite      = $SourceSiteUrl
         SourceLib       = $SourceLibrary
         SourcePathInLib = $SourcePath
-        Concurrency     = $Concurrency
+        FsHashConcurrency = $FsHashConcurrency
     }
     if ($isBlobTarget) {
         $verifyArgs.BlobCtx = $blobCtx
