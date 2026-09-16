@@ -621,6 +621,9 @@ function consoleEngineEvent(job, event) {
         : p.phase === 'indexing_source' ? `indexing source metadata — ${(p.files ?? 0).toLocaleString()} files`
         : p.phase === 'indexing_target' ? `indexing existing target files — ${(p.files ?? 0).toLocaleString()} files`
         : p.phase === 'hashing_source' ? `hashing source files for verification — ${(p.files ?? 0).toLocaleString()} files`
+        : p.phase === 'cleaning' ? `cleaning source — ${(p.deleted ?? 0).toLocaleString()} recycled, ${(p.kept ?? 0).toLocaleString()} kept of ${(p.total ?? 0).toLocaleString()}`
+        : p.phase === 'clearing_folders' ? `recycling emptied folders — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
+        : p.phase === 'purging' ? `purging recycle bin — ${(p.purged ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
         : p.phase;
       clog.progress('job', `${name}: ${label}`);
       break;

@@ -538,15 +538,17 @@ try {
             param($count)
             Write-PhaseProgress -Phase 'indexing_source' -Data @{ files = $count }
         }
+        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Source indexed: $($srcMap.Count) file(s). Now indexing the migrated copies at the target (takes about as long again on large libraries) - nothing is deleted until both indexes are complete." }
+        $tgtProgress = { param($count) Write-PhaseProgress -Phase 'indexing_target' -Data @{ files = $count } }
         $tgtMap = if ($isBlobTarget) {
             Get-BlobKeyMap -BlobEndpoint $blobCtx.BlobEndpoint -Container $blobCtx.Container -Sas $blobCtx.Sas -Prefix $blobCtx.Prefix
         } elseif ($isOneDriveTarget) {
-            Get-GraphFileMap -Connection $oneDriveCtx.Connection -DriveId $oneDriveCtx.DriveId -RootPath $oneDriveCtx.PathRoot
+            Get-GraphFileMap -Connection $oneDriveCtx.Connection -DriveId $oneDriveCtx.DriveId -RootPath $oneDriveCtx.PathRoot -OnProgress $tgtProgress
         } else {
             $tgtDriveId = Get-GraphDriveId -Connection $targetConn -SiteUrl $effTargetSite -Library $effTargetLib
-            Get-GraphFileMap -Connection $targetConn -DriveId $tgtDriveId -RootPath $targetPathInLib
+            Get-GraphFileMap -Connection $targetConn -DriveId $tgtDriveId -RootPath $targetPathInLib -OnProgress $tgtProgress
         }
-        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Cleanup check: $($srcMap.Count) source file(s) vs $($tgtMap.Count) migrated file(s)." }
+        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Cleanup check: $($srcMap.Count) source file(s) vs $($tgtMap.Count) migrated file(s). Re-verifying and recycling each file now..." }
 
         # Same acceptance rule as verification: exact size+hash, hash
         # unavailable degrades to size-only, and Office documents may differ
