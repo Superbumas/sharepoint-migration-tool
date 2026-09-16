@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../lib/api';
 import { socket } from '../lib/socket';
-import StatCard from './StatCard';
+import StatusPill from './StatusPill';
 
 function formatBytes(n) {
   if (!n) return '0 B';
@@ -127,6 +127,9 @@ export default function JobDetail() {
   // flight right now (item_progress heartbeats - big files only, small ones
   // finish between ticks). Live-only: never persisted, cleared on completion.
   const [uploads, setUploads] = useState({});
+  const [logFilter, setLogFilter] = useState('all');
+  const [follow, setFollow] = useState(true);
+  const [showProblems, setShowProblems] = useState(false);
   const kpiDebounce = useRef(null);
   const logRef = useRef(null);
   // Pin the log view to the newest line, but stop pinning while the user has
@@ -141,7 +144,15 @@ export default function JobDetail() {
   function onLogScroll() {
     const el = logRef.current;
     if (!el) return;
-    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    stickToBottom.current = atBottom;
+    if (atBottom !== follow) setFollow(atBottom);
+  }
+  function toggleFollow() {
+    const next = !follow;
+    setFollow(next);
+    stickToBottom.current = next;
+    if (next && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }
 
   function refreshJob() {
@@ -247,13 +258,112 @@ export default function JobDetail() {
 
   if (!job) return <div className="text-slate-500">Loading job...</div>;
 
+  const phaseText = job.phase && phaseLabel(job.phase) && ['running', 'completed'].includes(job.status) ? phaseLabel(job.phase) : null;
+  const isLive = ['running', 'paused'].includes(job.status);
+  const done = (job.progress.itemsDone || 0) + (job.progress.itemsSkipped || 0);
+  const pct = job.totals.items > 0 ? Math.min(100, (done / job.totals.items) * 100) : (job.status === 'completed' ? 100 : 0);
+  const laneCount = Math.max(1, Math.min(8, job.concurrency || Object.keys(uploads).length || 1));
+  // Lanes are fixed slots: a file starting or finishing swaps a slot's content
+  // instead of adding/removing rows, so the log above never moves.
+  const laneEntries = Object.entries(uploads).sort(([a], [b]) => String(a).localeCompare(String(b), undefined, { numeric: true }));
+  const lanes = Array.from({ length: laneCount }, (_, i) => laneEntries[i] ? laneEntries[i][1] : null);
+  const visibleLog = log.filter((l) => {
+    if (logFilter === 'all') return true;
+    if (logFilter === 'failures') return l.event_type === 'item_failed' || l.event_type === 'verify_mismatch' || l.event_type === 'job_failed' || (l.event_type === 'log' && l.level === 'error');
+    if (logFilter === 'warnings') return l.event_type === 'item_retry' || l.event_type === 'source_kept' || l.event_type === 'job_interrupted' || (l.event_type === 'log' && l.level === 'warn');
+    if (logFilter === 'job') return String(l.event_type || '').startsWith('job_') || ['verification_summary', 'verify_started', 'cleanup_started', 'cleanup_summary', 'purge_started', 'purge_summary'].includes(l.event_type);
+    return true;
+  });
+  const failureCount = log.filter((l) => l.event_type === 'item_failed' || l.event_type === 'verify_mismatch' || (l.event_type === 'log' && l.level === 'error')).length;
+  const warningCount = log.filter((l) => l.event_type === 'item_retry' || (l.event_type === 'log' && l.level === 'warn')).length;
+  const v = job.verification;
+  const problemCount = v && !v.ok ? v.missing + v.sizeMismatch + v.hashMismatch : 0;
+
+  const notices = [];
+  if (isLive && job.progress.itemsFailed > 0) {
+    notices.push({ key: 'failed', tone: 'warn', title: `${job.progress.itemsFailed} file(s) failed so far`, detail: 'see the Failures filter in the log', action: <button onClick={() => setLogFilter('failures')} className="text-xs font-medium text-blue-600 hover:underline shrink-0">Show in log</button> });
+  }
+  if (v) {
+    notices.push({
+      key: 'verify', tone: v.ok ? 'ok' : 'error',
+      title: v.ok ? `Verified: ${v.identical} of ${v.sourceFiles} files byte-identical` : `Verification found ${problemCount} problem(s)`,
+      detail: [
+        !v.ok && `${v.missing} missing · ${v.sizeMismatch} size / ${v.hashMismatch} hash mismatches`,
+        v.officeRewritten > 0 && `${v.officeRewritten} Office file(s) re-stamped by SharePoint (expected)`,
+        job.verifiedAt && `verified ${job.verifiedAt}`,
+      ].filter(Boolean).join(' · '),
+      action: (
+        <>
+          {!v.ok && v.problems?.length > 0 && (
+            <button onClick={() => setShowProblems((s) => !s)} className="text-xs font-medium text-blue-600 hover:underline shrink-0">{showProblems ? 'Hide files' : `Show ${v.problems.length} files`}</button>
+          )}
+          {!v.ok && job.status === 'completed' && <button onClick={() => act('restart')} className="btn-primary shrink-0">Re-run to repair…</button>}
+        </>
+      ),
+      expanded: !v.ok && showProblems && v.problems?.length > 0 && (
+        <div className="max-h-48 overflow-y-auto border-t border-slate-100 bg-slate-50/60 pl-11 pr-4 py-1">
+          {v.problems.map((p) => (
+            <div key={`${p.reason}:${p.path}`} className="grid grid-cols-[72px_minmax(0,1fr)] gap-3 items-baseline text-xs py-1">
+              <span className="rounded bg-red-100 text-red-700 px-1.5 py-0.5 uppercase text-[10px] font-medium text-center">{p.reason}</span>
+              <span className="font-mono truncate text-slate-700" title={p.path}>{p.path}</span>
+            </div>
+          ))}
+          {v.problemsTruncated && <div className="text-xs text-slate-500 py-1">List capped at 200 files — the full set is in the job log (verify entries).</div>}
+        </div>
+      ),
+    });
+  }
+  if (job.cleanup) {
+    notices.push({
+      key: 'cleanup', tone: job.cleanup.kept > 0 ? 'warn' : 'ok',
+      title: 'Source cleanup',
+      detail: [
+        `${job.cleanup.deleted?.toLocaleString()} file(s) moved to the source recycle bin`,
+        `${job.cleanup.foldersDeleted?.toLocaleString()} emptied folder(s) removed`,
+        job.cleanup.kept > 0 && `${job.cleanup.kept} file(s) kept (did not re-verify — see the log)`,
+        job.cleanup.purged != null && `${job.cleanup.purged.toLocaleString()} purged permanently (${formatBytes(job.cleanup.purgedBytes)})`,
+        job.cleanedAt,
+      ].filter(Boolean).join(' · '),
+    });
+    if (job.cleanup.purged == null) {
+      notices.push({
+        key: 'purge', tone: 'info', title: 'Recycled files still count toward SharePoint storage',
+        detail: 'up to 93 days · purging frees the space now, scoped to this job\'s source folder only',
+        action: <button onClick={() => act('purge-recycle-bin')} className="btn-danger shrink-0">Purge recycled items…</button>,
+      });
+    }
+  }
+  // Source cleanup only exists for SharePoint sources - the engine never
+  // deletes from a file share (no recycle bin to soften it).
+  if (job.status === 'completed' && v?.ok && !job.cleanup && job.source.provider !== 'filesystem') {
+    notices.push({
+      key: 'archive', tone: 'info', title: 'Archive complete?',
+      detail: 'every file is hash-verified at the target · move the source files to the site\'s recycle bin (recoverable ~93 days), each re-verified once more at deletion time',
+      action: <button onClick={() => act('cleanup-source')} className="btn-danger shrink-0">Delete source files…</button>,
+    });
+  }
+  if (job.errorMessage) notices.push({ key: 'jobError', tone: 'error', title: job.errorMessage });
+  if (error) notices.push({ key: 'actError', tone: 'error', title: error });
+
+  const stats = kpis && [
+    { label: 'Throughput', value: `${kpis.throughput.filesPerMin}`, unit: 'files/min', sub: `${kpis.throughput.mbPerMin} MB/min` },
+    { label: 'ETA', value: kpis.etaSeconds != null ? `${Math.round(kpis.etaSeconds / 60)} min` : '—', sub: kpis.etaSeconds != null ? `finishes ~${new Date(Date.now() + kpis.etaSeconds * 1000).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}` : '' },
+    { label: 'Success rate', value: `${kpis.successRatePct ?? '—'}%`, sub: `${kpis.errorRatePct ?? '—'}% errors` },
+    { label: 'Failed', value: kpis.files.failed, tone: kpis.files.failed > 0 ? 'text-red-600' : '', sub: kpis.files.failed > 0 ? 'retried at end of run' : '' },
+    { label: 'Skipped', value: kpis.files.skipped, sub: 'already identical' },
+    { label: 'Retries 3+', value: kpis.retryDistribution['3+'], sub: `of ${kpis.files.done.toLocaleString()} items` },
+  ];
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <div>
         <Link to="/jobs" className="text-xs text-slate-500 hover:underline">&larr; Back to queue</Link>
-        <div className="flex items-center justify-between mt-1">
-          <h1 className="text-xl font-semibold text-slate-800">{job.name}</h1>
-          <div className="space-x-2">
+        <div className="flex items-center justify-between gap-4 mt-1">
+          <div className="flex items-center gap-3 min-w-0">
+            <h1 className="text-xl font-semibold text-slate-800 truncate">{job.name}</h1>
+            <StatusPill status={job.status} />
+          </div>
+          <div className="flex gap-2 shrink-0">
             {job.status === 'queued' && <button onClick={() => act('approve')} className="btn-primary">Approve</button>}
             {job.status === 'approved' && <button onClick={() => act('run')} className="btn-primary">Run</button>}
             {job.status === 'running' && <button onClick={() => act('pause')} className="btn-secondary">Pause</button>}
@@ -284,205 +394,194 @@ export default function JobDetail() {
               </span>
             )} · {job.action}
         </div>
-        {job.verification && (
-          <div className={`mt-2 text-sm rounded-md p-2 border ${job.verification.ok ? 'text-green-800 bg-green-50 border-green-200' : 'text-red-700 bg-red-50 border-red-200'}`}>
-            {job.verification.ok
-              ? `✓ Verified: ${job.verification.identical} of ${job.verification.sourceFiles} files byte-identical (content hash)`
-              : `⚠ Verification found ${job.verification.missing + job.verification.sizeMismatch + job.verification.hashMismatch} problem(s): ${job.verification.missing} missing, ${job.verification.sizeMismatch} size / ${job.verification.hashMismatch} hash mismatches`}
-            {job.verification.officeRewritten > 0 && (
-              <span className="text-slate-500"> · {job.verification.officeRewritten} Office file(s) re-stamped by SharePoint (expected, content intact)</span>
-            )}
-            {job.verifiedAt && <span className="text-slate-400"> · verified {job.verifiedAt}</span>}
-            {!job.verification.ok && job.verification.problems?.length > 0 && (
-              <ul className="mt-2 max-h-48 overflow-y-auto space-y-0.5 border-t border-red-200 pt-2">
-                {job.verification.problems.map((p) => (
-                  <li key={`${p.reason}:${p.path}`} className="flex items-start gap-2 text-xs">
-                    <span className="shrink-0 rounded bg-red-100 text-red-700 px-1 py-0.5 uppercase text-[10px] font-medium">{p.reason}</span>
-                    <span className="font-mono break-all text-red-800">{p.path}</span>
-                  </li>
-                ))}
-                {job.verification.problemsTruncated && (
-                  <li className="text-xs text-slate-500">List capped at 200 files — the full set is in the job log (verify entries).</li>
-                )}
-              </ul>
-            )}
-          </div>
-        )}
-        {job.status === 'completed' && job.verification && !job.verification.ok && (
-          <div className="mt-2 text-sm rounded-md p-2 border text-slate-600 bg-slate-50 border-slate-200 flex items-center justify-between gap-3 flex-wrap">
-            <span>
-              <span className="font-medium text-slate-700">Retry the failed files:</span>{' '}
-              re-running this job skips every verified copy and re-copies only the files above, then verifies the whole tree again.
-            </span>
-            <button onClick={() => act('restart')} className="btn-primary shrink-0">Re-run to repair…</button>
-          </div>
-        )}
-        {job.cleanup && (
-          <div className={`mt-2 text-sm rounded-md p-2 border ${job.cleanup.kept > 0 ? 'text-amber-800 bg-amber-50 border-amber-200' : 'text-green-800 bg-green-50 border-green-200'}`}>
-            🗑 Source cleanup: {job.cleanup.deleted?.toLocaleString()} file(s) moved to the source recycle bin, {job.cleanup.foldersDeleted?.toLocaleString()} emptied folder(s) removed
-            {job.cleanup.kept > 0 && <> · <span className="font-medium">{job.cleanup.kept} file(s) kept</span> (did not re-verify — see the log)</>}
-            {job.cleanup.purged != null && <> · <span className="font-medium">{job.cleanup.purged.toLocaleString()} purged permanently ({formatBytes(job.cleanup.purgedBytes)})</span></>}
-            {job.cleanedAt && <span className="text-slate-400"> · {job.cleanedAt}</span>}
-          </div>
-        )}
-        {job.cleanup && job.cleanup.purged == null && (
-          <div className="mt-2 text-sm rounded-md p-2 border text-slate-600 bg-slate-50 border-slate-200 flex items-center justify-between gap-3 flex-wrap">
-            <span>
-              <span className="font-medium text-slate-700">Storage note:</span>{' '}
-              the recycled files still count toward SharePoint storage for up to 93 days. To free the space now, permanently purge the items this job recycled (scoped to this job's source folder only).
-            </span>
-            <button onClick={() => act('purge-recycle-bin')} className="btn-danger shrink-0">Purge recycled items…</button>
-          </div>
-        )}
-        {/* Source cleanup only exists for SharePoint sources - the engine
-            never deletes from a file share (no recycle bin to soften it). */}
-        {job.status === 'completed' && job.verification?.ok && !job.cleanup && job.source.provider !== 'filesystem' && (
-          <div className="mt-2 text-sm rounded-md p-2 border text-slate-600 bg-slate-50 border-slate-200 flex items-center justify-between gap-3 flex-wrap">
-            <span>
-              <span className="font-medium text-slate-700">Archive complete?</span>{' '}
-              Every file is hash-verified at the target. You can now move the source files to the site's recycle bin (recoverable ~93 days) — each file is re-verified once more at deletion time.
-            </span>
-            <button onClick={() => act('cleanup-source')} className="btn-danger shrink-0">Delete source files…</button>
-          </div>
-        )}
-        {job.errorMessage && <div className="mt-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-md p-2">{job.errorMessage}</div>}
-        {error && <div className="mt-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-md p-2">{error}</div>}
       </div>
 
-      {job.phase && phaseLabel(job.phase) && ['running', 'completed'].includes(job.status) && (
-        <div className="rounded-lg border border-blue-200 bg-gradient-to-r from-blue-50 to-indigo-50 p-3 flex items-center gap-3">
-          <span className="relative flex h-3 w-3 shrink-0">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-            <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500" />
-          </span>
-          <div className="flex-1 min-w-0">
-            <div className="text-sm font-medium text-blue-900 truncate">{phaseLabel(job.phase)}</div>
-            {job.phase.phase === 'preparing_folders' && job.phase.total > 0 && (
-              <div className="mt-1.5 h-1.5 bg-blue-100 rounded-full overflow-hidden">
-                <div className="h-full bg-blue-500 rounded-full transition-all duration-500" style={{ width: `${Math.min(100, (job.phase.done / job.phase.total) * 100)}%` }} />
+      {/* Notices: one card, one 44px row per notice - icon, one-line message,
+          action on the right. Replaces the stack of tinted banners whose
+          varying heights shoved everything below them around. */}
+      {notices.length > 0 && (
+        <div className="bg-white border border-slate-200 rounded-lg overflow-hidden divide-y divide-slate-100">
+          {notices.map((n) => (
+            <div key={n.key}>
+              <div className="flex items-center gap-3 px-4 py-2.5 min-h-[44px]">
+                <NoticeIcon tone={n.tone} />
+                <span className="flex-1 min-w-0 truncate text-sm text-slate-700" title={[n.title, n.detail].filter(Boolean).join(' · ')}>
+                  <span className="font-medium">{n.title}</span>
+                  {n.detail && <span className="text-slate-500"> · {n.detail}</span>}
+                </span>
+                {n.action}
               </div>
-            )}
-          </div>
-          <span className="text-xs text-blue-400 shrink-0">preparing…</span>
+              {n.expanded}
+            </div>
+          ))}
         </div>
       )}
 
-      {job.totals.items > 0 && ['running', 'paused'].includes(job.status) && !(job.phase && phaseLabel(job.phase)) && (() => {
-        const done = (job.progress.itemsDone || 0) + (job.progress.itemsSkipped || 0);
-        const pct = Math.min(100, (done / job.totals.items) * 100);
-        return (
-          <div className="rounded-lg border border-slate-200 bg-white p-3">
-            <div className="flex items-baseline justify-between text-sm mb-1.5">
-              <span className="font-medium text-slate-700">
-                {job.status === 'paused' ? '⏸ Paused — ' : ''}
-                {done.toLocaleString()} of {job.totals.items.toLocaleString()} files
-                {job.progress.itemsFailed > 0 && <span className="text-red-600"> · {job.progress.itemsFailed} failed</span>}
+      {/* Progress + phase + stats in one fixed-shape card. The phase line and
+          the file count share a slot, so the card is the same height whether
+          the engine is enumerating, copying or paused. */}
+      {(isLive || phaseText || kpis) && (
+        <div className="bg-white border border-slate-200 rounded-lg p-4 space-y-3">
+          <div className="flex items-baseline justify-between gap-4 text-sm">
+            <div className="flex items-center gap-2.5 min-w-0">
+              {job.status === 'running' && (
+                <span className="relative flex h-3 w-3 shrink-0">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500" />
+                </span>
+              )}
+              <span className="font-medium text-slate-700 truncate">
+                {phaseText
+                  ? phaseText
+                  : job.status === 'paused'
+                    ? `Paused — ${done.toLocaleString()} of ${job.totals.items.toLocaleString()} files`
+                    : job.status === 'completed'
+                      ? `Completed — ${done.toLocaleString()} of ${job.totals.items.toLocaleString()} files`
+                      : `${done.toLocaleString()} of ${job.totals.items.toLocaleString()} files`}
               </span>
-              <span className="text-slate-500 tabular-nums">{formatBytes(job.progress.bytesDone)} / {formatBytes(job.totals.bytes)} · {pct.toFixed(1)}%</span>
+              {isLive && job.progress.itemsFailed > 0 && <span className="text-red-600 shrink-0">· {job.progress.itemsFailed} failed</span>}
             </div>
-            <div className="h-2.5 bg-slate-100 rounded-full overflow-hidden">
-              <div
-                className={`h-full rounded-full transition-all duration-500 ${job.status === 'paused' ? 'bg-amber-400' : 'bg-gradient-to-r from-blue-500 to-indigo-500'}`}
-                style={{ width: `${pct}%` }}
-              />
-            </div>
+            <span className="text-slate-500 tabular-nums shrink-0">{formatBytes(job.progress.bytesDone)} / {formatBytes(job.totals.bytes)} · {pct.toFixed(1)}%</span>
           </div>
-        );
-      })()}
-
-      {kpis && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <StatCard label="Files done / total" value={`${kpis.files.done.toLocaleString()} / ${(kpis.files.total ?? 0).toLocaleString()}`} />
-          <StatCard label="Bytes done / total" value={`${formatBytes(kpis.bytes.done)} / ${formatBytes(kpis.bytes.total)}`} />
-          <StatCard label="Throughput" value={`${kpis.throughput.filesPerMin} files/min`} sub={`${kpis.throughput.mbPerMin} MB/min`} />
-          <StatCard label="ETA" value={kpis.etaSeconds != null ? `${Math.round(kpis.etaSeconds / 60)} min` : '-'} />
-          <StatCard label="Success / Error rate" value={`${kpis.successRatePct ?? '-'}% / ${kpis.errorRatePct ?? '-'}%`} />
-          <StatCard label="Failed" value={kpis.files.failed} tone="danger" />
-          <StatCard label="Skipped" value={kpis.files.skipped} />
-          <StatCard label="Retries (3+ / total items)" value={`${kpis.retryDistribution['3+']}`} />
+          <div className="h-2.5 bg-slate-100 rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all duration-500 ${job.status === 'paused' ? 'bg-amber-400' : job.status === 'completed' ? 'bg-green-500' : 'bg-gradient-to-r from-blue-500 to-indigo-500'}`}
+              style={{ width: `${job.phase?.phase === 'preparing_folders' && job.phase.total > 0 ? Math.min(100, (job.phase.done / job.phase.total) * 100) : pct}%` }}
+            />
+          </div>
+          {stats && (
+            <div className="grid grid-cols-3 md:grid-cols-6 gap-4 pt-3 border-t border-slate-100">
+              {stats.map((s) => (
+                <div key={s.label} className="min-w-0">
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">{s.label}</div>
+                  <div className={`text-lg font-semibold tabular-nums leading-6 ${s.tone || 'text-slate-800'}`}>
+                    {s.value}{s.unit && <span className="text-xs font-normal text-slate-500"> {s.unit}</span>}
+                  </div>
+                  <div className="text-xs text-slate-400 truncate">{s.sub || ' '}</div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
       <div className="bg-white border border-slate-200 rounded-lg p-4">
-        <div className="flex items-center justify-between mb-2">
-          <h2 className="text-sm font-semibold text-slate-700 flex items-center gap-2">
-            Live log
-            {job.status === 'running' && (
-              <span className="relative flex h-2 w-2" title="Job is running">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
+        <div className="flex items-center justify-between gap-4 mb-2">
+          <div className="flex items-center gap-3">
+            <h2 className="text-sm font-semibold text-slate-700 flex items-center gap-2">
+              Live log
+              {job.status === 'running' && (
+                <span className="relative flex h-2 w-2" title="Job is running">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
+                </span>
+              )}
+            </h2>
+            <div className="flex gap-1 text-xs font-medium">
+              {[
+                ['all', 'All', null],
+                ['failures', 'Failures', failureCount ? <span className="text-red-600 tabular-nums"> {failureCount}</span> : null],
+                ['warnings', 'Warnings', warningCount ? <span className="text-amber-700 tabular-nums"> {warningCount}</span> : null],
+                ['job', 'Job events', null],
+              ].map(([key, label, count]) => (
+                <button
+                  key={key}
+                  onClick={() => setLogFilter(key)}
+                  className={`px-2.5 py-0.5 rounded-full ${logFilter === key ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                >
+                  {label}{logFilter === key ? null : count}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="flex items-center gap-3 text-xs">
+            <button onClick={toggleFollow} className="inline-flex items-center gap-1.5 text-slate-600" title="Keep the newest line in view">
+              <span className={`relative inline-block w-7 h-4 rounded-full transition-colors ${follow ? 'bg-blue-600' : 'bg-slate-300'}`}>
+                <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${follow ? 'right-0.5' : 'left-0.5'}`} />
               </span>
-            )}
-          </h2>
-          <div className="space-x-3 text-xs">
-            <a className="font-medium text-blue-600 hover:underline" href={`/api/jobs/${id}/report.pdf`}>📄 PDF report</a>
+              Follow newest
+            </button>
+            <a className="font-medium text-blue-600 hover:underline" href={`/api/jobs/${id}/report.pdf`}>PDF report</a>
             <a className="text-blue-600 hover:underline" href={`/api/export/audit?jobId=${id}&format=csv`}>Export CSV</a>
             <a className="text-blue-600 hover:underline" href={`/api/export/audit?jobId=${id}&format=json`}>Export JSON</a>
           </div>
         </div>
-        {/* Fixed-height box: the log list and the in-flight transfer strip
-            share it, so transfers appearing/finishing resize the list INSIDE
-            the box instead of shoving the whole page around (the old
-            standalone "Transferring now" card did exactly that). */}
-        <div className="h-80 flex flex-col bg-slate-900 rounded-md overflow-hidden font-mono text-xs leading-5">
-          <div ref={logRef} onScroll={onLogScroll} className="flex-1 overflow-y-auto text-slate-100 p-3">
-            {log.map((l, i) => {
+        {/* Fixed-height console: a column grid keeps time/size/duration aligned
+            (no jitter as values change width), every row is one line, and the
+            lane strip below is a fixed number of slots - so a transfer starting
+            or finishing never moves the list. */}
+        <div className="h-[28rem] flex flex-col bg-slate-900 rounded-md overflow-hidden font-mono text-xs leading-5">
+          <div className="grid grid-cols-[64px_96px_minmax(0,1fr)_72px_56px] gap-2 px-3 py-1.5 text-[11px] text-slate-500 border-b border-slate-700/70 shrink-0">
+            <span>time</span><span>event</span><span>path</span><span className="text-right">size</span><span className="text-right">took</span>
+          </div>
+          <div ref={logRef} onScroll={onLogScroll} className="flex-1 min-h-0 overflow-y-auto text-slate-100 px-3 py-1.5">
+            {visibleLog.map((l, i) => {
               const s = styleFor(l);
               return (
-                <div key={i} className={`flex gap-2 items-baseline rounded px-1 -mx-1 ${s.rowClass} ${s.rowBg || ''}`}>
-                  <span className="text-slate-600 shrink-0 tabular-nums">{formatTime(l.ts)}</span>
-                  <span className={`shrink-0 w-24 rounded px-1 text-center ${s.badgeClass}`}>{s.badge}</span>
-                  <span className="flex-1 min-w-0 whitespace-normal break-words">
+                <div key={i} className={`grid grid-cols-[64px_96px_minmax(0,1fr)_72px_56px] gap-2 items-baseline rounded px-1 -mx-1 ${s.rowClass} ${s.rowBg || ''}`}>
+                  <span className="text-slate-600 tabular-nums">{formatTime(l.ts)}</span>
+                  <span className={`rounded px-1 text-center truncate ${s.badgeClass}`}>{s.badge}</span>
+                  <span className="min-w-0 truncate" title={[l.source_path, l.error_message].filter(Boolean).join(' — ')}>
                     {l.source_path && <PathLabel path={l.source_path} />}
                     {l.source_path && l.error_message && <span className="opacity-40"> — </span>}
-                    {l.error_message}
+                    {l.error_message && <span className="opacity-70">{l.error_message}</span>}
                     {l.actor_name && l.actor_name !== 'system' && <span className="opacity-40"> · by {l.actor_name}</span>}
                   </span>
-                  {l.bytes != null && l.bytes > 0 && <span className="text-slate-500 shrink-0 tabular-nums">{formatBytes(l.bytes)}</span>}
-                  {l.duration_ms != null && l.duration_ms > 0 && <span className="text-slate-600 shrink-0 tabular-nums">{(l.duration_ms / 1000).toFixed(1)}s</span>}
+                  <span className="text-slate-500 text-right tabular-nums">{l.bytes != null && l.bytes > 0 ? formatBytes(l.bytes) : ''}</span>
+                  <span className="text-slate-600 text-right tabular-nums">{l.duration_ms != null && l.duration_ms > 0 ? `${(l.duration_ms / 1000).toFixed(1)}s` : ''}</span>
                 </div>
               );
             })}
-            {log.length === 0 && <div className="text-slate-500">No log entries yet.</div>}
+            {visibleLog.length === 0 && <div className="text-slate-500">{log.length === 0 ? 'No log entries yet.' : 'Nothing matches this filter.'}</div>}
           </div>
-          {/* In-flight transfers, pinned under the log like a status line.
-              Byte-accurate for uploads/downloads; SharePoint-to-SharePoint is
-              a server-side copy with no measurable bytes, so it shows an
-              indeterminate pulse with elapsed time instead. */}
-          {job.status === 'running' && Object.keys(uploads).length > 0 && (
-            <div className="shrink-0 border-t border-slate-700/70 px-3 py-1.5 space-y-1.5">
-              {Object.entries(uploads).map(([lane, u]) => {
+          {/* In-flight transfers as fixed lane slots. Byte-accurate for
+              uploads/downloads; SharePoint-to-SharePoint is a server-side copy
+              with no measurable bytes, so it shows an indeterminate pulse with
+              elapsed time instead. Idle slots stay in place. */}
+          {job.status === 'running' && (
+            <div className="shrink-0 border-t border-slate-700/70 bg-slate-800/60 px-3 py-2 space-y-1.5">
+              <div className="flex items-center justify-between text-[11px] text-slate-500">
+                <span>Transferring now · {laneCount} lane{laneCount === 1 ? '' : 's'}</span>
+                <span className="tabular-nums">{laneEntries.length} active</span>
+              </div>
+              {lanes.map((u, i) => {
+                if (!u) {
+                  return (
+                    <div key={i} className="grid grid-cols-[20px_minmax(0,1fr)_260px_100px] gap-3 items-center h-6">
+                      <span className="text-slate-600 tabular-nums">{i + 1}</span>
+                      <span className="text-slate-600">idle</span>
+                      <span className="h-1 rounded-full bg-slate-800" />
+                      <span />
+                    </div>
+                  );
+                }
                 const isCopy = u.phase === 'copying' || u.bytesDone == null;
-                const pct = !isCopy && u.bytesTotal > 0 ? Math.min(100, (u.bytesDone / u.bytesTotal) * 100) : 0;
+                const lanePct = !isCopy && u.bytesTotal > 0 ? Math.min(100, (u.bytesDone / u.bytesTotal) * 100) : 0;
                 const name = (u.sourcePath || '').split(/[\\/]/).pop();
                 const etaSec = !isCopy && u.rate > 1 && u.bytesTotal > u.bytesDone ? (u.bytesTotal - u.bytesDone) / u.rate : null;
                 const elapsedSec = u.firstSeen ? Math.max(0, Math.round((u.ts - u.firstSeen) / 1000)) : 0;
                 const phaseLabelText = u.phase === 'downloading' ? 'downloading' : isCopy ? 'server-side copy' : 'uploading';
+                const fmtSec = (s) => (s >= 90 ? `${Math.round(s / 60)} min` : `${Math.round(s)}s`);
                 return (
-                  <div key={lane}>
-                    <div className="flex items-baseline justify-between gap-2">
-                      <span className="min-w-0 truncate text-slate-300" title={u.sourcePath}>
-                        {name} <span className="text-slate-500">· {phaseLabelText}</span>
+                  <div key={i} className="grid grid-cols-[20px_minmax(0,1fr)_260px_100px] gap-3 items-center h-6">
+                    <span className="text-slate-600 tabular-nums">{i + 1}</span>
+                    <span className="min-w-0 truncate text-slate-300" title={u.sourcePath}>
+                      {name} <span className="text-slate-500">· {phaseLabelText}
+                        {isCopy && elapsedSec >= 5 && <> · {fmtSec(elapsedSec)}</>}
+                        {!isCopy && u.rate > 1 && <> · {formatBytes(u.rate)}/s</>}
+                        {etaSec != null && <> · ~{fmtSec(etaSec)}</>}
                       </span>
-                      <span className="text-slate-400 tabular-nums shrink-0">
-                        {isCopy ? (
-                          <>{formatBytes(u.bytesTotal)}{elapsedSec >= 5 && <> · {elapsedSec >= 90 ? `${Math.round(elapsedSec / 60)} min` : `${elapsedSec}s`}</>}</>
-                        ) : (
-                          <>
-                            {formatBytes(u.bytesDone)} / {formatBytes(u.bytesTotal)} · {pct.toFixed(0)}%
-                            {u.rate > 1 && <> · {formatBytes(u.rate)}/s</>}
-                            {etaSec != null && <> · ~{etaSec >= 90 ? `${Math.round(etaSec / 60)} min` : `${Math.round(etaSec)}s`}</>}
-                          </>
-                        )}
-                      </span>
-                    </div>
-                    <div className="h-0.5 mt-0.5 bg-slate-700 rounded-full overflow-hidden">
+                    </span>
+                    <span className="h-1 rounded-full bg-slate-700 overflow-hidden">
                       {isCopy ? (
-                        <div className="h-full w-full bg-indigo-400/70 animate-pulse" />
+                        <span className="block h-full w-full bg-indigo-400/70 animate-pulse" />
                       ) : (
-                        <div className="h-full bg-gradient-to-r from-violet-400 to-fuchsia-400 transition-all duration-1000" style={{ width: `${pct}%` }} />
+                        <span className="block h-full bg-gradient-to-r from-violet-400 to-fuchsia-400 transition-all duration-1000" style={{ width: `${lanePct}%` }} />
                       )}
-                    </div>
+                    </span>
+                    <span className="text-slate-400 text-right tabular-nums truncate">
+                      {isCopy ? formatBytes(u.bytesTotal) : `${formatBytes(u.bytesDone)} / ${formatBytes(u.bytesTotal)}`}
+                    </span>
                   </div>
                 );
               })}
@@ -512,4 +611,17 @@ export default function JobDetail() {
       </div>
     </div>
   );
+}
+
+// Stroke icons for the notice rows - one consistent 16px set, recolored by tone.
+function NoticeIcon({ tone }) {
+  const color = { error: '#dc2626', warn: '#f59e0b', ok: '#16a34a', info: '#64748b' }[tone] || '#64748b';
+  const common = { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', stroke: color, strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round', className: 'shrink-0' };
+  if (tone === 'error' || tone === 'warn') {
+    return <svg {...common}><path d="M8 2 1.5 13.5h13L8 2Z" /><path d="M8 6.5v3.5M8 12.5h.01" /></svg>;
+  }
+  if (tone === 'ok') {
+    return <svg {...common} strokeWidth={1.8}><path d="M3 8.5 6.5 12 13 4.5" /></svg>;
+  }
+  return <svg {...common}><circle cx="8" cy="8" r="6.5" /><path d="M8 7v4M8 5h.01" /></svg>;
 }
