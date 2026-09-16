@@ -15,3 +15,5 @@ migration-report-*.pdf
 *.log
 .DS_Store
 Thumbs.db
+# Local design-canvas working files (mockups seeded for the Claude Design preview)
+.design/
