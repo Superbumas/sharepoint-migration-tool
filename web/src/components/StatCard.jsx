@@ -12,7 +12,7 @@ export default function StatCard({ label, value, sub, tone }) {
     <div className="relative bg-white border border-slate-200 rounded-lg p-4 overflow-hidden transition-shadow hover:shadow-md">
       <div className={`absolute inset-y-0 left-0 w-1 ${t.accent} opacity-60`} />
       <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">{label}</div>
-      <div className={`text-2xl font-semibold tabular-nums ${t.value}`}>{value}</div>
+      <div className={`text-xl sm:text-2xl font-semibold tabular-nums break-words ${t.value}`}>{value}</div>
       {sub && <div className="text-xs text-slate-400 mt-1">{sub}</div>}
     </div>
   );

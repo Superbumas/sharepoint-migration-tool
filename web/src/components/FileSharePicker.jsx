@@ -1,14 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
+import { formatBytes } from '../lib/format';
 
-function formatBytes(n) {
-  if (!n && n !== 0) return '';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
-  return `${n.toFixed(1)} ${units[i]}`;
-}
 
 function formatDate(iso) {
   if (!iso) return '';
@@ -187,6 +181,9 @@ export default function FileSharePicker({ label, onSelect, multi = false }) {
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
               placeholder="Filter this folder…"
+              aria-label="Filter this folder"
+              type="search"
+              autoComplete="off"
               className="flex-1 border border-slate-300 rounded-md px-2 py-1 text-sm"
             />
             {filter && <button onClick={() => setFilter('')} className="text-xs text-slate-500 hover:underline">clear</button>}
@@ -199,7 +196,7 @@ export default function FileSharePicker({ label, onSelect, multi = false }) {
             ⤷ Migrate this folder — <span className="font-mono">{currentPath}</span>
           </button>
 
-          {error && <div className="text-xs rounded-md px-2 py-1.5 bg-red-50 border border-red-200 text-red-700">{error}</div>}
+          {error && <div role="alert" className="text-xs rounded-md px-2 py-1.5 bg-red-50 border border-red-200 text-red-700">{error}</div>}
 
           <ul className="max-h-64 overflow-y-auto text-sm pr-0.5">
             {shownFolders.map((f) => (
@@ -231,7 +228,7 @@ export default function FileSharePicker({ label, onSelect, multi = false }) {
               <li key={f.name} className="flex items-center gap-2 px-2 py-1.5 text-slate-500">
                 <span className="shrink-0">{fileIcon(f.name)}</span>
                 <span className="truncate flex-1 min-w-0">{f.name}</span>
-                <span className="text-xs text-slate-400 tabular-nums shrink-0 w-16 text-right">{formatBytes(f.size)}</span>
+                <span className="text-xs text-slate-400 tabular-nums shrink-0 w-16 text-right">{f.size == null ? '' : formatBytes(f.size)}</span>
                 <span className="text-xs text-slate-400 tabular-nums shrink-0 w-20 text-right hidden md:inline">{formatDate(f.modified)}</span>
               </li>
             ))}

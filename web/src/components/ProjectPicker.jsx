@@ -78,7 +78,7 @@ export default function ProjectPicker() {
       )}
 
       {loading ? (
-        <div className="text-sm text-slate-400 text-center">Loading projects...</div>
+        <div className="text-sm text-slate-400 text-center">Loading projects…</div>
       ) : signedOut ? (
         <div className="text-center space-y-3 mb-2">
           <p className="text-sm text-slate-500">Sign in first — you'll land in your account's tenant automatically, and can switch projects from here afterwards.</p>
@@ -116,14 +116,16 @@ export default function ProjectPicker() {
         <input
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
-          placeholder="New project name (e.g. Contoso Ltd)"
+          placeholder="New project name, e.g. Contoso Ltd…"
+          aria-label="New project name"
+          autoComplete="off"
           className="flex-1 border border-slate-300 rounded-md px-2 py-1 text-sm"
         />
-        <button type="submit" disabled={creating || !newName.trim()} className="btn-primary disabled:opacity-40">
-          {creating ? 'Creating...' : '+ New project'}
+        <button type="submit" disabled={creating || !newName.trim()} className="btn-primary">
+          {creating ? 'Creating…' : '+ New project'}
         </button>
       </form>}
-      {error && <div className="text-xs text-red-600 mt-2">{error}</div>}
+      {error && <div role="alert" className="text-xs text-red-600 mt-2">{error}</div>}
     </div>
   );
 }
