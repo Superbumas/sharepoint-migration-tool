@@ -1,4 +1,4 @@
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { v4: uuid } = require('uuid');
@@ -123,6 +123,34 @@ function buildEngineSpawnEnv(job, engineIdentity, blobConnectionString) {
   return env;
 }
 
+// A recorded engine pid is only trustworthy while the machine that recorded
+// it is still up: after a reboot (or just enough time) Windows reuses pids,
+// and a blind process.kill(job.pid) then terminates whatever unrelated
+// process happens to hold that number now. Only kill when the pid still
+// belongs to a PowerShell process running this engine script.
+function isEngineProcess(pid) {
+  try {
+    if (process.platform === 'win32') {
+      const r = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
+      return /"pwsh(\.exe)?"|"powershell(\.exe)?"/i.test(r.stdout || '');
+    }
+    const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+    return cmdline.includes(path.basename(config.engineScriptPath));
+  } catch {
+    return false;
+  }
+}
+
+function killStaleEngine(pid) {
+  if (!pid || !isEngineProcess(pid)) return false;
+  try {
+    process.kill(pid);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // jobId -> { child, actorOnPause, cancelTimer, recentOutcomes: [{ ok, ts }] }
 const runningJobs = new Map();
 const RETRY_WINDOW_SIZE = 30; // items considered for the adaptive-concurrency retry rate
@@ -202,11 +230,8 @@ function reconcileOrphanedJobs() {
 
   const orphaned = db.prepare(`SELECT * FROM jobs WHERE status = 'running'`).all();
   for (const job of orphaned) {
-    if (job.pid) {
-      try {
-        process.kill(job.pid);
-        clog.warn('startup', `Killed orphaned engine process ${job.pid} left over from before the restart (job "${job.name}").`);
-      } catch { /* already gone - the normal case */ }
+    if (killStaleEngine(job.pid)) {
+      clog.warn('startup', `Killed orphaned engine process ${job.pid} left over from before the restart (job "${job.name}").`);
     }
     if (job.cancel_requested === 1) {
       db.prepare(
@@ -404,6 +429,7 @@ function runJob(jobId, actor, tenantId) {
     throw httpError(409, `Cannot run a job in status "${job.status}". It must be "approved" (first run) or "paused" (resume).`);
   }
   if (runningJobs.has(jobId)) throw httpError(409, 'Job already has a running engine process.');
+  assertNoAuxiliaryRun(jobId);
 
   // releaseRunningState() (see its own comment below) frees a job for a new
   // run as soon as the engine SELF-REPORTS pausing/cancelling/finishing,
@@ -417,11 +443,8 @@ function runJob(jobId, actor, tenantId) {
   // being uploaded." Same belt-and-braces kill reconcileOrphanedJobs already
   // does at startup, applied here too since the identical gap exists at
   // resume time - killing an already-dead pid is a harmless no-op.
-  if (job.pid) {
-    try {
-      process.kill(job.pid);
-      clog.warn('jobs', `Killed a still-alive engine process ${job.pid} left over from before this run (job "${job.name}").`);
-    } catch { /* already gone - the normal case */ }
+  if (killStaleEngine(job.pid)) {
+    clog.warn('jobs', `Killed a still-alive engine process ${job.pid} left over from before this run (job "${job.name}").`);
   }
 
   const blobConnectionString = job.target_provider === 'azure_blob'
@@ -512,7 +535,7 @@ function runJob(jobId, actor, tenantId) {
     actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn,
   });
 
-  const state = { child, actorOnPause: actor, cancelTimer: null, recentOutcomes: [] };
+  const state = { child, actorOnPause: actor, cancelTimer: null, recentOutcomes: [], concurrency: effectiveConcurrency };
   runningJobs.set(jobId, state);
 
   attachNdjsonParser(
@@ -1060,9 +1083,21 @@ function maybeAdaptConcurrency(jobId, job, state) {
   const retryCount = state.recentOutcomes.filter((ok) => ok === false).length;
   const retryRate = retryCount / state.recentOutcomes.length;
   if (retryRate > config.retryRateBackoffThreshold) {
+    // Halve from what the engine is running at NOW (state.concurrency), not
+    // the job's configured value - halving the same base every time never
+    // backed off past the first step. And carry the DB's pause/cancel flags
+    // into the rewrite: this file is the engine's only pause/cancel signal,
+    // and writing false here silently swallowed a pause or cancel clicked a
+    // moment earlier (only the 60s force-kill then ended the run).
     const current = getJob(jobId);
-    const reduced = Math.max(1, Math.floor((current.concurrency || 1) / 2));
-    writeControlFile(jobId, { pauseRequested: false, cancelRequested: false, concurrencyOverride: reduced });
+    const reduced = Math.max(1, Math.floor((state.concurrency || current.concurrency || 1) / 2));
+    if (reduced === state.concurrency) { state.recentOutcomes = []; return; }
+    state.concurrency = reduced;
+    writeControlFile(jobId, {
+      pauseRequested: current.pause_requested === 1,
+      cancelRequested: current.cancel_requested === 1,
+      concurrencyOverride: reduced,
+    });
     insertLog(jobId, {
       event_type: 'log',
       error_message: `Adaptive throttling: retry rate ${(retryRate * 100).toFixed(0)}% over last ${state.recentOutcomes.length} items exceeded threshold - reducing concurrency to ${reduced}.`,
@@ -1083,6 +1118,7 @@ function verifyJob(jobId, actor, tenantId) {
   if (!job) throw httpError(404, 'Job not found');
   if (job.status !== 'completed') throw httpError(409, `Only completed jobs can be verified (this one is "${job.status}").`);
   if (verifyRuns.has(jobId)) throw httpError(409, 'A verification is already running for this job.');
+  if (cleanupRuns.has(jobId)) throw httpError(409, 'A source cleanup/purge is currently running for this job - wait for it to finish.');
   const blobConnectionString = job.target_provider === 'azure_blob'
     ? resolveBlobConnectionString(job.tenant_id || config.tenantId) : null;
   if (job.target_provider === 'azure_blob' && !blobConnectionString) {
@@ -1138,6 +1174,10 @@ function verifyJob(jobId, actor, tenantId) {
   }
   const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'], env: buildEngineSpawnEnv(job, engineIdentity, blobConnectionString) });
   verifyRuns.set(jobId, child);
+  // Without an 'error' listener a failed spawn (pwsh not installed / not on
+  // PATH) is an unhandled EventEmitter error and takes the whole server down.
+  // 'close' still fires afterwards and does the cleanup.
+  child.on('error', (err) => insertLog(jobId, { event_type: 'log', level: 'error', error_message: `Failed to start verification engine process: ${err.message}` }));
   insertLog(jobId, { event_type: 'verify_started', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
 
   attachNdjsonParser(
@@ -1239,6 +1279,7 @@ function cleanupSourceJob(jobId, actor, tenantId) {
   }
   const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'], env: buildEngineSpawnEnv(job, engineIdentity, blobConnectionString) });
   cleanupRuns.set(jobId, child);
+  child.on('error', (err) => insertLog(jobId, { event_type: 'log', level: 'error', error_message: `Failed to start cleanup engine process: ${err.message}` }));
   insertLog(jobId, { event_type: 'cleanup_started', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
   clog.warn('cleanup', `${job.name}: source cleanup started by ${actor.name} - verified files are being moved to the source recycle bin`);
 
@@ -1282,6 +1323,7 @@ function purgeRecycleBinJob(jobId, actor, tenantId) {
   try { cleanup = JSON.parse(job.cleanup_json || 'null'); } catch {}
   if (!cleanup) throw httpError(409, 'Run the source cleanup first - there is nothing recycled by this job to purge yet.');
   if (cleanupRuns.has(jobId)) throw httpError(409, 'A cleanup/purge is already running for this job.');
+  if (verifyRuns.has(jobId)) throw httpError(409, 'A verification is currently running for this job - wait for it to finish.');
 
   const engineIdentity = resolveEngineIdentity(job.tenant_id || config.tenantId);
   const args = [
@@ -1320,6 +1362,7 @@ function purgeRecycleBinJob(jobId, actor, tenantId) {
     env: buildEngineSpawnEnv(job, engineIdentity, job.target_provider === 'azure_blob' ? 'unused=1;AccountName=unused;AccountKey=dW51c2Vk' : null),
   });
   cleanupRuns.set(jobId, child);
+  child.on('error', (err) => insertLog(jobId, { event_type: 'log', level: 'error', error_message: `Failed to start purge engine process: ${err.message}` }));
   insertLog(jobId, { event_type: 'purge_started', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
   clog.warn('purge', `${job.name}: recycle-bin purge started by ${actor.name}`);
 
@@ -1355,6 +1398,7 @@ function pauseJob(jobId, actor, tenantId) {
   const state = runningJobs.get(jobId);
   if (state) {
     state.actorOnPause = actor;
+    if (state.pauseTimer) clearTimeout(state.pauseTimer);
     // Same force-stop safety net cancel has always had (see cancelJob): lanes
     // only notice the pause flag between files, so one long copy or a wedged
     // retry backoff can otherwise hold "pausing..." open forever. Killing
@@ -1362,8 +1406,11 @@ function pauseJob(jobId, actor, tenantId) {
     // the job as cleanly paused, and resume re-verifies every file's actual
     // target state rather than trusting the checkpoint.
     state.pauseTimer = setTimeout(() => {
+      // Identity check, not just "is something running for this jobId": if
+      // the pause landed and the job was resumed within the grace period,
+      // runningJobs now holds the NEW run, which this timer must not kill.
       const stillRunning = runningJobs.get(jobId);
-      if (stillRunning?.child && !stillRunning.child.killed) {
+      if (stillRunning === state && stillRunning.child && !stillRunning.child.killed) {
         insertLog(jobId, { event_type: 'log', error_message: `Engine did not pause within ${PAUSE_GRACE_MS}ms (a large in-flight file can cause this) - forcing it to stop. Progress up to the last checkpoint is preserved.`, actor_name: 'system' });
         stillRunning.child.kill();
       }
@@ -1391,9 +1438,11 @@ function cancelJob(jobId, actor, tenantId) {
     writeControlFile(jobId, { pauseRequested: false, cancelRequested: true });
     const state = runningJobs.get(jobId);
     if (state) {
+      if (state.cancelTimer) clearTimeout(state.cancelTimer);
       state.cancelTimer = setTimeout(() => {
+        // Same identity check as the pause timer: never kill a later run.
         const stillRunning = runningJobs.get(jobId);
-        if (stillRunning?.child && !stillRunning.child.killed) {
+        if (stillRunning === state && stillRunning.child && !stillRunning.child.killed) {
           insertLog(jobId, { event_type: 'log', error_message: `Engine did not exit within ${CANCEL_GRACE_MS}ms of cancel request - forcing termination.`, actor_name: 'system' });
           stillRunning.child.kill();
         }
@@ -1430,6 +1479,7 @@ function restartJob(jobId, actor, tenantId) {
   if (!['failed', 'cancelled'].includes(job.status) && !repairable) {
     throw httpError(409, `Cannot restart a job in status "${job.status}" - only failed or cancelled jobs (or completed jobs whose verification found problems) can be restarted.`);
   }
+  assertNoAuxiliaryRun(jobId);
   getDb().prepare(
     `UPDATE jobs SET status = 'approved', error_message = NULL,
      items_done = 0, bytes_done = 0, items_failed = 0, items_skipped = 0, retries_total = 0,
@@ -1456,6 +1506,14 @@ function deleteJob(jobId, actor, tenantId) {
   insertLog(jobId, { event_type: 'job_deleted', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
   removeTreeCache(jobId);
   emitDashboard({ type: 'job_deleted', jobId }, job.tenant_id, job.owner_user_id);
+}
+
+// Verify, cleanup and purge each spawn their own engine for a completed job.
+// A restart or run of the same job while one of them is still going would
+// put two engines on the same source/target at once.
+function assertNoAuxiliaryRun(jobId) {
+  if (verifyRuns.has(jobId)) throw httpError(409, 'A verification is currently running for this job - wait for it to finish.');
+  if (cleanupRuns.has(jobId)) throw httpError(409, 'A source cleanup/purge is currently running for this job - wait for it to finish.');
 }
 
 function httpError(status, message) {

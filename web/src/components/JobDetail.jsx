@@ -162,7 +162,12 @@ export default function JobDetail() {
     refreshKpis();
     api.get(`/api/jobs/${id}/log?limit=100`).then((r) => setLog(r.items));
 
-    socket.emit('job:subscribe', id);
+    // Room membership lives on the server side of ONE connection - after a
+    // reconnect (network blip, server restart) the new socket is in no job
+    // room and the page silently stops updating. Re-join on every connect.
+    const subscribe = () => socket.emit('job:subscribe', id);
+    subscribe();
+    socket.on('connect', subscribe);
     const handler = (msg) => {
       if (msg.jobId !== id) return;
       if (msg.job) setJob(msg.job);
@@ -212,6 +217,7 @@ export default function JobDetail() {
     socket.on('job:event', handler);
     return () => {
       socket.emit('job:unsubscribe', id);
+      socket.off('connect', subscribe);
       socket.off('job:event', handler);
     };
   }, [id]);

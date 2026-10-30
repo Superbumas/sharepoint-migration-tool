@@ -1,6 +1,22 @@
 const path = require('node:path');
 const fs = require('node:fs');
-const Database = require('better-sqlite3');
+// better-sqlite3 is the one native module here: its compiled binary only
+// loads under the exact Node major it was installed with. Upgrading Node (or
+// copying node_modules from another PC) after `npm install` fails with a
+// cryptic NODE_MODULE_VERSION error - say what to run instead.
+let Database;
+try {
+  Database = require('better-sqlite3');
+} catch (err) {
+  if (/NODE_MODULE_VERSION|was compiled against a different Node\.js version|invalid ELF|not a valid Win32 application/i.test(err.message)) {
+    console.error(
+      `\n[db] better-sqlite3 was installed for a different Node.js version than the one running now (${process.version}).\n` +
+      '     Fix: from the repo root run   npm rebuild better-sqlite3   (or delete node_modules and run npm install again),\n' +
+      '     or switch back to the Node version in .nvmrc.\n'
+    );
+  }
+  throw err;
+}
 const { v4: uuid } = require('uuid');
 const config = require('../config');
 

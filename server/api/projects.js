@@ -13,13 +13,24 @@ const router = express.Router();
 // done signed-in, from the /projects page.
 router.use(requireAuth);
 
+// A client tenant's admin who signed in through their project's link (not a
+// team account - see nonTeamProjectSignInAllowed in server/auth/routes.js)
+// must not see every other client's project name, or create projects.
+// teamMember is unset on sessions from before this check existed; those are
+// treated as team sessions, which is what they were before.
+function isClientSession(req) {
+  return req.session.teamMember === false;
+}
+
 router.get('/projects', (req, res) => {
   const db = getDb();
+  const clientOnly = isClientSession(req);
   const rows = db.prepare(
     `SELECT p.id, p.name, p.status, p.created_at, p.activated_at, t.last_login_at
      FROM projects p LEFT JOIN tenants t ON t.id = p.tenant_id
+     ${clientOnly ? 'WHERE p.tenant_id = ?' : ''}
      ORDER BY COALESCE(t.last_login_at, p.created_at) DESC`
-  ).all();
+  ).all(...(clientOnly ? [req.session.tenantId] : []));
   res.json({
     items: rows.map((r) => ({
       id: r.id,
@@ -33,6 +44,7 @@ router.get('/projects', (req, res) => {
 });
 
 router.post('/projects', (req, res) => {
+  if (isClientSession(req)) return res.status(403).json({ error: 'forbidden', message: 'Only team accounts can create projects.' });
   const name = (req.body?.name || '').trim();
   if (!name) return res.status(400).json({ error: 'name is required' });
   const db = getDb();

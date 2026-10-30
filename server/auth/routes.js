@@ -247,6 +247,10 @@ router.get('/auth/redirect', async (req, res, next) => {
     }
 
     req.session.account = result.account;
+    // Whether this is a team account or a client tenant's admin who only got
+    // in through the project-scoped exception above - the projects list is
+    // narrowed for the latter (server/api/projects.js).
+    req.session.teamMember = loginAllowed(result.account);
     // MSAL's AccountInfo already carries the real tenant GUID - this is the
     // one piece of state that makes the rest of the app (mappings/jobs/the
     // PowerShell engine) tenant-aware instead of using one hardcoded tenant.
@@ -276,7 +280,20 @@ router.get('/auth/redirect', async (req, res, next) => {
     let project = null;
     if (pendingProjectId) {
       project = db.prepare('SELECT * FROM projects WHERE id = ?').get(pendingProjectId);
-      if (project && !project.tenant_id) {
+      // A tenant maps to exactly one project: every per-project lookup
+      // (engine identity, blob string, file-share roots) resolves by
+      // tenant_id. Binding a second project to an already-bound tenant made
+      // that lookup silently use only one of them - the second project then provisioned
+      // its own engine app and granted sites to it, while jobs ran as the
+      // first project's app and hit "access denied". Land in the tenant's
+      // existing project instead and leave the new one unbound.
+      const alreadyBound = project && !project.tenant_id
+        ? db.prepare('SELECT * FROM projects WHERE tenant_id = ? AND id != ?').get(req.session.tenantId, project.id)
+        : null;
+      if (alreadyBound) {
+        console.warn(`[auth] Project "${project.name}" (${project.id}) was signed into with tenant ${req.session.tenantId}, which already belongs to project "${alreadyBound.name}" - using that one; "${project.name}" stays unbound.`);
+        project = alreadyBound;
+      } else if (project && !project.tenant_id) {
         db.prepare(`UPDATE projects SET tenant_id = ?, status = 'active', activated_at = datetime('now') WHERE id = ?`)
           .run(req.session.tenantId, project.id);
         project = db.prepare('SELECT * FROM projects WHERE id = ?').get(project.id);

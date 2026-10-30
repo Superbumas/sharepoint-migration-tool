@@ -292,8 +292,15 @@ if ($existingThumbprint) {
     $existingKeyStillOnApp = [bool]($appWithKeys.KeyCredentials | Where-Object { $_.CustomKeyIdentifier -and ([System.BitConverter]::ToString($_.CustomKeyIdentifier) -replace '-', '') -eq $existingThumbprint })
 }
 
-if ($existingThumbprint -and $existingKeyStillOnApp -and (Test-Path "Cert:\CurrentUser\My\$existingThumbprint")) {
-    Write-Host "Reusing existing certificate (thumbprint $existingThumbprint) - already installed and registered on the app."
+# The engine prefers the exported PFX (ENGINE_CERT_PATH) over the cert store,
+# so a copied setup\certs folder is a complete, working certificate even on a
+# machine whose store never had it. Requiring the store copy here made a
+# re-run on a second PC generate a NEW cert and replace the app's key with it -
+# silently breaking the engine on the first PC, which still uses the old one.
+$existingPfxPath = Join-Path $CertOutputDir 'migration-engine.pfx'
+$existingPfxUsable = (Test-Path $existingPfxPath) -and (Test-Path (Join-Path $CertOutputDir 'pfx-password.txt'))
+if ($existingThumbprint -and $existingKeyStillOnApp -and ((Test-Path "Cert:\CurrentUser\My\$existingThumbprint") -or $existingPfxUsable)) {
+    Write-Host "Reusing existing certificate (thumbprint $existingThumbprint) - already registered on the app."
     $thumbprint = $existingThumbprint
 } else {
     Write-Host 'Generating a new self-signed certificate ...'

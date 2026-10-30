@@ -140,7 +140,14 @@ const VALID_TARGET_PROVIDERS = new Set(['sharepoint', 'azure_blob', 'onedrive'])
 const VALID_SOURCE_PROVIDERS = new Set(['sharepoint', 'filesystem']);
 
 // Manual picker save: source + target (folder or file) chosen by hand in the UI.
-router.post('/mappings', async (req, res) => {
+// Wrapped so a rejection (Graph error in the OneDrive check, a DB constraint)
+// reaches the error handler: Express 4 does not catch async handlers, and an
+// unhandled promise rejection terminates the Node process.
+router.post('/mappings', (req, res, next) => {
+  createMapping(req, res).catch(next);
+});
+
+async function createMapping(req, res) {
   const b = req.body || {};
   // '' is a legitimate path - it means "the root of the library" (e.g. picking
   // a document library that has no subfolders yet, like a freshly created Hub
@@ -284,7 +291,7 @@ router.post('/mappings', async (req, res) => {
   }
 
   res.status(201).json({ ...mapRow(db.prepare('SELECT * FROM mappings WHERE id = ?').get(id)), engineAccess: grantResults });
-});
+}
 
 router.delete('/mappings/:id', (req, res) => {
   const db = getDb();
