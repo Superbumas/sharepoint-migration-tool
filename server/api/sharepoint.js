@@ -2,6 +2,7 @@ const express = require('express');
 const { requireAuth } = require('../auth/middleware');
 const { graphGet } = require('../graph/client');
 const { ensureEngineSiteAccessBySiteId } = require('../graph/siteAccess');
+const { searchTenantSites, resolveSiteFromUrl, looksLikeSiteUrl } = require('../graph/siteDirectory');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -12,12 +13,50 @@ router.use(requireAuth);
 // best-effort per site: locked/archived sites (423 resourceLocked) and other
 // per-site failures just come back without numbers instead of failing the
 // whole list.
+//
+// Graph search only returns sites the user can already open and that Search
+// has indexed, so a named query is also matched against the admin center's
+// full site list (see server/graph/siteDirectory.js), and a pasted site URL
+// is resolved directly. A site found that way which the user still can't
+// open comes back as a stub with noAccess: true and no id - the picker
+// explains how to get access instead of silently showing nothing.
 router.get('/sharepoint/sites', async (req, res, next) => {
   try {
     const search = (req.query.search || '').trim();
-    const data = await graphGet(req, '/sites', { search: search || '*' });
-    let sites = (data.value || []).slice(0, 50);
+    let sites;
+    let directoryError = null;
+
+    if (search && looksLikeSiteUrl(search)) {
+      try {
+        sites = [await resolveSiteFromUrl(req, search)];
+      } catch (err) {
+        if (err.status !== 403 && err.status !== 404 && err.status !== 400) throw err;
+        sites = err.status === 403 ? [{ id: null, webUrl: search, displayName: search, noAccess: true }] : [];
+      }
+    } else {
+      const data = await graphGet(req, '/sites', { search: search || '*' });
+      sites = (data.value || []).slice(0, 50);
+      if (search) {
+        try {
+          const known = new Set(sites.map((s) => normalizeUrl(s.webUrl)));
+          const extra = (await searchTenantSites(req, search))
+            .filter((r) => !known.has(normalizeUrl(r.url)))
+            .slice(0, 20);
+          sites.push(...await Promise.all(extra.map(async (r) => {
+            try {
+              return await resolveSiteFromUrl(req, r.url);
+            } catch {
+              return { id: null, webUrl: r.url, displayName: r.title, storageUsed: r.storageUsed, lastActivity: r.lastActivity, noAccess: true };
+            }
+          })));
+        } catch (err) {
+          directoryError = err.message;
+        }
+      }
+    }
+
     sites = await Promise.all(sites.map(async (s) => {
+      if (!s.id) return s;
       try {
         const drive = await graphGet(req, `/sites/${s.id}/drive`, { $select: 'quota,lastModifiedDateTime' });
         return {
@@ -30,11 +69,15 @@ router.get('/sharepoint/sites', async (req, res, next) => {
       }
     }));
     sites.sort((a, b) => (b.storageUsed || 0) - (a.storageUsed || 0));
-    res.json({ items: sites });
+    res.json({ items: sites, directoryError });
   } catch (err) {
     next(err);
   }
 });
+
+function normalizeUrl(url) {
+  return (url || '').toLowerCase().replace(/\/+$/, '');
+}
 
 // Read-only diagnostic: lists the actual permission grants currently on a
 // site, so a failed grant (or one that hasn't propagated yet) is visible
