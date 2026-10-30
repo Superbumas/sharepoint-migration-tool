@@ -114,8 +114,10 @@ the same classification as the customer metadata inside it.
 
 - Every file operation and every lifecycle action (create/approve/run/
   pause/cancel/verify/cleanup/delete) is an append-only `job_log` row with
-  actor identity and timestamp, exportable as CSV/JSON (`/api/export`), and
-  a per-job PDF report exists for handover packs.
+  actor identity and timestamp, exportable as CSV/JSON (`/api/export`). A
+  per-job internal PDF report covers the full operational history, and a
+  client report (PDF summary + Excel file list, `/api/reports/client.*`)
+  shows only the final migrated state per folder for handover packs.
 - The server console additionally logs sign-ins, provisioning, engine
   activity, and security-relevant configuration changes. When running as a
   service, keep stdout/stderr redirected to files (SETUP.md Part 4 does).

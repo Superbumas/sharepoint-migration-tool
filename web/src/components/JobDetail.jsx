@@ -506,7 +506,10 @@ export default function JobDetail() {
               </span>
               Follow newest
             </button>
-            <a className="font-medium text-blue-600 hover:underline" href={`/api/jobs/${id}/report.pdf`}>PDF report</a>
+            {job.status === 'completed' && (
+              <a className="font-medium text-blue-600 hover:underline" href={`/api/reports/client.pdf?jobs=${id}`} title="Client-facing summary: files moved, sizes and verification - no internal run detail">Client report</a>
+            )}
+            <a className="font-medium text-blue-600 hover:underline" href={`/api/jobs/${id}/report.pdf`} title="Full operator report: runs, retries, verification detail, timeline and file inventory">Internal report</a>
             <a className="text-blue-600 hover:underline" href={`/api/export/audit?jobId=${id}&format=csv`}>Export CSV</a>
             <a className="text-blue-600 hover:underline" href={`/api/export/audit?jobId=${id}&format=json`}>Export JSON</a>
           </div>
