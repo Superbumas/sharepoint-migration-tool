@@ -65,6 +65,7 @@ export default function SharePointPicker({ label, onSelect, multi = false }) {
   const { user } = useAuth();
   const [siteQuery, setSiteQuery] = useState('');
   const [sites, setSites] = useState([]);
+  const [noAccessSite, setNoAccessSite] = useState(null); // a site the admin center lists but this user can't open
   const [site, setSite] = useState(null);
   const [drives, setDrives] = useState([]);
   const [drive, setDrive] = useState(null);
@@ -129,7 +130,7 @@ export default function SharePointPicker({ label, onSelect, multi = false }) {
   function loadSites(q) {
     setLoading(true);
     api.get(`/api/sharepoint/sites${q ? `?search=${encodeURIComponent(q)}` : ''}`)
-      .then((r) => setSites(r.items))
+      .then((r) => { setSites(r.items); setNoAccessSite(null); })
       .finally(() => setLoading(false));
   }
 
@@ -229,8 +230,8 @@ export default function SharePointPicker({ label, onSelect, multi = false }) {
               value={siteQuery}
               onChange={(e) => setSiteQuery(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && loadSites(siteQuery)}
-              placeholder="Filter sites…"
-              aria-label="Filter sites"
+              placeholder="Filter sites, or paste a site URL…"
+              aria-label="Filter sites, or paste a site URL"
               type="search"
               autoComplete="off"
               className="flex-1 border border-slate-300 rounded-md px-2 py-1 text-sm"
@@ -242,7 +243,7 @@ export default function SharePointPicker({ label, onSelect, multi = false }) {
             {sites.map((s) => (
               <li key={s.id}>
                 <button
-                  onClick={() => setSite(s)}
+                  onClick={() => (s.noAccess ? setNoAccessSite(s) : setSite(s))}
                   className="w-full text-left rounded-lg border border-slate-100 px-2.5 py-2 hover:border-blue-300 hover:bg-blue-50/40 transition-colors"
                 >
                   <div className="flex items-center gap-2.5">
@@ -264,14 +265,24 @@ export default function SharePointPicker({ label, onSelect, multi = false }) {
                       ) : (
                         <span className="text-xs text-slate-300">{s.inaccessible ? 'locked' : '—'}</span>
                       )}
+                      {s.noAccess && <div className="text-[10px] font-medium text-amber-700 mt-0.5">no access</div>}
                       {s.lastActivity && <div className="text-[10px] text-slate-400 mt-0.5">{formatDate(s.lastActivity)}</div>}
                     </div>
                   </div>
                 </button>
               </li>
             ))}
-            {sites.length === 0 && !loading && <li className="text-slate-400 text-xs px-2 py-3">No sites found.</li>}
+            {sites.length === 0 && !loading && <li className="text-slate-400 text-xs px-2 py-3">No sites found. Try pasting the site's URL from the SharePoint admin center.</li>}
           </ul>
+          {noAccessSite && (
+            <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-2 space-y-1">
+              <div className="font-medium">You aren't a member of {noAccessSite.displayName}, so its libraries can't be browsed.</div>
+              <div>
+                The site exists (the SharePoint admin center lists it), but SharePoint only shows sites you can open. In the
+                SharePoint admin center open the site, go to Membership, then Site admins, add yourself, and search again.
+              </div>
+            </div>
+          )}
         </div>
       )}
 
