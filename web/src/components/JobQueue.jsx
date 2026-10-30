@@ -21,9 +21,81 @@ function ActionBtn({ onClick, tone = 'default', children }) {
   );
 }
 
+// Client report builder: pick which finished migrations go into one
+// client-facing report (PDF summary + Excel file list). Defaults to every
+// completed job; the server collapses several jobs of the same mapping to
+// the latest, so re-runs never show twice.
+function ClientReportPanel({ jobs, onClose }) {
+  const completed = jobs.filter((j) => j.status === 'completed');
+  const [selected, setSelected] = useState(() => new Set(completed.map((j) => j.id)));
+  const [client, setClient] = useState('');
+  const toggle = (id) => setSelected((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const allOn = selected.size === completed.length;
+  const query = new URLSearchParams();
+  query.set('jobs', [...selected].join(','));
+  if (client.trim()) query.set('client', client.trim());
+  const disabled = selected.size === 0;
+  const linkCls = (primary) => `text-xs font-medium rounded-md px-3 py-1.5 transition-colors ${
+    disabled ? 'pointer-events-none opacity-40 bg-slate-100 text-slate-500'
+      : primary ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`;
+
+  return (
+    <div className="bg-white border border-slate-200 rounded-lg p-4 space-y-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-slate-800">Client report</h2>
+          <p className="text-xs text-slate-500">Files moved, sizes and verification per folder, in its final state. Runs, retries and repair passes are left out.</p>
+        </div>
+        <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-600 text-lg leading-none" aria-label="Close">×</button>
+      </div>
+      {completed.length === 0 ? (
+        <p className="text-sm text-slate-500">No completed migrations yet.</p>
+      ) : (
+        <>
+          <label className="block text-xs text-slate-600">
+            Name on the cover
+            <input
+              type="text" value={client} onChange={(e) => setClient(e.target.value)} placeholder="Project name"
+              className="mt-1 block w-full sm:w-80 rounded-md border border-slate-300 px-2.5 py-1.5 text-sm"
+            />
+          </label>
+          <div>
+            <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
+              <span>{selected.size} of {completed.length} completed migrations</span>
+              <button type="button" className="text-blue-600 hover:underline" onClick={() => setSelected(allOn ? new Set() : new Set(completed.map((j) => j.id)))}>
+                {allOn ? 'Select none' : 'Select all'}
+              </button>
+            </div>
+            <ul className="max-h-56 overflow-y-auto border border-slate-100 rounded-md divide-y divide-slate-100">
+              {completed.map((j) => (
+                <li key={j.id}>
+                  <label className="flex items-center gap-2 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 cursor-pointer">
+                    <input type="checkbox" checked={selected.has(j.id)} onChange={() => toggle(j.id)} />
+                    <span className="min-w-0 truncate">{j.name}</span>
+                    <span className="ml-auto text-xs text-slate-400 tabular-nums shrink-0">{(j.progress.itemsDone + j.progress.itemsSkipped).toLocaleString()} files</span>
+                  </label>
+                </li>
+              ))}
+            </ul>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <a className={linkCls(true)} href={`/api/reports/client.pdf?${query}`} aria-disabled={disabled}>Download PDF</a>
+            <a className={linkCls(false)} href={`/api/reports/client.xlsx?${query}`} aria-disabled={disabled}>Download Excel file list</a>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function JobQueue() {
   const [jobs, setJobs] = useState([]);
   const [error, setError] = useState(null);
+  const [showReport, setShowReport] = useState(false);
   const debounceRef = useRef(null);
 
   function refresh() {
@@ -67,8 +139,13 @@ export default function JobQueue() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold text-slate-800">Job queue</h1>
-        <Link to="/mappings" className="text-sm font-medium text-blue-600 hover:text-blue-800">+ New mapping / job</Link>
+        <div className="flex items-center gap-4">
+          <button type="button" onClick={() => setShowReport((v) => !v)} className="text-sm font-medium text-blue-600 hover:text-blue-800">Client report</button>
+          <Link to="/mappings" className="text-sm font-medium text-blue-600 hover:text-blue-800">+ New mapping / job</Link>
+        </div>
       </div>
+
+      {showReport && <ClientReportPanel jobs={jobs} onClose={() => setShowReport(false)} />}
 
       {error && <div role="alert" className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-md p-3">{error}</div>}
 
