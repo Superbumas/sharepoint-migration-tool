@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import { api } from '../lib/api';
 
 // Target-only picker for the "migrate into a specific user's OneDrive" option
@@ -10,6 +10,7 @@ import { api } from '../lib/api';
 // before "Use this" is enabled - /api/mappings re-checks this authoritatively
 // at save time regardless, this is just fast feedback.
 export default function OneDriveTargetPicker({ onSelect }) {
+  const fieldId = useId();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
@@ -79,15 +80,19 @@ export default function OneDriveTargetPicker({ onSelect }) {
 
       {!chosenUser ? (
         <div className="space-y-1">
-          <label className="text-xs text-slate-500">Find the destination user</label>
+          <label htmlFor={`${fieldId}-user`} className="text-xs text-slate-500">Find the destination user</label>
           <input
+            id={`${fieldId}-user`}
+            type="search"
+            autoComplete="off"
+            spellCheck={false}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search by name or email..."
+            placeholder="Search by name or email…"
             className="w-full border border-slate-300 rounded-md px-2 py-1 text-sm"
           />
-          {searching && <div className="text-xs text-slate-400">Searching...</div>}
-          {searchError && <div className="text-xs text-red-600">Search failed: {searchError}</div>}
+          {searching && <div className="text-xs text-slate-400">Searching…</div>}
+          {searchError && <div role="alert" className="text-xs text-red-600">Search failed: {searchError}</div>}
           {!searching && !searchError && query.trim() && results.length === 0 && (
             <div className="text-xs text-slate-400">No matching user found.</div>
           )}
@@ -109,7 +114,7 @@ export default function OneDriveTargetPicker({ onSelect }) {
         </div>
       ) : (
         <div className="space-y-1">
-          <label className="text-xs text-slate-500">Destination user</label>
+          <div className="text-xs text-slate-500">Destination user</div>
           <div className="flex items-center justify-between border border-slate-300 rounded-md px-2 py-1.5 text-sm bg-slate-50">
             <div>
               <div className="font-medium text-slate-800">{chosenUser.displayName}</div>
@@ -121,11 +126,14 @@ export default function OneDriveTargetPicker({ onSelect }) {
       )}
 
       <div className="space-y-1">
-        <label className="text-xs text-slate-500">Folder path in their OneDrive (optional)</label>
+        <label htmlFor={`${fieldId}-path`} className="text-xs text-slate-500">Folder path in their OneDrive (optional)</label>
         <input
+          id={`${fieldId}-path`}
+          autoComplete="off"
+          spellCheck={false}
           value={path}
           onChange={(e) => setPath(e.target.value)}
-          placeholder="e.g. Migrated/Finance"
+          placeholder="e.g. Migrated/Finance…"
           className="w-full border border-slate-300 rounded-md px-2 py-1 text-sm"
         />
       </div>
@@ -139,7 +147,7 @@ export default function OneDriveTargetPicker({ onSelect }) {
         disabled={!chosenUser || verifying}
         className="w-full text-left text-xs font-medium text-blue-700 bg-blue-50 rounded-md px-2 py-1.5 hover:bg-blue-100 disabled:opacity-40"
       >
-        {verifying ? 'Checking...' : 'Use this OneDrive'}
+        {verifying ? 'Checking…' : 'Use this OneDrive'}
       </button>
 
       {selected && (

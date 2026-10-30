@@ -10,29 +10,13 @@ import {
 } from 'chart.js';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
+import { formatBytes } from '../lib/format';
 import { socket } from '../lib/socket';
 import StatCard from './StatCard';
-import StatusPill from './StatusPill';
-
-const STATUS_BADGE = {
-  completed: 'bg-green-100 text-green-800',
-  running: 'bg-blue-100 text-blue-800',
-  paused: 'bg-amber-100 text-amber-800',
-  failed: 'bg-red-100 text-red-700',
-  cancelled: 'bg-slate-200 text-slate-600',
-  queued: 'bg-slate-100 text-slate-600',
-  approved: 'bg-sky-100 text-sky-700',
-};
+import StatusPill, { STATUS_STYLE } from './StatusPill';
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend);
 
-function formatBytes(n) {
-  if (!n) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
-  return `${n.toFixed(1)} ${units[i]}`;
-}
 
 export default function Dashboard() {
   const [kpis, setKpis] = useState(null);
@@ -55,7 +39,7 @@ export default function Dashboard() {
     return () => socket.off('dashboard:event', handler);
   }, []);
 
-  if (!kpis) return <div className="text-slate-500">Loading dashboard...</div>;
+  if (!kpis) return <div className="text-slate-500">Loading dashboard…</div>;
 
   const errorLabels = Object.keys(kpis.errorBreakdown);
   const errorData = Object.values(kpis.errorBreakdown);
@@ -68,7 +52,7 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-xl font-semibold text-slate-800">Tenant-wide migration status</h1>
         <span className={`inline-flex items-center gap-2 text-xs font-medium rounded-full px-3 py-1.5 ${isIdle ? 'bg-slate-100 text-slate-500' : 'bg-blue-100 text-blue-800'}`}>
           {!isIdle && (
@@ -103,6 +87,7 @@ export default function Dashboard() {
 
       <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
         <h2 className="text-sm font-semibold text-slate-700 px-4 py-2 border-b border-slate-100">Recent jobs</h2>
+        <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <tbody className="divide-y divide-slate-100">
             {(kpis.recentJobs || []).map((j) => {
@@ -113,9 +98,9 @@ export default function Dashboard() {
                   <td className="px-4 py-2.5">
                     <Link to={`/jobs/${j.id}`} className="font-medium text-slate-800 hover:text-blue-600">{j.name}</Link>
                   </td>
-                  <td className="px-4 py-2.5 w-56">
+                  <td className="px-4 py-2.5 w-56 min-w-[10rem]">
                     <div className="text-xs text-slate-500 mb-1">
-                      {done.toLocaleString()} / {(j.totalItems ?? 0).toLocaleString() || '?'} files
+                      {done.toLocaleString()} / {j.totalItems ? j.totalItems.toLocaleString() : '?'} files
                       {j.itemsFailed > 0 && <span className="text-red-600"> · {j.itemsFailed} failed</span>}
                     </div>
                     <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
@@ -125,10 +110,10 @@ export default function Dashboard() {
                       />
                     </div>
                   </td>
-                  <td className="px-4 py-2.5 text-slate-400 text-xs tabular-nums">{formatBytes(j.bytesDone)}</td>
+                  <td className="px-4 py-2.5 text-slate-400 text-xs tabular-nums whitespace-nowrap">{formatBytes(j.bytesDone)}</td>
                   <td className="px-4 py-2.5 text-right">
                     {j.status === 'completed' && j.verificationOk ? (
-                      <span className={`inline-block text-xs rounded-full px-2.5 py-1 font-medium ${STATUS_BADGE.completed}`}>✓ completed &amp; verified</span>
+                      <span className={`inline-block text-xs rounded-full px-2.5 py-1 font-medium whitespace-nowrap ${STATUS_STYLE.completed.pill}`}>✓ completed &amp; verified</span>
                     ) : (
                       <StatusPill status={j.status} />
                     )}
@@ -137,10 +122,11 @@ export default function Dashboard() {
               );
             })}
             {(!kpis.recentJobs || kpis.recentJobs.length === 0) && (
-              <tr><td className="px-4 py-6 text-center text-slate-400">No jobs yet - create one from a mapping.</td></tr>
+              <tr><td colSpan={4} className="px-4 py-6 text-center text-slate-400">No jobs yet - create one from a mapping.</td></tr>
             )}
           </tbody>
         </table>
+        </div>
       </div>
 
       <div className="grid md:grid-cols-2 gap-4">
@@ -174,7 +160,7 @@ export default function Dashboard() {
         <h2 className="text-sm font-semibold text-slate-700 mb-3">Jobs by status</h2>
         <div className="flex gap-3 flex-wrap">
           {Object.entries(kpis.statusCounts).map(([status, count]) => (
-            <div key={status} className={`px-4 py-2 rounded-md text-sm ${STATUS_BADGE[status] || 'bg-slate-100 text-slate-600'}`}>
+            <div key={status} className={`px-4 py-2 rounded-md text-sm ${(STATUS_STYLE[status] || STATUS_STYLE.queued).pill}`}>
               <span className="font-semibold">{count}</span>{' '}
               <span className="capitalize">{status}</span>
             </div>

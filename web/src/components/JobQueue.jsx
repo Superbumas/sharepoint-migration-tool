@@ -15,7 +15,7 @@ function ActionBtn({ onClick, tone = 'default', children }) {
     default: 'bg-slate-100 text-slate-600 hover:bg-slate-200',
   };
   return (
-    <button onClick={onClick} className={`text-xs font-medium rounded-md px-2.5 py-1 transition-colors ${tones[tone]}`}>
+    <button type="button" onClick={onClick} className={`text-xs font-medium rounded-md px-2.5 py-1 transition-colors ${tones[tone]}`}>
       {children}
     </button>
   );
@@ -70,9 +70,9 @@ export default function JobQueue() {
         <Link to="/mappings" className="text-sm font-medium text-blue-600 hover:text-blue-800">+ New mapping / job</Link>
       </div>
 
-      {error && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-md p-3">{error}</div>}
+      {error && <div role="alert" className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-md p-3">{error}</div>}
 
-      <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+      <div className="bg-white border border-slate-200 rounded-lg overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
             <tr>
@@ -87,13 +87,13 @@ export default function JobQueue() {
             {jobs.map((job) => (
               <tr key={job.id} className="hover:bg-slate-50">
                 <td className="px-4 py-3">
-                  <Link to={`/jobs/${job.id}`} className="font-medium text-slate-800 hover:text-blue-600">{job.name}</Link>
+                  <Link to={`/jobs/${job.id}`} className="font-medium text-slate-800 hover:text-blue-600 break-words">{job.name}</Link>
                   <div className="text-xs text-slate-400">{job.action}</div>
                 </td>
                 <td className="px-4 py-3">
                   <StatusPill status={job.status} label={job.pauseRequested && job.status === 'running' ? 'pausing…' : undefined} />
                 </td>
-                <td className="px-4 py-3 w-48">
+                <td className="px-4 py-3 w-48 min-w-[10rem]">
                   <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
                     <div
                       className={`h-2 rounded-full transition-all duration-500 ${
@@ -115,13 +115,13 @@ export default function JobQueue() {
                       </span>
                     ) : (
                       <>
-                        {(job.progress.itemsDone + job.progress.itemsSkipped).toLocaleString()} / {(job.totals.items ?? 0).toLocaleString() || '?'} items
+                        {(job.progress.itemsDone + job.progress.itemsSkipped).toLocaleString()} / {job.totals.items ? job.totals.items.toLocaleString() : '?'} items
                         {job.progress.itemsFailed > 0 && <span className="text-red-500"> · {job.progress.itemsFailed} failed</span>}
                       </>
                     )}
                   </div>
                 </td>
-                <td className="px-4 py-3 text-slate-500">{job.createdBy.name}</td>
+                <td className="px-4 py-3 text-slate-500 whitespace-nowrap">{job.createdBy.name}</td>
                 <td className="px-4 py-3 text-right space-x-1.5 whitespace-nowrap">
                   {job.status === 'queued' && <ActionBtn tone="primary" onClick={() => act(job, 'approve')}>Approve</ActionBtn>}
                   {job.status === 'approved' && <ActionBtn tone="success" onClick={() => act(job, 'run')}>Run</ActionBtn>}

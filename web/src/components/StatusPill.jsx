@@ -3,7 +3,7 @@ import React from 'react';
 // Single source of truth for job-status colors - Dashboard and JobQueue
 // previously each had their own map and disagreed (running was blue on one
 // page, green on the other).
-const STATUS_STYLE = {
+export const STATUS_STYLE = {
   queued: { pill: 'bg-slate-100 text-slate-600', dot: 'bg-slate-400' },
   approved: { pill: 'bg-sky-100 text-sky-700', dot: 'bg-sky-500' },
   running: { pill: 'bg-blue-100 text-blue-700', dot: 'bg-blue-500', pulse: true },
