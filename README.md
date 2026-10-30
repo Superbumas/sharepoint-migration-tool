@@ -87,7 +87,7 @@ so the DB, the live UI, and the server console can never disagree about what hap
 
 ## Getting started
 
-**[SETUP.md](SETUP.md)** is the full operational guide — one-time operator setup,
+**[SETUP.md](SETUP.md)** is the full operational guide (Part 5 covers the portable Windows package - no Node install needed) — one-time operator setup,
 onboarding each client tenant (a couple of minutes, no scripts), optional features
 (Azure Blob archiving, file-share sources, OneDrive target), and troubleshooting for
 the exact errors people actually hit.

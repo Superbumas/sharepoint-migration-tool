@@ -361,6 +361,41 @@ To update the tool later: `git pull ; npm install ; npm run build ; nssm restart
 
 ---
 
+## Part 5: Portable Windows package (no Node install)
+
+For running the tool on another Windows PC without installing Node.js or running
+`npm install` there, build the portable zip. It bundles its own Node runtime with
+`better-sqlite3` prebuilt for exactly that runtime, so the
+`NODE_MODULE_VERSION` mismatch error can't happen.
+
+**Get the zip:** on GitHub, Actions → **Windows package** → **Run workflow**, then
+download the `SharePointMigrationTool-win-x64` artifact when it finishes (pushing a
+`v*` tag also attaches it to a release). Or build it locally on a Windows PC:
+```powershell
+pwsh -File packaging/windows/Build-WindowsPackage.ps1   # writes dist-package\*.zip
+```
+
+**On the target PC:**
+1. Install PowerShell 7 if it's not there: `winget install Microsoft.PowerShell`
+   (the engine runs in it; PnP.PowerShell is installed automatically on first start).
+2. Extract the zip somewhere permanent, e.g. `C:\SharePointMigrationTool`.
+3. Configuration, one of:
+   - **Moving from another PC:** copy `.env` and the whole `setup\certs\` folder into
+     the extracted folder (plus `data\` for your existing projects and job history -
+     only with the same `.env`, it holds the encryption key).
+   - **Brand-new install:** double-click `First-Time-Setup.cmd` and sign in with your
+     own tenant's admin (same as Part 1, step 2).
+4. Double-click **`Start-Migrator.cmd`**. The browser opens at `http://localhost:3000`
+   once the server is up; close the console window to stop it.
+
+**Updating:** extract the newer zip over the same folder. The zip never contains
+`.env`, `setup\certs\` or `data\`, so your configuration and history are kept.
+
+To run the packaged version as a service instead, use Part 4, step 5 with
+`<folder>\node\node.exe` as the program and `<folder>\server\index.js` as its argument.
+
+---
+
 ## Troubleshooting
 
 **`npm install` fails building `better-sqlite3` (node-gyp, "find Python", "No prebuilt binaries found")**

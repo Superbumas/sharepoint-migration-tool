@@ -17,3 +17,5 @@ migration-report-*.pdf
 Thumbs.db
 # Local design-canvas working files (mockups seeded for the Claude Design preview)
 .design/
+# Portable Windows package build output
+dist-package/
