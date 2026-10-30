@@ -312,7 +312,7 @@ function Invoke-VerificationPhase {
             Write-EngineEvent -Type 'verify_mismatch' -Data @{ level = 'error'; reason = 'hash'; sourcePath = $p; message = "VERIFY CONTENT HASH MISMATCH: $p" }
         }
         foreach ($p in ($result.OfficeRewritten | Select-Object -First $maxListed)) {
-            Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Verify note: '$p' hash differs only because SharePoint re-stamps Office document properties on copy (content parts verified unaffected by this mechanism); open the copy to confirm if in doubt." }
+            Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Verify note: '$p' differs only because SharePoint re-stamps Office/Outlook document properties on copy (content parts verified unaffected by this mechanism); open the copy to confirm if in doubt." }
         }
 
         $problems = $result.Missing.Count + $result.SizeMismatch.Count + $result.HashMismatch.Count
