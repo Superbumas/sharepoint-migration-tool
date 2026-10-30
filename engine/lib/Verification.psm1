@@ -136,7 +136,11 @@ function Get-GraphFileMap {
     return $map
 }
 
-$script:OfficeExtensions = @('.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.docm', '.xlsm', '.pptm', '.one', '.vsdx')
+# Outlook .msg files belong here too: SharePoint promotes their email
+# properties (From/To/Subject/Sent) on ingestion and rewrites the file, so a
+# copy consistently comes out a different size. Seen on every .msg in a real
+# job, and a re-copy reproduces the same size, ruling out a bad transfer.
+$script:OfficeExtensions = @('.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.docm', '.xlsm', '.pptm', '.one', '.vsdx', '.msg')
 
 # The comparison rules themselves, over two already-built maps of
 # '<relative path>' -> @{ Size; Hash } - shared by SharePoint-to-SharePoint
