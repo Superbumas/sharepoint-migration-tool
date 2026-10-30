@@ -1,14 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../lib/api';
+import { formatBytes } from '../lib/format';
 import { useAuth } from '../context/AuthContext';
 
-function formatBytes(n) {
-  if (!n && n !== 0) return '';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
-  return `${n.toFixed(1)} ${units[i]}`;
-}
 
 function formatDate(iso) {
   if (!iso) return '';
@@ -237,6 +231,9 @@ export default function SharePointPicker({ label, onSelect, multi = false }) {
               onChange={(e) => setSiteQuery(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && loadSites(siteQuery)}
               placeholder="Filter sites, or paste a site URL…"
+              aria-label="Filter sites, or paste a site URL"
+              type="search"
+              autoComplete="off"
               className="flex-1 border border-slate-300 rounded-md px-2 py-1 text-sm"
             />
             <button onClick={() => loadSites(siteQuery)} className="btn-secondary">Search</button>
@@ -260,7 +257,7 @@ export default function SharePointPicker({ label, onSelect, multi = false }) {
                     <div className="text-right shrink-0 w-24">
                       {s.storageUsed != null ? (
                         <>
-                          <div className="text-xs font-medium text-slate-600 tabular-nums">{formatBytes(s.storageUsed)}</div>
+                          <div className="text-xs font-medium text-slate-600 tabular-nums">{s.storageUsed == null ? '' : formatBytes(s.storageUsed)}</div>
                           <div className="h-1 mt-1 bg-slate-100 rounded-full overflow-hidden">
                             <div className="h-full bg-gradient-to-r from-blue-400 to-indigo-500 rounded-full" style={{ width: `${Math.max(3, (s.storageUsed / maxStorage) * 100)}%` }} />
                           </div>
@@ -360,6 +357,9 @@ export default function SharePointPicker({ label, onSelect, multi = false }) {
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && runSearch()}
               placeholder="Search this library…"
+              aria-label="Search this library"
+              type="search"
+              autoComplete="off"
               className="flex-1 border border-slate-300 rounded-md px-2 py-1 text-sm"
             />
             <button onClick={runSearch} className="btn-secondary">Search</button>
@@ -392,7 +392,7 @@ export default function SharePointPicker({ label, onSelect, multi = false }) {
                   <span className="truncate">{item.name}</span>
                   {item.folder?.childCount != null && <span className="text-slate-400 text-xs shrink-0">({item.folder.childCount})</span>}
                 </button>
-                <span className="text-xs text-slate-400 tabular-nums shrink-0 w-16 text-right">{item.folder ? '' : formatBytes(item.size)}</span>
+                <span className="text-xs text-slate-400 tabular-nums shrink-0 w-16 text-right">{item.folder || item.size == null ? '' : formatBytes(item.size)}</span>
                 <span className="text-xs text-slate-400 tabular-nums shrink-0 w-20 text-right hidden md:inline">{formatDate(item.lastModifiedDateTime)}</span>
                 {!multi && (
                   <button onClick={() => chooseSingle(item.folder ? 'folder' : 'file', item)} className="text-xs font-medium text-blue-600 opacity-0 group-hover:opacity-100 hover:underline shrink-0">

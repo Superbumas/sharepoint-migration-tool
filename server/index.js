@@ -84,7 +84,10 @@ if (fs.existsSync(webDist)) {
 }
 
 app.use((err, req, res, next) => {
-  console.error(err);
+  // The stack, not the whole object: an axios error carries its request
+  // config, which includes the Authorization header (a user's Graph token)
+  // or a blob SAS, and console.error(err) printed all of it to the log.
+  console.error(err.stack || err.message || err);
   res.status(err.status || 500).json({ error: err.message || 'internal_error' });
 });
 

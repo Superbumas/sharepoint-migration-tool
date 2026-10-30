@@ -148,12 +148,18 @@ function FsSourceRootsEditor({ settings, onSaved }) {
           value={newRoot}
           onChange={(e) => setNewRoot(e.target.value)}
           placeholder="\\server\share\folder  or  D:\Data\Departments"
+          aria-label="Share path"
+          autoComplete="off"
+          spellCheck={false}
           className="border border-slate-300 rounded-md px-2 py-1 text-sm font-mono min-w-0"
         />
         <input
           value={newUser}
           onChange={(e) => setNewUser(e.target.value)}
           placeholder="DOMAIN\user (optional)"
+          aria-label="Share username"
+          autoComplete="off"
+          spellCheck={false}
           className="border border-slate-300 rounded-md px-2 py-1 text-sm w-44"
         />
         <input
@@ -162,11 +168,13 @@ function FsSourceRootsEditor({ settings, onSaved }) {
           onChange={(e) => setNewPassword(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addRoot())}
           placeholder="Password"
+          aria-label="Share password"
+          autoComplete="new-password"
           disabled={!newUser.trim()}
           className="border border-slate-300 rounded-md px-2 py-1 text-sm w-36 disabled:bg-slate-50 disabled:placeholder:text-slate-300"
         />
-        <button type="button" onClick={addRoot} disabled={!newRoot.trim()} className="btn-secondary disabled:opacity-40">Add</button>
-        <button type="button" onClick={save} disabled={saving || !dirty} className="btn-primary disabled:opacity-40">
+        <button type="button" onClick={addRoot} disabled={!newRoot.trim()} className="btn-secondary">Add</button>
+        <button type="button" onClick={save} disabled={saving || !dirty} className="btn-primary">
           {saving ? 'Saving…' : 'Save'}
         </button>
       </div>
@@ -244,7 +252,7 @@ export default function Settings() {
     }
   }
 
-  if (!settings) return <div className="text-slate-500">Loading settings...</div>;
+  if (!settings) return <div className="text-slate-500">Loading settings…</div>;
 
   const rows = [
     ['Tenant', settings.tenantName || '—'],
@@ -282,14 +290,17 @@ export default function Settings() {
             type="password"
             value={connectionString}
             onChange={(e) => onConnectionStringChange(e.target.value)}
-            placeholder="DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;"
+            placeholder="DefaultEndpointsProtocol=https;AccountName=…;AccountKey=…;"
+            aria-label="Azure Storage connection string"
+            autoComplete="off"
+            spellCheck={false}
             className="flex-1 border border-slate-300 rounded-md px-2 py-1 text-sm font-mono"
           />
-          <button type="submit" disabled={saving || !connectionString.trim()} className="btn-primary disabled:opacity-40">
+          <button type="submit" disabled={saving || !connectionString.trim()} className="btn-primary">
             Save
           </button>
           {settings.blobArchivingEnabled && (
-            <button type="button" onClick={clearBlobConnectionString} disabled={saving} className="btn-secondary disabled:opacity-40">
+            <button type="button" onClick={clearBlobConnectionString} disabled={saving} className="btn-secondary">
               Clear
             </button>
           )}

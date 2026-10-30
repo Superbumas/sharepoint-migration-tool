@@ -1,16 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
+import { formatBytes } from '../lib/format';
 import { socket } from '../lib/socket';
 import StatusPill from './StatusPill';
 
-function formatBytes(n) {
-  if (!n) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
-  return `${n.toFixed(1)} ${units[i]}`;
-}
 
 // Visual treatment per log line: a pill badge + row colour + optional row
 // background tint for lines that must pop (failures, warnings). Falls back
@@ -119,6 +113,7 @@ function PathLabel({ path }) {
 
 export default function JobDetail() {
   const { id } = useParams();
+  const navigate = useNavigate();
   const [job, setJob] = useState(null);
   const [kpis, setKpis] = useState(null);
   const [log, setLog] = useState([]);
@@ -167,7 +162,12 @@ export default function JobDetail() {
     refreshKpis();
     api.get(`/api/jobs/${id}/log?limit=100`).then((r) => setLog(r.items));
 
-    socket.emit('job:subscribe', id);
+    // Room membership lives on the server side of ONE connection - after a
+    // reconnect (network blip, server restart) the new socket is in no job
+    // room and the page silently stops updating. Re-join on every connect.
+    const subscribe = () => socket.emit('job:subscribe', id);
+    subscribe();
+    socket.on('connect', subscribe);
     const handler = (msg) => {
       if (msg.jobId !== id) return;
       if (msg.job) setJob(msg.job);
@@ -217,6 +217,7 @@ export default function JobDetail() {
     socket.on('job:event', handler);
     return () => {
       socket.emit('job:unsubscribe', id);
+      socket.off('connect', subscribe);
       socket.off('job:event', handler);
     };
   }, [id]);
@@ -246,7 +247,7 @@ export default function JobDetail() {
       if (action === 'delete') {
         if (!confirm('Delete this job from the active queue? The audit log is kept forever.')) return;
         await api.del(`/api/jobs/${id}`);
-        window.location.href = '/jobs';
+        navigate('/jobs');
         return;
       }
       await api.post(`/api/jobs/${id}/${action}`);
@@ -256,7 +257,7 @@ export default function JobDetail() {
     }
   }
 
-  if (!job) return <div className="text-slate-500">Loading job...</div>;
+  if (!job) return <div className="text-slate-500">Loading job…</div>;
 
   const phaseText = job.phase && phaseLabel(job.phase) && ['running', 'completed'].includes(job.status) ? phaseLabel(job.phase) : null;
   const isLive = ['running', 'paused'].includes(job.status);
@@ -281,7 +282,7 @@ export default function JobDetail() {
 
   const notices = [];
   if (isLive && job.progress.itemsFailed > 0) {
-    notices.push({ key: 'failed', tone: 'warn', title: `${job.progress.itemsFailed} file(s) failed so far`, detail: 'see the Failures filter in the log', action: <button onClick={() => setLogFilter('failures')} className="text-xs font-medium text-blue-600 hover:underline shrink-0">Show in log</button> });
+    notices.push({ key: 'failed', tone: 'warn', title: `${job.progress.itemsFailed} file(s) failed so far`, detail: 'see the Failures filter in the log', action: <button type="button" onClick={() => setLogFilter('failures')} className="text-xs font-medium text-blue-600 hover:underline shrink-0">Show in log</button> });
   }
   if (v) {
     notices.push({
@@ -295,9 +296,9 @@ export default function JobDetail() {
       action: (
         <>
           {!v.ok && v.problems?.length > 0 && (
-            <button onClick={() => setShowProblems((s) => !s)} className="text-xs font-medium text-blue-600 hover:underline shrink-0">{showProblems ? 'Hide files' : `Show ${v.problems.length} files`}</button>
+            <button type="button" onClick={() => setShowProblems((s) => !s)} className="text-xs font-medium text-blue-600 hover:underline shrink-0">{showProblems ? 'Hide files' : `Show ${v.problems.length} files`}</button>
           )}
-          {!v.ok && job.status === 'completed' && <button onClick={() => act('restart')} className="btn-primary shrink-0">Re-run to repair…</button>}
+          {!v.ok && job.status === 'completed' && <button type="button" onClick={() => act('restart')} className="btn-primary shrink-0">Re-run to repair…</button>}
         </>
       ),
       expanded: !v.ok && showProblems && v.problems?.length > 0 && (
@@ -329,7 +330,7 @@ export default function JobDetail() {
       notices.push({
         key: 'purge', tone: 'info', title: 'Recycled files still count toward SharePoint storage',
         detail: 'up to 93 days · purging frees the space now, scoped to this job\'s source folder only',
-        action: <button onClick={() => act('purge-recycle-bin')} className="btn-danger shrink-0">Purge recycled items…</button>,
+        action: <button type="button" onClick={() => act('purge-recycle-bin')} className="btn-danger shrink-0">Purge recycled items…</button>,
       });
     }
   }
@@ -339,7 +340,7 @@ export default function JobDetail() {
     notices.push({
       key: 'archive', tone: 'info', title: 'Archive complete?',
       detail: 'every file is hash-verified at the target · move the source files to the site\'s recycle bin (recoverable ~93 days), each re-verified once more at deletion time',
-      action: <button onClick={() => act('cleanup-source')} className="btn-danger shrink-0">Delete source files…</button>,
+      action: <button type="button" onClick={() => act('cleanup-source')} className="btn-danger shrink-0">Delete source files…</button>,
     });
   }
   if (job.errorMessage) notices.push({ key: 'jobError', tone: 'error', title: job.errorMessage });
@@ -358,23 +359,23 @@ export default function JobDetail() {
     <div className="space-y-4">
       <div>
         <Link to="/jobs" className="text-xs text-slate-500 hover:underline">&larr; Back to queue</Link>
-        <div className="flex items-center justify-between gap-4 mt-1">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 mt-1">
           <div className="flex items-center gap-3 min-w-0">
-            <h1 className="text-xl font-semibold text-slate-800 truncate">{job.name}</h1>
+            <h1 className="text-xl font-semibold text-slate-800 break-words sm:truncate">{job.name}</h1>
             <StatusPill status={job.status} />
           </div>
-          <div className="flex gap-2 shrink-0">
-            {job.status === 'queued' && <button onClick={() => act('approve')} className="btn-primary">Approve</button>}
-            {job.status === 'approved' && <button onClick={() => act('run')} className="btn-primary">Run</button>}
-            {job.status === 'running' && <button onClick={() => act('pause')} className="btn-secondary">Pause</button>}
-            {job.status === 'paused' && <button onClick={() => act('resume')} className="btn-primary">Resume</button>}
-            {['running', 'paused', 'approved', 'queued'].includes(job.status) && <button onClick={() => act('cancel')} className="btn-danger">Cancel</button>}
-            {['failed', 'cancelled'].includes(job.status) && <button onClick={() => act('restart')} className="btn-primary">Restart</button>}
-            {job.status === 'completed' && <button onClick={() => act('verify')} className="btn-secondary">Verify</button>}
-            {['completed', 'failed', 'cancelled'].includes(job.status) && <button onClick={() => act('delete')} className="btn-secondary">Delete</button>}
+          <div className="flex flex-wrap gap-2 shrink-0">
+            {job.status === 'queued' && <button type="button" onClick={() => act('approve')} className="btn-primary">Approve</button>}
+            {job.status === 'approved' && <button type="button" onClick={() => act('run')} className="btn-primary">Run</button>}
+            {job.status === 'running' && <button type="button" onClick={() => act('pause')} className="btn-secondary">Pause</button>}
+            {job.status === 'paused' && <button type="button" onClick={() => act('resume')} className="btn-primary">Resume</button>}
+            {['running', 'paused', 'approved', 'queued'].includes(job.status) && <button type="button" onClick={() => act('cancel')} className="btn-danger">Cancel</button>}
+            {['failed', 'cancelled'].includes(job.status) && <button type="button" onClick={() => act('restart')} className="btn-primary">Restart</button>}
+            {job.status === 'completed' && <button type="button" onClick={() => act('verify')} className="btn-secondary">Verify</button>}
+            {['completed', 'failed', 'cancelled'].includes(job.status) && <button type="button" onClick={() => act('delete')} className="btn-secondary">Delete</button>}
           </div>
         </div>
-        <div className="text-sm text-slate-500 mt-1">
+        <div className="text-sm text-slate-500 mt-1 break-words">
           {job.source.provider === 'filesystem' && <span className="text-xs rounded bg-violet-100 text-violet-700 px-1.5 py-0.5 font-medium mr-1.5">file share</span>}
           <span title={job.source.siteUrl || undefined}>
             {job.source.provider !== 'filesystem' && siteFromUrl(job.source.siteUrl) && (
@@ -400,7 +401,7 @@ export default function JobDetail() {
           action on the right. Replaces the stack of tinted banners whose
           varying heights shoved everything below them around. */}
       {notices.length > 0 && (
-        <div className="bg-white border border-slate-200 rounded-lg overflow-hidden divide-y divide-slate-100">
+        <div role="status" className="bg-white border border-slate-200 rounded-lg overflow-hidden divide-y divide-slate-100">
           {notices.map((n) => (
             <div key={n.key}>
               <div className="flex items-center gap-3 px-4 py-2.5 min-h-[44px]">
@@ -422,7 +423,7 @@ export default function JobDetail() {
           the engine is enumerating, copying or paused. */}
       {(isLive || phaseText || kpis) && (
         <div className="bg-white border border-slate-200 rounded-lg p-4 space-y-3">
-          <div className="flex items-baseline justify-between gap-4 text-sm">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 text-sm">
             <div className="flex items-center gap-2.5 min-w-0">
               {job.status === 'running' && (
                 <span className="relative flex h-3 w-3 shrink-0">
@@ -450,7 +451,7 @@ export default function JobDetail() {
             />
           </div>
           {stats && (
-            <div className="grid grid-cols-3 md:grid-cols-6 gap-4 pt-3 border-t border-slate-100">
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-4 pt-3 border-t border-slate-100">
               {stats.map((s) => (
                 <div key={s.label} className="min-w-0">
                   <div className="text-[11px] uppercase tracking-wide text-slate-500">{s.label}</div>
@@ -466,8 +467,8 @@ export default function JobDetail() {
       )}
 
       <div className="bg-white border border-slate-200 rounded-lg p-4">
-        <div className="flex items-center justify-between gap-4 mb-2">
-          <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 mb-2">
+          <div className="flex flex-wrap items-center gap-3">
             <h2 className="text-sm font-semibold text-slate-700 flex items-center gap-2">
               Live log
               {job.status === 'running' && (
@@ -486,6 +487,8 @@ export default function JobDetail() {
               ].map(([key, label, count]) => (
                 <button
                   key={key}
+                  type="button"
+                  aria-pressed={logFilter === key}
                   onClick={() => setLogFilter(key)}
                   className={`px-2.5 py-0.5 rounded-full ${logFilter === key ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
                 >
@@ -494,9 +497,9 @@ export default function JobDetail() {
               ))}
             </div>
           </div>
-          <div className="flex items-center gap-3 text-xs">
-            <button onClick={toggleFollow} className="inline-flex items-center gap-1.5 text-slate-600" title="Keep the newest line in view">
-              <span className={`relative inline-block w-7 h-4 rounded-full transition-colors ${follow ? 'bg-blue-600' : 'bg-slate-300'}`}>
+          <div className="flex flex-wrap items-center gap-3 text-xs">
+            <button type="button" role="switch" aria-checked={follow} onClick={toggleFollow} className="inline-flex items-center gap-1.5 text-slate-600" title="Keep the newest line in view">
+              <span aria-hidden className={`relative inline-block w-7 h-4 rounded-full transition-colors ${follow ? 'bg-blue-600' : 'bg-slate-300'}`}>
                 <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${follow ? 'right-0.5' : 'left-0.5'}`} />
               </span>
               Follow newest
@@ -510,7 +513,10 @@ export default function JobDetail() {
             (no jitter as values change width), every row is one line, and the
             lane strip below is a fixed number of slots - so a transfer starting
             or finishing never moves the list. */}
-        <div className="h-[28rem] flex flex-col bg-slate-900 rounded-md overflow-hidden font-mono text-xs leading-5">
+        {/* Scrolls sideways on narrow screens rather than squeezing the path
+            column to nothing. */}
+        <div className="overflow-x-auto rounded-md">
+        <div className="h-[28rem] min-w-[40rem] flex flex-col bg-slate-900 rounded-md overflow-hidden font-mono text-xs leading-5">
           <div className="grid grid-cols-[64px_96px_minmax(0,1fr)_72px_56px] gap-2 px-3 py-1.5 text-[11px] text-slate-500 border-b border-slate-700/70 shrink-0">
             <span>time</span><span>event</span><span>path</span><span className="text-right">size</span><span className="text-right">took</span>
           </div>
@@ -588,14 +594,15 @@ export default function JobDetail() {
             </div>
           )}
         </div>
+        </div>
       </div>
 
-      <div className="grid md:grid-cols-2 gap-4">
+      <div className="grid md:grid-cols-2 gap-4 [&>*]:min-w-0">
         <div className="bg-white border border-slate-200 rounded-lg p-4">
           <h2 className="text-sm font-semibold text-slate-700 mb-2">Largest files</h2>
           <ul className="text-xs text-slate-600 space-y-1">
             {kpis?.largestFiles.map((f, i) => (
-              <li key={i} className="flex justify-between gap-2"><span className="truncate">{f.source_path}</span><span className="text-slate-400 shrink-0">{formatBytes(f.size_bytes)}</span></li>
+              <li key={i} className="flex justify-between gap-2"><span className="truncate min-w-0" title={f.source_path}>{f.source_path}</span><span className="text-slate-400 shrink-0">{formatBytes(f.size_bytes)}</span></li>
             ))}
           </ul>
         </div>
@@ -603,7 +610,7 @@ export default function JobDetail() {
           <h2 className="text-sm font-semibold text-slate-700 mb-2">Slow transfers (&gt; {Math.round((kpis?.slowThresholdMs || 0) / 1000)}s)</h2>
           <ul className="text-xs text-slate-600 space-y-1">
             {kpis?.slowItems.map((f, i) => (
-              <li key={i} className="flex justify-between gap-2"><span className="truncate">{f.source_path}</span><span className="text-slate-400 shrink-0">{(f.duration_ms / 1000).toFixed(1)}s</span></li>
+              <li key={i} className="flex justify-between gap-2"><span className="truncate min-w-0" title={f.source_path}>{f.source_path}</span><span className="text-slate-400 shrink-0">{(f.duration_ms / 1000).toFixed(1)}s</span></li>
             ))}
             {kpis && kpis.slowItems.length === 0 && <li className="text-slate-400">None</li>}
           </ul>

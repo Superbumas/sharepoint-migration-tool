@@ -1,5 +1,5 @@
 import React from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import Header from './components/Header';
 import ProjectPicker from './components/ProjectPicker';
@@ -9,12 +9,13 @@ import JobQueue from './components/JobQueue';
 import JobDetail from './components/JobDetail';
 import MappingsPage from './components/MappingsPage';
 import Settings from './components/Settings';
+import ErrorBoundary from './components/ErrorBoundary';
 
 function Gate({ children }) {
   const { user, loading } = useAuth();
 
   if (loading) {
-    return <div className="max-w-7xl mx-auto p-8 text-slate-500">Loading...</div>;
+    return <div className="max-w-7xl mx-auto p-8 text-slate-500">Loading…</div>;
   }
   if (!user) {
     // One button, no decisions: the server lands the account in its own
@@ -26,10 +27,13 @@ function Gate({ children }) {
 }
 
 export default function App() {
+  const location = useLocation();
   return (
     <AuthProvider>
+      <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-20 focus:bg-white focus:px-3 focus:py-2 focus:rounded-md focus:shadow">Skip to content</a>
       <Header />
-      <main className="max-w-7xl mx-auto px-4 py-6">
+      <main id="main" className="max-w-7xl mx-auto px-4 py-6">
+        <ErrorBoundary key={location.pathname}>
         <Routes>
           {/* Always reachable, signed in or not - the only way to switch to
               or create a different project once you're already signed into
@@ -51,6 +55,7 @@ export default function App() {
             }
           />
         </Routes>
+        </ErrorBoundary>
       </main>
     </AuthProvider>
   );

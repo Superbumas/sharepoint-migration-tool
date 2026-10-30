@@ -72,7 +72,7 @@ export default function PermissionsPanel() {
         </p>
       </div>
 
-      {loadError && <div className="text-xs bg-red-50 border border-red-200 text-red-700 rounded-md p-2">Couldn’t load permission status: {loadError}</div>}
+      {loadError && <div role="alert" className="text-xs bg-red-50 border border-red-200 text-red-700 rounded-md p-2">Couldn’t load permission status: {loadError}</div>}
 
       {repairBanner && (
         <div className={`text-xs rounded-md p-2 border ${repairBanner.ok === false ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-800'}`}>

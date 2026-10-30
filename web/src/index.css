@@ -2,21 +2,49 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Native controls and scrollbars follow the active theme (see .dark below). */
+:root { color-scheme: light; }
+.dark { color-scheme: dark; }
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  @apply bg-slate-50 text-slate-900;
+  @apply bg-slate-100 text-slate-900;
+  -webkit-tap-highlight-color: transparent;
+}
+
+@layer base {
+  /* One visible keyboard focus ring for every control, instead of relying on
+     each component to remember a focus: class. Mouse clicks don't show it. */
+  :focus-visible {
+    outline: 2px solid #3b82f6;
+    outline-offset: 2px;
+  }
+  button, a, input, select, textarea, summary { touch-action: manipulation; }
+  h1, h2, h3 { text-wrap: balance; }
 }
 
 @layer components {
   .btn-primary {
-    @apply bg-blue-600 text-white text-sm font-medium px-3 py-1.5 rounded-md hover:bg-blue-700;
+    @apply bg-blue-600 text-white text-sm font-medium px-3 py-1.5 rounded-md transition-colors hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed;
   }
   .btn-secondary {
-    @apply bg-slate-100 text-slate-700 text-sm font-medium px-3 py-1.5 rounded-md hover:bg-slate-200;
+    @apply bg-slate-100 text-slate-700 text-sm font-medium px-3 py-1.5 rounded-md transition-colors hover:bg-slate-200 disabled:opacity-40 disabled:cursor-not-allowed;
   }
   .btn-danger {
-    @apply bg-red-50 text-red-600 text-sm font-medium px-3 py-1.5 rounded-md hover:bg-red-100;
+    @apply bg-red-50 text-red-600 text-sm font-medium px-3 py-1.5 rounded-md transition-colors hover:bg-red-100 disabled:opacity-40 disabled:cursor-not-allowed;
   }
+}
+
+/* Live indicators (pinging dots, pulsing bars) are decoration - the status
+   text next to them carries the meaning - so stop them for reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .animate-ping { display: none; }
 }
 
 /* ---------------------------------------------------------------------------
@@ -28,6 +56,7 @@ body {
    is left alone.
 --------------------------------------------------------------------------- */
 .dark body { background-color: #09090b; color: #e4e4e7; }
+.dark :focus-visible { outline-color: #60a5fa; }
 
 /* Surfaces */
 .dark .bg-white { background-color: #18181b; }
@@ -109,12 +138,13 @@ body {
 .dark .bg-slate-100.rounded-full, .dark .bg-blue-100.rounded-full { background-color: #27272a; }
 
 /* Form controls */
-.dark input, .dark select, .dark textarea {
+.dark input:not([type=checkbox]):not([type=radio]):not([type=file]), .dark select, .dark textarea {
   background-color: #27272a;
   color: #e4e4e7;
   border-color: #3f3f46;
 }
 .dark input::placeholder, .dark textarea::placeholder { color: #71717a; }
+.dark input:disabled, .dark select:disabled, .dark textarea:disabled { background-color: #18181b; color: #71717a; }
 
 /* Buttons */
 .dark .btn-secondary { background-color: #27272a; color: #d4d4d8; }

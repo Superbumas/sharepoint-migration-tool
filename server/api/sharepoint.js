@@ -200,7 +200,9 @@ router.get('/sharepoint/drives/:driveId/search', async (req, res, next) => {
     if (!q) return res.json({ items: [] });
     const data = await graphGet(
       req,
-      `/drives/${req.params.driveId}/root/search(q='${encodeURIComponent(q)}')`,
+      // OData string literal: a single quote is escaped by doubling it -
+      // encodeURIComponent leaves ' alone, so "O'Brien" used to 400.
+      `/drives/${req.params.driveId}/root/search(q='${encodeURIComponent(q.replace(/'/g, "''"))}')`,
       { $select: 'id,name,size,folder,file,webUrl,parentReference' }
     );
     res.json({ items: data.value || [] });
