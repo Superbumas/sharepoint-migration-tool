@@ -29,6 +29,11 @@ deletion time).
   get one automatic re-copy pass and a second verification. Office documents that
   SharePoint legitimately re-stamps on ingestion (property promotion) are classified
   separately, not reported as corruption.
+- **Original metadata carried over (SharePoint → SharePoint).** Every copied file and
+  folder keeps its original Created / Modified dates and Created by / Modified by
+  people, and folders keep their colour. A person who can't be found on the target
+  (e.g. has left the organization) is reported, and the dates are still restored.
+  Re-running a finished job backfills anything still stamped with the migration app.
 - **Resumable and restart-safe.** Pause/resume/cancel from the UI; server restarts
   reconcile orphaned engine processes; resume never trusts a checkpoint — every file is
   re-checked against the actual target state before being skipped or copied.
