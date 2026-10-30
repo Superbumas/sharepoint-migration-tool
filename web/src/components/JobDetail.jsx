@@ -262,6 +262,8 @@ export default function JobDetail() {
   const phaseText = job.phase && phaseLabel(job.phase) && ['running', 'completed'].includes(job.status) ? phaseLabel(job.phase) : null;
   const isLive = ['running', 'paused'].includes(job.status);
   const done = (job.progress.itemsDone || 0) + (job.progress.itemsSkipped || 0);
+  // total_items stays NULL until the engine has finished scanning the source.
+  const totalText = job.totals.items != null ? job.totals.items.toLocaleString() : '?';
   const pct = job.totals.items > 0 ? Math.min(100, (done / job.totals.items) * 100) : (job.status === 'completed' ? 100 : 0);
   const laneCount = Math.max(1, Math.min(8, job.concurrency || Object.keys(uploads).length || 1));
   // Lanes are fixed slots: a file starting or finishing swaps a slot's content
@@ -435,10 +437,10 @@ export default function JobDetail() {
                 {phaseText
                   ? phaseText
                   : job.status === 'paused'
-                    ? `Paused — ${done.toLocaleString()} of ${job.totals.items.toLocaleString()} files`
+                    ? `Paused — ${done.toLocaleString()} of ${totalText} files`
                     : job.status === 'completed'
-                      ? `Completed — ${done.toLocaleString()} of ${job.totals.items.toLocaleString()} files`
-                      : `${done.toLocaleString()} of ${job.totals.items.toLocaleString()} files`}
+                      ? `Completed — ${done.toLocaleString()} of ${totalText} files`
+                      : `${done.toLocaleString()} of ${totalText} files`}
               </span>
               {isLive && job.progress.itemsFailed > 0 && <span className="text-red-600 shrink-0">· {job.progress.itemsFailed} failed</span>}
             </div>
