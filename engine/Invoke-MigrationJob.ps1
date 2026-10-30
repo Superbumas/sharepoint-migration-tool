@@ -1016,6 +1016,53 @@ try {
         $laneTargetList = $null
         try { $laneTargetList = Get-PnPList -Identity (($TargetRoot -split '/')[0]) -Connection $laneTargetConn -ErrorAction Stop } catch {}
 
+        # Stamps the source file's Created/Modified/Author/Editor onto its
+        # copy. A person SharePoint can't resolve on the target (left the
+        # organization, external account) used to fail the whole update and
+        # lose the dates too - retry without the people so the dates always
+        # land, and say whose name couldn't be carried over. Returns $true
+        # when everything was applied.
+        function local:Set-LaneOriginalMetadata {
+            param([string]$RelKey, [string]$SourceFileServerRel, [string]$TargetFileServerRel)
+            try {
+                $values = @{}
+                $people = @{}
+                $meta = if ($null -ne $SourceMetaMap) { $SourceMetaMap[$RelKey] } else { $null }
+                if ($meta) {
+                    # Fast path: metadata came from the prefetched source walk.
+                    if ($meta.Created) { $values['Created'] = $meta.Created }
+                    if ($meta.Modified) { $values['Modified'] = $meta.Modified }
+                    if ($meta.AuthorEmail) { $people['Author'] = $meta.AuthorEmail }
+                    if ($meta.EditorEmail) { $people['Editor'] = $meta.EditorEmail }
+                } else {
+                    $srcItem = Get-PnPFile -Url $SourceFileServerRel -AsListItem -Connection $laneSourceConn -ErrorAction Stop
+                    if ($srcItem['Created']) { $values['Created'] = $srcItem['Created'] }
+                    if ($srcItem['Modified']) { $values['Modified'] = $srcItem['Modified'] }
+                    if ($srcItem['Author'] -and $srcItem['Author'].Email) { $people['Author'] = $srcItem['Author'].Email }
+                    if ($srcItem['Editor'] -and $srcItem['Editor'].Email) { $people['Editor'] = $srcItem['Editor'].Email }
+                }
+                if (-not $laneTargetList -or ($values.Count + $people.Count) -eq 0) { return $false }
+                $tgtItem = Get-PnPFile -Url $TargetFileServerRel -AsListItem -Connection $laneTargetConn -ErrorAction Stop
+                try {
+                    Set-PnPListItem -List $laneTargetList -Identity $tgtItem.Id -Values ($values + $people) -Connection $laneTargetConn -ErrorAction Stop | Out-Null
+                    return $true
+                } catch {
+                    if ($people.Count -eq 0 -or $values.Count -eq 0) { throw }
+                    $peopleError = $_.Exception.Message
+                    Set-PnPListItem -List $laneTargetList -Identity $tgtItem.Id -Values $values -Connection $laneTargetConn -ErrorAction Stop | Out-Null
+                    $ResultQueue.Enqueue((New-EngineEventJson -Type 'log' -Data @{
+                        level = 'warn'; message = "Copied OK with original dates, but created-by/modified-by ($(($people.Values | Select-Object -Unique) -join ', ')) could not be set on '$TargetFileServerRel': $peopleError"
+                    }))
+                    return $false
+                }
+            } catch {
+                $ResultQueue.Enqueue((New-EngineEventJson -Type 'log' -Data @{
+                    level = 'warn'; message = "Copied OK but could not preserve original metadata for '$TargetFileServerRel': $($_.Exception.Message)"
+                }))
+                return $false
+            }
+        }
+
         while (-not $Shared.Stop) {
             if ($LaneIndex -ge $Shared.TargetLaneCount) { break }
 
@@ -1044,9 +1091,22 @@ try {
                 $alreadyDone = Test-PnPTargetFileMatches -Connection $laneTargetConn -TargetServerRelativeUrl $targetFileServerRel -ExpectedSize $item.Size -SourceModified $item.Modified
             }
             if ($alreadyDone) {
+                # Backfill for copies made before the metadata stamp worked
+                # (or that a previous run couldn't stamp): a target file whose
+                # modified-by is still the migration app - Graph reports no
+                # email for an app identity - gets the original people and
+                # dates re-applied. A file someone has genuinely edited on the
+                # target since carries their email and is left alone.
+                $reason = 'target already has a file of the same name and size'
+                $srcMeta = if ($null -ne $SourceMetaMap) { $SourceMetaMap[$relKey] } else { $null }
+                if ($existing -and $srcMeta -and $srcMeta.EditorEmail -and -not $existing.EditorEmail) {
+                    if (Set-LaneOriginalMetadata -RelKey $relKey -SourceFileServerRel $sourceFileServerRel -TargetFileServerRel $targetFileServerRel) {
+                        $reason = 'target already has a file of the same name and size - original created/modified-by re-applied'
+                    }
+                }
                 $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_skipped' -Data @{
                     sourcePath = $sourceFileServerRel; targetPath = $targetFileServerRel; bytes = [long]$item.Size
-                    reason     = 'target already has a file of the same name and size'
+                    reason     = $reason
                 }))
             } else {
                 $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -1077,31 +1137,7 @@ try {
                     # needs the real Created/Modified dates and people. Failure
                     # here never fails the item - the content copy already
                     # succeeded - it just logs a warning.
-                    try {
-                        $values = @{}
-                        $meta = if ($null -ne $SourceMetaMap) { $SourceMetaMap[$relKey] } else { $null }
-                        if ($meta) {
-                            # Fast path: metadata came from the prefetched source walk.
-                            if ($meta.Created) { $values['Created'] = $meta.Created }
-                            if ($meta.Modified) { $values['Modified'] = $meta.Modified }
-                            if ($meta.AuthorEmail) { $values['Author'] = $meta.AuthorEmail }
-                            if ($meta.EditorEmail) { $values['Editor'] = $meta.EditorEmail }
-                        } else {
-                            $srcItem = Get-PnPFile -Url $sourceFileServerRel -AsListItem -Connection $laneSourceConn -ErrorAction Stop
-                            if ($srcItem['Created']) { $values['Created'] = $srcItem['Created'] }
-                            if ($srcItem['Modified']) { $values['Modified'] = $srcItem['Modified'] }
-                            if ($srcItem['Author'] -and $srcItem['Author'].Email) { $values['Author'] = $srcItem['Author'].Email }
-                            if ($srcItem['Editor'] -and $srcItem['Editor'].Email) { $values['Editor'] = $srcItem['Editor'].Email }
-                        }
-                        if ($laneTargetList -and $values.Count -gt 0) {
-                            $tgtItem = Get-PnPFile -Url $targetFileServerRel -AsListItem -Connection $laneTargetConn -ErrorAction Stop
-                            Set-PnPListItem -List $laneTargetList -Identity $tgtItem.Id -Values $values -Connection $laneTargetConn -ErrorAction Stop | Out-Null
-                        }
-                    } catch {
-                        $ResultQueue.Enqueue((New-EngineEventJson -Type 'log' -Data @{
-                            level = 'warn'; message = "Copied OK but could not preserve original metadata for '$targetFileServerRel': $($_.Exception.Message)"
-                        }))
-                    }
+                    Set-LaneOriginalMetadata -RelKey $relKey -SourceFileServerRel $sourceFileServerRel -TargetFileServerRel $targetFileServerRel | Out-Null
 
                     $sw.Stop()
                     $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_success' -Data @{
@@ -1815,6 +1851,36 @@ try {
     } elseif ($shared.Paused) {
         Write-EngineEvent -Type 'paused' -Data @{ checkpoint = $finalCheckpoint }
     } else {
+        # --- Folder metadata + colours (SharePoint -> SharePoint) ----------
+        # Target folders were created fresh before the copy, so they carry
+        # the migration app as created/modified-by, today's dates and the
+        # default colour. Copy each source folder's own stamp and colour
+        # across now that the files are in (adding files can bump a folder's
+        # Modified). Skips folders whose copy already matches, so re-running
+        # an already-migrated job is how existing targets get backfilled.
+        # Never fails the job.
+        if (-not $isFsSource -and -not $isBlobTarget -and -not $isOneDriveTarget) {
+            Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Restoring original created/modified-by, dates and colours on $($tree.Folders.Count + [int][bool]$SourcePath.Trim('/')) target folder(s)..." }
+            $folderWarnings = 0
+            try {
+                $folderMeta = Copy-PnPFolderMetadata -SourceConnection $sourceConn -TargetConnection $targetConn `
+                    -SourceRootSiteRelativeUrl $sourceRoot -TargetRootSiteRelativeUrl $targetRoot `
+                    -RelativeFolderPaths $tree.Folders -IncludeRoot:([bool]$SourcePath.Trim('/')) -OnProgress {
+                        param($done, $total)
+                        Write-PhaseProgress -Phase 'stamping_folders' -Data @{ done = $done; total = $total }
+                    } -OnWarning {
+                        param($message)
+                        $script:folderWarnings++
+                        # Cap the per-folder noise; the summary line has the totals.
+                        if ($script:folderWarnings -le 50) { Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = $message } }
+                    }
+                $level = if ($folderMeta.Failed -gt 0) { 'warn' } else { 'info' }
+                Write-EngineEvent -Type 'log' -Data @{ level = $level; message = "Folder metadata: $($folderMeta.Updated) folder(s) updated ($($folderMeta.Coloured) with a colour), $($folderMeta.AlreadyCorrect) already correct, $($folderMeta.PeopleDropped) without created/modified-by (person not found on the target), $($folderMeta.Failed) failed." }
+            } catch {
+                Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Could not restore folder metadata/colours: $($_.Exception.Message). Files are unaffected; re-run the job to retry." }
+            }
+        }
+
         # --- Post-migration verification + automatic repair ----------------
         # Full source<->target comparison (Graph metadata for both sides on
         # a SharePoint target; Graph source + blob-list target on an
