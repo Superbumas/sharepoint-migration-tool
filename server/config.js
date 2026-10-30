@@ -29,6 +29,13 @@ if (!fs.existsSync(resolvedEngineScriptPath)) {
   );
 }
 
+// Running on the built-in fallback means anyone who has read this file can
+// sign session cookies - fine for a first local try, never for real use.
+// Warn loudly rather than refuse to start, so a fresh clone still boots.
+if (!process.env.SESSION_SECRET) {
+  console.warn('[config] SESSION_SECRET is not set - using an insecure built-in value. Set it in .env (setup/New-AppRegistration.ps1 generates one).');
+}
+
 module.exports = {
   port: parseInt(process.env.PORT || '3000', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
