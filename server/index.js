@@ -6,6 +6,7 @@ const http = require('node:http');
 const { Server } = require('socket.io');
 
 const config = require('./config');
+require('./util/userAgent');
 const { getDb } = require('./db');
 const authRoutes = require('./auth/routes');
 const sharepointRoutes = require('./api/sharepoint');

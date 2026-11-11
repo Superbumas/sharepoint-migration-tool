@@ -151,6 +151,10 @@ Import-Module "$PSScriptRoot/lib/SharePointTree.psm1" -Force
 Import-Module "$PSScriptRoot/lib/BlobTarget.psm1" -Force
 Import-Module "$PSScriptRoot/lib/OneDriveTarget.psm1" -Force
 Import-Module "$PSScriptRoot/lib/FileSystemSource.psm1" -Force
+Import-Module "$PSScriptRoot/lib/UserAgent.psm1" -Force
+# Before PnP.PowerShell loads: decorates every request this process sends
+# (see engine/lib/UserAgent.psm1).
+Initialize-MigrationUserAgent
 Import-Module PnP.PowerShell -ErrorAction Stop
 Import-Module Microsoft.PowerShell.ThreadJob -ErrorAction SilentlyContinue
 
@@ -409,7 +413,7 @@ try {
     $sourceConn = $null
     if (-not $isFsSource) {
         Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Connecting to source site $SourceSiteUrl" }
-        $sourceConn = Connect-PnPOnline -Url $SourceSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection
+        $sourceConn = Connect-PnPOnline -Url $SourceSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection | Register-PnPUserAgent
     } else {
         Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Source: file share '$SourcePath'" }
     }
@@ -492,7 +496,7 @@ try {
             $sourceConn
         } else {
             Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Connecting to $TargetOneDriveHostUrl to authenticate Microsoft Graph calls" }
-            Connect-PnPOnline -Url $TargetOneDriveHostUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection
+            Connect-PnPOnline -Url $TargetOneDriveHostUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection | Register-PnPUserAgent
         }
         $targetOneDriveDriveId = Get-OneDriveDriveId -Connection $oneDriveAnchorConn -Upn $TargetOneDriveUpn
         $targetOneDrivePathRoot = Join-UrlSegments @($TargetOneDrivePath, $sourceLeaf)
@@ -507,7 +511,7 @@ try {
             $targetConn = $sourceConn
         } else {
             Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Connecting to target site $TargetSiteUrl" }
-            $targetConn = Connect-PnPOnline -Url $TargetSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection
+            $targetConn = Connect-PnPOnline -Url $TargetSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection | Register-PnPUserAgent
         }
         $targetRoot = Join-UrlSegments @($TargetLibrary, $TargetPath, $sourceLeaf)
         $targetSiteServerRelative = Get-ServerRelativeSitePath -SiteUrl $TargetSiteUrl
@@ -1005,6 +1009,8 @@ try {
         # A fresh lane runspace has nothing loaded, so plain Import-Module
         # is both sufficient and safe.
         Import-Module "$using:PSScriptRoot/lib/Events.psm1"
+        Import-Module "$using:PSScriptRoot/lib/UserAgent.psm1"
+        Initialize-MigrationUserAgent
         Import-Module "$using:PSScriptRoot/lib/Retry.psm1"
         Import-Module "$using:PSScriptRoot/lib/Verification.psm1"
 
@@ -1022,8 +1028,8 @@ try {
         } else {
             @{ Thumbprint = $CertThumbprint }
         }
-        $laneSourceConn = Connect-PnPOnline -Url $SourceSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection
-        $laneTargetConn = if ($SameSite) { $laneSourceConn } else { Connect-PnPOnline -Url $TargetSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection }
+        $laneSourceConn = Connect-PnPOnline -Url $SourceSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection | Register-PnPUserAgent
+        $laneTargetConn = if ($SameSite) { $laneSourceConn } else { Connect-PnPOnline -Url $TargetSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection | Register-PnPUserAgent }
         # Same rule as Get-CrossHostTargetPrefix (lane runspaces can't see
         # script-scope functions): a cross-host copy, e.g. OneDrive (-my
         # host) into a SharePoint site, needs an absolute -TargetUrl.
@@ -1207,6 +1213,8 @@ try {
         # NO -Force - same in-process clobbering hazard as the SharePoint
         # lane above.
         Import-Module "$using:PSScriptRoot/lib/Events.psm1"
+        Import-Module "$using:PSScriptRoot/lib/UserAgent.psm1"
+        Initialize-MigrationUserAgent
         Import-Module "$using:PSScriptRoot/lib/Retry.psm1"
         Import-Module "$using:PSScriptRoot/lib/BlobTarget.psm1"
 
@@ -1224,7 +1232,7 @@ try {
         } else {
             @{ Thumbprint = $CertThumbprint }
         }
-        $laneSourceConn = Connect-PnPOnline -Url $SourceSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection
+        $laneSourceConn = Connect-PnPOnline -Url $SourceSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection | Register-PnPUserAgent
 
         while (-not $Shared.Stop) {
             if ($LaneIndex -ge $Shared.TargetLaneCount) { break }
@@ -1370,6 +1378,8 @@ try {
         # NO -Force - same in-process clobbering hazard as every other lane
         # (see the SharePoint lane above for the full explanation).
         Import-Module "$using:PSScriptRoot/lib/Events.psm1"
+        Import-Module "$using:PSScriptRoot/lib/UserAgent.psm1"
+        Initialize-MigrationUserAgent
         Import-Module "$using:PSScriptRoot/lib/Retry.psm1"
         Import-Module "$using:PSScriptRoot/lib/OneDriveTarget.psm1"
 
@@ -1395,10 +1405,10 @@ try {
         # filesystem source has no source connection at all, so it opens one
         # against the target OneDrive's own host purely to mint that token.
         $laneSourceConn = if (-not $IsFsSource) {
-            Connect-PnPOnline -Url $SourceSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection
+            Connect-PnPOnline -Url $SourceSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection | Register-PnPUserAgent
         } else { $null }
         $laneOneDriveConn = if ($IsFsSource) {
-            Connect-PnPOnline -Url $TargetOneDriveHostUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection
+            Connect-PnPOnline -Url $TargetOneDriveHostUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection | Register-PnPUserAgent
         } else { $laneSourceConn }
 
         while (-not $Shared.Stop) {
@@ -1539,6 +1549,8 @@ try {
         Import-Module PnP.PowerShell -ErrorAction Stop
         # NO -Force - same in-process clobbering hazard as the other lanes.
         Import-Module "$using:PSScriptRoot/lib/Events.psm1"
+        Import-Module "$using:PSScriptRoot/lib/UserAgent.psm1"
+        Initialize-MigrationUserAgent
         Import-Module "$using:PSScriptRoot/lib/Retry.psm1"
         Import-Module "$using:PSScriptRoot/lib/Verification.psm1"
 
@@ -1556,7 +1568,7 @@ try {
         } else {
             @{ Thumbprint = $CertThumbprint }
         }
-        $laneTargetConn = Connect-PnPOnline -Url $TargetSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection
+        $laneTargetConn = Connect-PnPOnline -Url $TargetSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection | Register-PnPUserAgent
 
         # Target library list, resolved once per lane - used to stamp the
         # original filesystem timestamps onto each uploaded file.

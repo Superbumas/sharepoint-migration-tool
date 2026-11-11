@@ -22,6 +22,15 @@
 # import makes Retry's exports visible in this module's scope without
 # touching anyone else's.
 Import-Module "$PSScriptRoot/Retry.psm1"
+Import-Module "$PSScriptRoot/UserAgent.psm1"
+# Decorate every Invoke-WebRequest/Invoke-RestMethod in this module with the
+# migration User-Agent (see UserAgent.psm1). Module-scoped on purpose: a
+# global $PSDefaultParameterValues does NOT reach commands run from inside a
+# module's functions - verified, they kept PowerShell's default agent.
+$PSDefaultParameterValues = @{
+    'Invoke-WebRequest:UserAgent' = (Get-MigrationUserAgent)
+    'Invoke-RestMethod:UserAgent' = (Get-MigrationUserAgent)
+}
 
 $script:BlobApiVersion = '2019-12-12'
 $script:SingleUploadThresholdBytes = 32MB
