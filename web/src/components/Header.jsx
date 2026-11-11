@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
@@ -37,6 +37,34 @@ function ThemeToggle() {
     >
       <span aria-hidden>{dark ? '☀️' : '🌙'}</span>
     </button>
+  );
+}
+
+// One place to fix sign-in trouble instead of a cryptic error inside each
+// picker: shown when a Microsoft call for this project needs a fresh sign-in,
+// or when the project was never connected (its engine app isn't set up yet).
+function AuthBanner({ user }) {
+  const [reauth, setReauth] = useState(false);
+  useEffect(() => {
+    const on = () => setReauth(true);
+    window.addEventListener('auth:reauth-required', on);
+    return () => window.removeEventListener('auth:reauth-required', on);
+  }, []);
+  if (!user?.project) return null;
+  const notConnected = user.project.engine?.mode === 'not_provisioned';
+  if (!reauth && !notConnected) return null;
+  const href = `/auth/login?project=${encodeURIComponent(user.project.id)}${user.upn ? `&hint=${encodeURIComponent(user.upn)}` : ''}`;
+  return (
+    <div role="status" className="border-t border-amber-200 bg-amber-50 text-amber-800 text-sm">
+      <div className="max-w-7xl mx-auto px-4 py-2 flex flex-wrap items-center justify-between gap-2">
+        <span>
+          {reauth
+            ? 'Your Microsoft sign-in for this project has expired, so sites and files can\'t be loaded.'
+            : 'This project isn\'t connected to its tenant yet. A Global Admin of that tenant needs to finish connecting it once.'}
+        </span>
+        <a href={href} className="font-medium underline whitespace-nowrap">{reauth ? 'Reconnect' : 'Connect project'}</a>
+      </div>
+    </div>
   );
 }
 
@@ -107,6 +135,7 @@ export default function Header() {
           <NavLinks />
         </nav>
       </div>
+      <AuthBanner user={user} />
     </header>
   );
 }

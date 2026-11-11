@@ -17,7 +17,7 @@ export default function SignIn() {
       </div>
       <h1 className="text-lg font-semibold text-slate-800 mb-1">SharePoint Migration Tool</h1>
       <p className="text-sm text-slate-500 mb-6">
-        Sign in with your Microsoft work account — you'll land in your organisation's project automatically.
+        Sign in with your Microsoft work account. You'll go straight back to the project you used last, or your organisation's project the first time.
       </p>
 
       {authError && AUTH_ERROR_MESSAGES[authError] && (
@@ -39,7 +39,11 @@ export default function SignIn() {
         Sign in with Microsoft
       </a>
 
-      <div className="mt-5 text-xs text-slate-400">
+      <div className="mt-3 text-xs text-slate-400">
+        <a href="/auth/login?fresh=1" className="text-blue-600 hover:underline">Use a different account</a>
+      </div>
+
+      <div className="mt-3 text-xs text-slate-400">
         Working across several client tenants?{' '}
         <Link to="/projects" className="text-blue-600 hover:underline">Pick a specific project →</Link>
       </div>
