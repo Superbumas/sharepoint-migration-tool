@@ -381,9 +381,16 @@ function Get-ZipDirectory([hashtable]$Ref) {
     if ($cdOff -eq 0xFFFFFFFFL -or $cdSize -eq 0xFFFFFFFFL) { throw 'zip64' }
     if ($cdSize -le 0) { throw 'empty zip index' }
     $tailStart = $tail.Total - $b.Length
-    $cd = if ($cdOff -ge $tailStart -and ($cdOff + $cdSize) -le $tail.Total) {
-        [byte[]]$b[($cdOff - $tailStart)..($cdOff - $tailStart + $cdSize - 1)]
-    } else { Read-ZipRange $Ref $cdOff $cdSize }
+    # Plain assignments and Array.Copy, never "$cd = if (...) { $bytes }" or
+    # $b[a..b]: those push every byte through the pipeline and leave $cd an
+    # object[] of boxed bytes, which every BitConverter call below then
+    # copies back to byte[] - seconds of CPU per many-part document, and it
+    # gets far worse with parallel lanes fighting over the garbage collector.
+    if ($cdOff -ge $tailStart -and ($cdOff + $cdSize) -le $tail.Total) {
+        $cd = [byte[]]::new($cdSize)
+        [Array]::Copy($b, [long]($cdOff - $tailStart), $cd, [long]0, [long]$cdSize)
+    } else { $cd = Read-ZipRange $Ref $cdOff $cdSize }
+    if ($cd -isnot [byte[]]) { throw 'zip index read did not return bytes' }
     $map = @{}
     $p = 0
     while ($p + 46 -le $cd.Length -and [BitConverter]::ToUInt32($cd, $p) -eq 0x02014B50) {
@@ -560,7 +567,9 @@ function Test-RewrittenFileContent {
 function Invoke-RewrittenContentCheck {
     param(
         [Parameter(Mandatory)][object[]]$Items,
-        [int]$ThrottleLimit = 8,
+        # 16 lanes: SharePoint served ~170 range requests/s on hilasti before any 429;
+        # 32 hit the throttle (and its pacing) sooner without finishing faster overall.
+        [int]$ThrottleLimit = 16,
         [int]$BigLanes = 4,
         [long]$MaxBytes = 300MB,
         [scriptblock]$OnProgress,
