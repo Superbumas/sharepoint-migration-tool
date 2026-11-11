@@ -148,6 +148,13 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+# The server reads engine events as UTF-8 NDJSON. On Windows, pwsh otherwise
+# writes stdout in the console code page, which folded or mangled non-ASCII
+# file names in the audit log, reports and exports ("Žalgiris café" stored as
+# "Zalgiris caf?"). The file names on SharePoint were never affected.
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
 # Source "last modified" comes from the file (TimeLastModified) while the
 # date the engine stamps on the target comes from the list item (Modified);
 # SharePoint can keep those a second or so apart, which made the stamped
@@ -1149,7 +1156,18 @@ try {
                     if ($srcItem['Editor'] -and $srcItem['Editor'].Email) { $people['Editor'] = $srcItem['Editor'].Email }
                 }
                 if (-not $laneTargetList -or ($values.Count + $people.Count) -eq 0) { return $false }
-                $tgtItem = Get-PnPFile -Url $TargetFileServerRel -AsListItem -Connection $laneTargetConn -ErrorAction Stop
+                $tgtItem = $null
+                try {
+                    $tgtItem = Get-PnPFile -Url $TargetFileServerRel -AsListItem -Connection $laneTargetConn -ErrorAction Stop
+                } catch {
+                    # Get-PnPFile URL-decodes its -Url, so a name containing
+                    # a literal %XX (e.g. "report %20 final.txt") is looked up
+                    # under the wrong name. Find the item by its exact path.
+                    $esc = [System.Security.SecurityElement]::Escape($TargetFileServerRel)
+                    $caml = "<View Scope='RecursiveAll'><Query><Where><Eq><FieldRef Name='FileRef'/><Value Type='Text'>$esc</Value></Eq></Where></Query><RowLimit>1</RowLimit></View>"
+                    $tgtItem = Get-PnPListItem -List $laneTargetList -Query $caml -Connection $laneTargetConn -ErrorAction Stop | Select-Object -First 1
+                    if (-not $tgtItem) { throw }
+                }
                 try {
                     Set-PnPListItem -List $laneTargetList -Identity $tgtItem.Id -Values ($values + $people) -Connection $laneTargetConn -ErrorAction Stop | Out-Null
                     return $true
@@ -1733,7 +1751,11 @@ try {
                         if ($item.Created) { $values['Created'] = [datetime]$item.Created }
                         if ($item.Modified) { $values['Modified'] = [datetime]$item.Modified }
                         if ($laneTargetList -and $values.Count -gt 0) {
-                            $tgtItem = Get-PnPFile -Url $targetFileServerRel -AsListItem -Connection $laneTargetConn -ErrorAction Stop
+                            $tgtItem = try { Get-PnPFile -Url $targetFileServerRel -AsListItem -Connection $laneTargetConn -ErrorAction Stop } catch {
+                                # Literal %XX in a name defeats Get-PnPFile's URL decoding - look the item up by exact path.
+                                Get-PnPListItem -List $laneTargetList -Query "<View Scope='RecursiveAll'><Query><Where><Eq><FieldRef Name='FileRef'/><Value Type='Text'>$([System.Security.SecurityElement]::Escape($targetFileServerRel))</Value></Eq></Where></Query><RowLimit>1</RowLimit></View>" -Connection $laneTargetConn -ErrorAction Stop | Select-Object -First 1
+                            }
+                            if (-not $tgtItem) { throw "target item not found: $targetFileServerRel" }
                             Set-PnPListItem -List $laneTargetList -Identity $tgtItem.Id -Values $values -Connection $laneTargetConn -ErrorAction Stop | Out-Null
                         }
                     } catch {
@@ -1771,7 +1793,11 @@ try {
                             if ($item.Created) { $values['Created'] = [datetime]$item.Created }
                             if ($item.Modified) { $values['Modified'] = [datetime]$item.Modified }
                             if ($laneTargetList -and $values.Count -gt 0) {
-                                $tgtItem = Get-PnPFile -Url $targetFileServerRel -AsListItem -Connection $laneTargetConn -ErrorAction Stop
+                                $tgtItem = try { Get-PnPFile -Url $targetFileServerRel -AsListItem -Connection $laneTargetConn -ErrorAction Stop } catch {
+                                    # Literal %XX in a name defeats Get-PnPFile's URL decoding - look the item up by exact path.
+                                    Get-PnPListItem -List $laneTargetList -Query "<View Scope='RecursiveAll'><Query><Where><Eq><FieldRef Name='FileRef'/><Value Type='Text'>$([System.Security.SecurityElement]::Escape($targetFileServerRel))</Value></Eq></Where></Query><RowLimit>1</RowLimit></View>" -Connection $laneTargetConn -ErrorAction Stop | Select-Object -First 1
+                                }
+                                if (-not $tgtItem) { throw "target item not found: $targetFileServerRel" }
                                 Set-PnPListItem -List $laneTargetList -Identity $tgtItem.Id -Values $values -Connection $laneTargetConn -ErrorAction Stop | Out-Null
                             }
                         } catch {}
@@ -2022,6 +2048,7 @@ try {
         # on, a round only runs while the problem count strictly decreases, so
         # files nothing can fix stop the loop instead of spinning.
         $prevProblemCount = [int]::MaxValue
+        $repairTargetList = $null
         for ($repairRound = 1; $repairRound -le 3 -and $verifyOut -and -not $verifyOut.Summary.ok; $repairRound++) {
             $problemPaths = @($verifyOut.Result.Missing) + @($verifyOut.Result.SizeMismatch) + @($verifyOut.Result.HashMismatch)
             if ($repairRound -gt 2 -and $problemPaths.Count -ge $prevProblemCount) {
@@ -2143,6 +2170,31 @@ try {
                                     Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
                                 }
                             }
+                        }
+                    }
+                    # A re-copy lands with the app as author and "now" as its
+                    # dates - put the original metadata back, like the copy
+                    # lanes do (SharePoint -> SharePoint only; the metadata
+                    # comes from the prefetched source walk).
+                    if (-not $isFsSource -and -not $isBlobTarget -and -not $isOneDriveTarget -and $sourceMetaMap -and $sourceMetaMap[$rel]) {
+                        try {
+                            if (-not $repairTargetList) { $repairTargetList = Get-PnPList -Identity (($targetRoot -split '/')[0]) -Connection $targetConn -ErrorAction Stop }
+                            $m = $sourceMetaMap[$rel]
+                            $vals = @{}
+                            if ($m.Created) { $vals['Created'] = $m.Created }
+                            if ($m.Modified) { $vals['Modified'] = $m.Modified }
+                            $ppl = @{}
+                            if ($m.AuthorEmail) { $ppl['Author'] = $m.AuthorEmail }
+                            if ($m.EditorEmail) { $ppl['Editor'] = $m.EditorEmail }
+                            $tgtFileRel = "$targetSiteServerRelative/$targetRoot/$rel".Replace('//', '/')
+                            $esc = [System.Security.SecurityElement]::Escape($tgtFileRel)
+                            $li = Get-PnPListItem -List $repairTargetList -Query "<View Scope='RecursiveAll'><Query><Where><Eq><FieldRef Name='FileRef'/><Value Type='Text'>$esc</Value></Eq></Where></Query><RowLimit>1</RowLimit></View>" -Connection $targetConn -ErrorAction Stop | Select-Object -First 1
+                            if ($li -and ($vals.Count + $ppl.Count) -gt 0) {
+                                try { Set-PnPListItem -List $repairTargetList -Identity $li.Id -Values ($vals + $ppl) -Connection $targetConn -ErrorAction Stop | Out-Null }
+                                catch { if ($vals.Count) { Set-PnPListItem -List $repairTargetList -Identity $li.Id -Values $vals -Connection $targetConn -ErrorAction Stop | Out-Null } }
+                            }
+                        } catch {
+                            Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Re-copied '$rel' but could not restore its original dates/people: $($_.Exception.Message)" }
                         }
                     }
                     $attempted[$rel] = @{ SrcRel = $srcRel; Size = [long]$file.Size }
