@@ -39,7 +39,7 @@ export default function App() {
   return (
     <AuthProvider>
       <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-20 focus:bg-white focus:px-3 focus:py-2 focus:rounded-md focus:shadow">Skip to content</a>
-      <Header onToggleSidebar={toggleSidebar} />
+      <Header onToggleSidebar={toggleSidebar} sidebarOpen={sidebarOpen} />
       <div className="flex items-start">
       {sidebarOpen && <Sidebar />}
       <div className="flex-1 min-w-0">
