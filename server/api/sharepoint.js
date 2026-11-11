@@ -1,6 +1,6 @@
 const express = require('express');
 const { requireAuth } = require('../auth/middleware');
-const { graphGet } = require('../graph/client');
+const { graphGet, graphPost } = require('../graph/client');
 const { ensureEngineSiteAccessBySiteId } = require('../graph/siteAccess');
 const { searchTenantSites, resolveSiteFromUrl, looksLikeSiteUrl } = require('../graph/siteDirectory');
 
@@ -175,6 +175,41 @@ router.get('/sharepoint/drives/:driveId/items/:itemId/children', async (req, res
       $top: 200,
     });
     res.json({ items: data.value || [] });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Characters SharePoint/OneDrive refuse in a file or folder name.
+const ILLEGAL_NAME_CHARS = /["*:<>?/\\|]/;
+
+// Creates a new folder inside a library, so a target folder (e.g. one per
+// person's migrated OneDrive) can be made from the picker instead of opening
+// SharePoint first. parentPath is the folder's path relative to the library
+// root ('' = the root), addressed by path rather than item id because the
+// picker's breadcrumb can hold path-only segments after a search jump. Uses
+// the signed-in user's delegated token, so it only works where they can
+// already write. Fails rather than renaming if the name is taken.
+router.post('/sharepoint/drives/:driveId/folders', async (req, res, next) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    const parentPath = String(req.body?.parentPath || '').replace(/^\/+|\/+$/g, '');
+    if (!name) return res.status(400).json({ error: 'name_required', message: 'Enter a folder name.' });
+    if (ILLEGAL_NAME_CHARS.test(name) || name.endsWith('.') || name.length > 255) {
+      return res.status(400).json({ error: 'invalid_name', message: 'Folder names can\'t contain " * : < > ? / \\ | or end with a full stop.' });
+    }
+    const encodedParent = parentPath.split('/').map(encodeURIComponent).join('/');
+    const urlPath = parentPath
+      ? `/drives/${req.params.driveId}/root:/${encodedParent}:/children`
+      : `/drives/${req.params.driveId}/root/children`;
+    try {
+      const item = await graphPost(req, urlPath, { name, folder: {}, '@microsoft.graph.conflictBehavior': 'fail' });
+      res.status(201).json({ id: item.id, name: item.name });
+    } catch (err) {
+      if (err.status === 409) return res.status(409).json({ error: 'exists', message: `A folder or file called "${name}" already exists here.` });
+      if (err.status === 403) return res.status(403).json({ error: 'forbidden', message: 'You don\'t have permission to create folders in this library.' });
+      throw err;
+    }
   } catch (err) {
     next(err);
   }
