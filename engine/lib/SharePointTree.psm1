@@ -1,5 +1,172 @@
 #Requires -Version 7.0
 
+# NO -Force - see BlobTarget.psm1's note on forced re-imports from a module.
+Import-Module "$PSScriptRoot/Retry.psm1"
+
+# --- Graph delta source scan -----------------------------------------------
+# Same output shape as Get-PnPFolderTree below, built from Microsoft Graph's
+# drive delta feed instead of two CSOM calls per folder. One delta walk
+# returns every item in the library a page at a time, so a 20,000-folder
+# tree costs roughly (items / page size) requests instead of 40,000 - and
+# delta is the enumeration Microsoft recommends for bulk scans under
+# SharePoint throttling.
+#
+# SharePoint only supports delta on a drive's ROOT, never on a subfolder,
+# and delta items carry no parentReference.path (a folder rename doesn't
+# re-emit its descendants, so a path would go stale) - paths are rebuilt
+# from parentReference.id. A job pointed at a small folder inside a huge
+# library would page through the whole library, so -ScopeFolderId limits
+# what is RETURNED, and Select-SharePointScanMethod decides beforehand
+# whether delta is worth it at all.
+#
+# Measured on a real 10,850-file library: 57 delta pages / 47s against 798
+# CSOM calls / 431s, the same files and folders except the library's hidden
+# Forms folder (AllItems.aspx, template.dotx ...), which Graph never lists
+# and which has no business being copied anyway.
+#
+# Modified is Graph's lastModifiedDateTime - the item's Modified field, which
+# is what the engine stamps onto every copy - whereas CSOM's TimeLastModified
+# is the file's own write time. They differ for content that was itself
+# migrated in (seen: 2020 vs 2025), and only the former matches what the
+# target index holds, so the delta skip check now compares like with like.
+#
+# OneNote notebooks surface in Graph as 'package' items rather than folders;
+# they're treated as folders here because that's what they are in the
+# library (the CSOM walk descends into them too), so their sections migrate.
+function Get-GraphDeltaTree {
+    param(
+        [Parameter(Mandatory)]$Connection,
+        [Parameter(Mandatory)][string]$DriveId,
+        # Site-relative URL of the scanned folder (e.g. "Shared Documents/HR")
+        # - used to build each file's SourceFolder exactly as Get-PnPFolderTree
+        # does (the copy lanes address source files by it).
+        [Parameter(Mandatory)][string]$RootSiteRelativeUrl,
+        # Graph item id of the scanned folder; omit for the library root.
+        [string]$ScopeFolderId,
+        # (foldersFound, filesFound, pagesFetched) - throttling is the
+        # callback's job, as for Get-PnPFolderTree.
+        [scriptblock]$OnProgress,
+        [scriptblock]$OnRetry
+    )
+    $root = $RootSiteRelativeUrl.TrimEnd('/')
+    $items = [System.Collections.Generic.Dictionary[string, object]]::new()
+    $rootId = $null
+    $pages = 0
+    $files = 0; $folders = 0
+    $url = "v1.0/drives/$DriveId/root/delta?`$select=id,name,size,file,folder,package,root,deleted,parentReference,lastModifiedDateTime"
+    while ($url) {
+        $resp = Invoke-WithRetry -Action { Invoke-PnPGraphMethod -Url $url -Connection $Connection } -OnRetry $OnRetry
+        foreach ($it in $resp.value) {
+            if ($it.root) { $rootId = [string]$it.id; continue }
+            if ($it.deleted) { $null = $items.Remove([string]$it.id); continue }
+            $isContainer = [bool]($it.folder -or $it.package)
+            # The same item can appear more than once in one delta walk; the
+            # last occurrence wins, so these counts are a progress estimate.
+            if (-not $items.ContainsKey([string]$it.id)) { if ($isContainer) { $folders++ } else { $files++ } }
+            $modified = $null
+            if ($it.lastModifiedDateTime) { $modified = [datetime]$it.lastModifiedDateTime }
+            $items[[string]$it.id] = [pscustomobject]@{
+                Name      = [string]$it.name
+                ParentId  = [string]$it.parentReference.id
+                Container = $isContainer
+                Size      = [long]$it.size
+                Modified  = $modified
+            }
+        }
+        $pages++
+        if ($OnProgress) { & $OnProgress $folders $files $pages }
+        $url = $resp.'@odata.nextLink'
+    }
+
+    $scopeId = if ($ScopeFolderId) { $ScopeFolderId } else { $rootId }
+    if (-not $scopeId) { throw 'Graph delta returned no root item - cannot anchor the scan.' }
+    # id -> path relative to the scan root ('' for the root itself), or $null
+    # when the item sits outside the scanned folder. Memoised and iterative,
+    # so a very deep tree can't exhaust the call stack.
+    $paths = [System.Collections.Generic.Dictionary[string, object]]::new()
+    $paths[$scopeId] = ''
+    $fileList = [System.Collections.Generic.List[object]]::new()
+    $folderList = [System.Collections.Generic.List[string]]::new()
+    foreach ($id in @($items.Keys)) {
+        if ($id -eq $scopeId) { continue }
+        $chain = [System.Collections.Generic.List[string]]::new()
+        $cur = $id
+        while (-not $paths.ContainsKey($cur)) {
+            if (-not $items.ContainsKey($cur)) { $cur = $null; break }
+            $chain.Add($cur)
+            $cur = $items[$cur].ParentId
+        }
+        $base = if ($null -eq $cur) { $null } else { $paths[$cur] }
+        for ($i = $chain.Count - 1; $i -ge 0; $i--) {
+            $cid = $chain[$i]
+            $base = if ($null -eq $base) { $null } elseif ($base) { "$base/$($items[$cid].Name)" } else { $items[$cid].Name }
+            $paths[$cid] = $base
+        }
+        $rel = $paths[$id]
+        if ($null -eq $rel) { continue }
+        $it = $items[$id]
+        if ($it.Container) {
+            $folderList.Add($rel)
+        } else {
+            $parentRel = if ($rel.Contains('/')) { $rel.Substring(0, $rel.LastIndexOf('/')) } else { '' }
+            $fileList.Add([pscustomobject]@{
+                SourceFolder     = if ($parentRel) { "$root/$parentRel" } else { $root }
+                Name             = $it.Name
+                Size             = $it.Size
+                Modified         = $it.Modified
+                RelativeFromRoot = $parentRel
+            })
+        }
+    }
+    # Shallow-first, like the breadth-first CSOM walk: Initialize-PnPTargetFolders
+    # ensures each level anyway, but its progress then reads naturally.
+    $sortedFolders = [System.Collections.Generic.List[string]]::new()
+    foreach ($f in ($folderList | Sort-Object { ($_ -split '/').Count }, { $_ })) { $sortedFolders.Add($f) }
+    return [pscustomobject]@{ Files = $fileList; Folders = $sortedFolders; Pages = $pages }
+}
+
+# Picks the cheaper enumeration for a SharePoint source folder. Delta walks
+# the WHOLE library, so it only pays off when the scanned folder is a
+# meaningful share of it; for a small folder inside a big library the
+# per-folder CSOM walk touches far fewer items. Graph reports a folder's
+# 'size' as the total of everything beneath it, so the share is a
+# two-request estimate. Measured on a real library: a folder holding 40% of
+# it scanned in 57 delta pages / 30s against 392 CSOM calls / 89s, with
+# identical results - so the cut-over sits well below half.
+#
+# Size alone misleads for a folder of many small files (seen: 4% of a
+# library's bytes but 75% of its files), so a library small enough to delta
+# outright - about 200 items per page, so 50,000 items is ~250 requests -
+# always uses delta when the caller supplies its item count.
+# Returns @{ Method = 'delta'|'folders'; FolderId; Reason }.
+function Select-SharePointScanMethod {
+    param(
+        [Parameter(Mandatory)]$Connection,
+        [Parameter(Mandatory)][string]$DriveId,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$PathInLibrary,
+        # List ItemCount of the library (files + folders); -1 = unknown.
+        [long]$LibraryItemCount = -1,
+        [double]$MinShare = 0.2,
+        [long]$SmallLibraryItems = 50000
+    )
+    $path = $PathInLibrary.Trim('/')
+    if (-not $path) { return @{ Method = 'delta'; FolderId = $null; Reason = 'library root' } }
+    $esc = (($path -split '/') | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/'
+    if ($LibraryItemCount -ge 0 -and $LibraryItemCount -le $SmallLibraryItems) {
+        $folder = Invoke-WithRetry -Action { Invoke-PnPGraphMethod -Url "v1.0/drives/$DriveId/root:/$($esc)?`$select=id" -Connection $Connection }
+        return @{ Method = 'delta'; FolderId = [string]$folder.id; Reason = "the whole library is only $LibraryItemCount items" }
+    }
+    $folder = Invoke-WithRetry -Action { Invoke-PnPGraphMethod -Url "v1.0/drives/$DriveId/root:/$($esc)?`$select=id,size" -Connection $Connection }
+    $rootItem = Invoke-WithRetry -Action { Invoke-PnPGraphMethod -Url "v1.0/drives/$DriveId/root?`$select=id,size" -Connection $Connection }
+    $share = if ([long]$rootItem.size -gt 0) { [double]$folder.size / [double]$rootItem.size } else { 1.0 }
+    $pct = [Math]::Round($share * 100)
+    if ($share -ge $MinShare) {
+        return @{ Method = 'delta'; FolderId = [string]$folder.id; Reason = "the folder holds $pct% of the library" }
+    }
+    return @{ Method = 'folders'; FolderId = [string]$folder.id; Reason = "the folder holds only $pct% of the library" }
+}
+
+
 # Breadth-first walk of a document library folder, using Get-PnPFolderItem at
 # each level rather than relying on any single cmdlet's built-in recursion -
 # this keeps behaviour predictable across PnP.PowerShell versions and lets us
@@ -227,4 +394,4 @@ function Copy-PnPFolderMetadata {
     return $result
 }
 
-Export-ModuleMember -Function Get-PnPFolderTree, Initialize-PnPTargetFolders, Copy-PnPFolderMetadata
+Export-ModuleMember -Function Get-GraphDeltaTree, Select-SharePointScanMethod, Get-PnPFolderTree, Initialize-PnPTargetFolders, Copy-PnPFolderMetadata

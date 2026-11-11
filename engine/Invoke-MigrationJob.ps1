@@ -138,7 +138,19 @@ param(
     # items (both stages) whose original location was under this job's source
     # root - recycled items still count toward SharePoint storage quota for 93
     # days otherwise. Touches nothing outside the source root. Irreversible.
-    [switch]$PurgeRecycleBin
+    [switch]$PurgeRecycleBin,
+    # Pre-flight-only mode: connects, scans the source tree and runs the
+    # content checks (target path length, file size, unique permissions -
+    # see engine/lib/Preflight.psm1), emits one preflight_report event and
+    # exits without creating or copying anything. Like -VerifyOnly it never
+    # emits job_* lifecycle events. The scan is still written to
+    # -TreeCachePath, so starting the job right after reuses it.
+    [switch]$PreflightOnly,
+    # How a SharePoint source is enumerated: 'auto' (default) picks Graph
+    # delta or the folder-by-folder walk per Select-SharePointScanMethod;
+    # 'delta' / 'folders' force one - for troubleshooting a scan, or to
+    # compare the two on a real library.
+    [ValidateSet('auto', 'delta', 'folders')][string]$SourceScanMethod = 'auto'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -151,6 +163,11 @@ Import-Module "$PSScriptRoot/lib/SharePointTree.psm1" -Force
 Import-Module "$PSScriptRoot/lib/BlobTarget.psm1" -Force
 Import-Module "$PSScriptRoot/lib/OneDriveTarget.psm1" -Force
 Import-Module "$PSScriptRoot/lib/FileSystemSource.psm1" -Force
+Import-Module "$PSScriptRoot/lib/UserAgent.psm1" -Force
+Import-Module "$PSScriptRoot/lib/Preflight.psm1" -Force
+# Before PnP.PowerShell loads: decorates every request this process sends
+# (see engine/lib/UserAgent.psm1).
+Initialize-MigrationUserAgent
 Import-Module PnP.PowerShell -ErrorAction Stop
 Import-Module Microsoft.PowerShell.ThreadJob -ErrorAction SilentlyContinue
 
@@ -409,7 +426,7 @@ try {
     $sourceConn = $null
     if (-not $isFsSource) {
         Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Connecting to source site $SourceSiteUrl" }
-        $sourceConn = Connect-PnPOnline -Url $SourceSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection
+        $sourceConn = Connect-PnPOnline -Url $SourceSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection | Register-PnPUserAgent
     } else {
         Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Source: file share '$SourcePath'" }
     }
@@ -492,7 +509,7 @@ try {
             $sourceConn
         } else {
             Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Connecting to $TargetOneDriveHostUrl to authenticate Microsoft Graph calls" }
-            Connect-PnPOnline -Url $TargetOneDriveHostUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection
+            Connect-PnPOnline -Url $TargetOneDriveHostUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection | Register-PnPUserAgent
         }
         $targetOneDriveDriveId = Get-OneDriveDriveId -Connection $oneDriveAnchorConn -Upn $TargetOneDriveUpn
         $targetOneDrivePathRoot = Join-UrlSegments @($TargetOneDrivePath, $sourceLeaf)
@@ -507,7 +524,7 @@ try {
             $targetConn = $sourceConn
         } else {
             Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Connecting to target site $TargetSiteUrl" }
-            $targetConn = Connect-PnPOnline -Url $TargetSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection
+            $targetConn = Connect-PnPOnline -Url $TargetSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection | Register-PnPUserAgent
         }
         $targetRoot = Join-UrlSegments @($TargetLibrary, $TargetPath, $sourceLeaf)
         $targetSiteServerRelative = Get-ServerRelativeSitePath -SiteUrl $TargetSiteUrl
@@ -796,6 +813,7 @@ try {
     $sourceKey = if ($isFsSource) { "filesystem|$SourcePath" } else { "$SourceSiteUrl|$SourceLibrary|$SourcePath" }
     $targetKey = if ($isBlobTarget) { 'blob' } elseif ($isOneDriveTarget) { "onedrive|$TargetOneDriveUpn|$($oneDriveCtx.PathRoot)" } else { "$effTargetSite|$effTargetLib|$targetPathInLib" }
     $tree = $null
+    $treeFromCache = $false
     $cachedFoldersEnsuredFor = $null
     if ($TreeCachePath -and (Test-Path $TreeCachePath)) {
         try {
@@ -811,6 +829,7 @@ try {
                     Folders = @($cache.folders | ForEach-Object { [string]$_ } | Where-Object { -not ($skipForms -and ($_ -eq 'Forms' -or $_ -like 'Forms/*')) })
                 }
                 $cachedFoldersEnsuredFor = $cache.foldersEnsuredFor
+                $treeFromCache = $true
                 Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Reusing source tree scan from $([Math]::Round($ageHours * 60)) minute(s) ago ($(@($cache.files).Count) files) - every file is still re-verified against the target before copying. Files added to the source since then are picked up by the next fresh run." }
             }
         } catch {
@@ -843,10 +862,38 @@ try {
                 Write-EngineEvent -Type 'log' -Data @{ level = 'error'; message = "$($tree.Errors.Count) folder(s) could not be read (see above) - fix access for the engine account and run the job again to pick their contents up." }
             }
         } else {
-            Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Enumerating source tree under '$sourceRoot'" }
-            $tree = Get-PnPFolderTree -Connection $sourceConn -RootSiteRelativeUrl $sourceRoot -SkipLibraryFormsFolder:(-not ([string]$SourcePath).Trim('/')) -OnProgress {
-                param($folderCount, $fileCount, $pendingCount)
-                Write-PhaseProgress -Phase 'enumerating' -Data @{ folders = $folderCount; files = $fileCount; pending = $pendingCount }
+            # Graph delta first (one paged walk of the library - see
+            # Get-GraphDeltaTree), folder-by-folder CSOM when the job only
+            # covers a small part of a big library or delta fails for any
+            # reason. Both return the same shape.
+            try {
+                $scanDriveId = Get-GraphDriveId -Connection $sourceConn -SiteUrl $SourceSiteUrl -Library $SourceLibrary
+                $libItemCount = -1
+                try { $libItemCount = [long](Get-PnPList -Identity $SourceLibrary -Connection $sourceConn -ErrorAction Stop).ItemCount } catch {}
+                $scan = Select-SharePointScanMethod -Connection $sourceConn -DriveId $scanDriveId -PathInLibrary $SourcePath -LibraryItemCount $libItemCount
+                if ($SourceScanMethod -ne 'auto') { $scan.Method = $SourceScanMethod; $scan.Reason = "forced by -SourceScanMethod $SourceScanMethod" }
+                if ($scan.Method -eq 'delta') {
+                    Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Enumerating source tree under '$sourceRoot' with a Graph delta scan ($($scan.Reason))" }
+                    $tree = Get-GraphDeltaTree -Connection $sourceConn -DriveId $scanDriveId -RootSiteRelativeUrl $sourceRoot -ScopeFolderId $scan.FolderId -OnProgress {
+                        param($folderCount, $fileCount, $pageCount)
+                        Write-PhaseProgress -Phase 'enumerating' -Data @{ folders = $folderCount; files = $fileCount; pending = 0 }
+                    } -OnRetry {
+                        param($attempt, $waitMs, $reason, $statusCode, $message)
+                        Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Delta scan retry $attempt`: $reason - $message" }
+                    }
+                    Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Delta scan done: $(@($tree.Files).Count) file(s) in $(@($tree.Folders).Count) folder(s), $($tree.Pages) Graph page(s)." }
+                } else {
+                    Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Enumerating source tree under '$sourceRoot' folder by folder ($($scan.Reason), so a whole-library delta scan would read more than it saves)" }
+                }
+            } catch {
+                Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Graph delta scan unavailable ($($_.Exception.Message)) - enumerating folder by folder instead." }
+                $tree = $null
+            }
+            if (-not $tree) {
+                $tree = Get-PnPFolderTree -Connection $sourceConn -RootSiteRelativeUrl $sourceRoot -SkipLibraryFormsFolder:(-not ([string]$SourcePath).Trim('/')) -OnProgress {
+                    param($folderCount, $fileCount, $pendingCount)
+                    Write-PhaseProgress -Phase 'enumerating' -Data @{ folders = $folderCount; files = $fileCount; pending = $pendingCount }
+                }
             }
         }
         if ($TreeCachePath) {
@@ -865,6 +912,68 @@ try {
     $totalItems = @($tree.Files).Count
     $totalBytes = ($tree.Files | Measure-Object -Property Size -Sum).Sum
     if (-not $totalBytes) { $totalBytes = 0 }
+
+    # --- Pre-flight content check -------------------------------------------
+    # Before anything is created or copied: target paths over SharePoint's
+    # 400-character limit, files over 250 GB, and how many source items carry
+    # their own permissions (engine/lib/Preflight.psm1). Never fatal - a
+    # blocked file simply fails at copy time as it would have anyway, while
+    # everything else migrates - but the report lands in the job log and on
+    # the job page first, and -PreflightOnly stops here so it can be read
+    # before the job is started at all.
+    try {
+        Write-PhaseProgress -Phase 'preflight' -Data @{ step = 'paths' } -Force
+        $preflightPrefix = if ($isBlobTarget) {
+            $blobCtx.Prefix
+        } elseif ($isOneDriveTarget) {
+            $driveWeb = Invoke-WithRetry -Action { Invoke-PnPGraphMethod -Url "v1.0/drives/$($oneDriveCtx.DriveId)?`$select=webUrl" -Connection $oneDriveCtx.Connection }
+            (Join-UrlSegments @([uri]::UnescapeDataString(([Uri]$driveWeb.webUrl).AbsolutePath), $oneDriveCtx.PathRoot)) -replace '^(?!/)', '/'
+        } else {
+            (Join-UrlSegments @((Get-ServerRelativeSitePath -SiteUrl $effTargetSite), $targetRoot)) -replace '^(?!/)', '/'
+        }
+        $content = Test-MigrationContent -Files @($tree.Files) -Folders @($tree.Folders) -TargetPrefix $preflightPrefix -TargetProvider $TargetProvider
+        $uniquePerms = $null
+        $permsSkipped = $false
+        # Reading HasUniqueRoleAssignments costs ~4 ms per item (measured: 20s
+        # per 5,000 vs 2s without it), so a resume that reuses a recent scan
+        # also reuses that scan's permission count - the server keeps the
+        # earlier figure when this run reports it as skipped.
+        if (-not $isFsSource -and $treeFromCache) {
+            $permsSkipped = $true
+        } elseif (-not $isFsSource) {
+            Write-PhaseProgress -Phase 'preflight' -Data @{ step = 'permissions'; scanned = 0 } -Force
+            $uniquePerms = Get-UniquePermissionSummary -Connection $sourceConn `
+                -LibraryServerRelativeUrl ("$sourceSiteServerRelative/$SourceLibrary".Replace('//', '/')) `
+                -RootServerRelativeUrl ("$sourceSiteServerRelative/$sourceRoot".Replace('//', '/')) -OnProgress {
+                    param($scanned, $found)
+                    Write-PhaseProgress -Phase 'preflight' -Data @{ step = 'permissions'; scanned = $scanned; found = $found }
+                }
+        }
+        $preflight = New-PreflightReport -Content $content -UniquePerms $uniquePerms -TargetProvider $TargetProvider
+        if ($permsSkipped) { $preflight.uniquePermissions = @{ skipped = $true } }
+        Write-EngineEvent -Type 'preflight_report' -Data @{ preflight = $preflight }
+        foreach ($lp in ($preflight.longFolders.items | Select-Object -First 10)) {
+            Write-EngineEvent -Type 'log' -Data @{ level = 'error'; message = "PRE-FLIGHT: folder path is $($lp.length) characters at the target (limit $($preflight.maxPathLength)) - nothing under it can be created: $($lp.path)" }
+        }
+        foreach ($lp in ($preflight.longPaths.items | Select-Object -First 20)) {
+            Write-EngineEvent -Type 'log' -Data @{ level = 'error'; message = "PRE-FLIGHT: target path would be $($lp.length) characters (limit $($preflight.maxPathLength)): $($lp.path)" }
+        }
+        foreach ($lf in ($preflight.largeFiles.items | Select-Object -First 20)) {
+            Write-EngineEvent -Type 'log' -Data @{ level = 'error'; message = "PRE-FLIGHT: file is $([Math]::Round($lf.size / 1GB, 1)) GB - over SharePoint's 250 GB limit: $($lf.path)" }
+        }
+        foreach ($w in $preflight.warnings) {
+            Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "PRE-FLIGHT: $w" }
+        }
+        $pfSummary = if ($preflight.ok) {
+            "Pre-flight OK: $totalItems file(s) checked, longest target path $($preflight.longestPath) of $($preflight.maxPathLength) characters, no file over the size limit."
+        } else {
+            "Pre-flight found $($preflight.blockers) file(s) that cannot be copied as they are ($($preflight.longPaths.count) path(s) over $($preflight.maxPathLength) characters, $($preflight.largeFiles.count) file(s) over 250 GB). Shorten the folder names or the target location to fix them; everything else copies normally."
+        }
+        Write-EngineEvent -Type 'log' -Data @{ level = ($preflight.ok ? 'info' : 'error'); message = $pfSummary }
+    } catch {
+        Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Pre-flight check could not run (the job is unaffected): $($_.Exception.Message)" }
+    }
+    if ($PreflightOnly) { exit 0 }
 
     Write-EngineEvent -Type 'job_started' -Data @{ jobId = $JobId; totalItems = $totalItems; totalBytes = [long]$totalBytes }
 
@@ -1009,6 +1118,8 @@ try {
         # A fresh lane runspace has nothing loaded, so plain Import-Module
         # is both sufficient and safe.
         Import-Module "$using:PSScriptRoot/lib/Events.psm1"
+        Import-Module "$using:PSScriptRoot/lib/UserAgent.psm1"
+        Initialize-MigrationUserAgent
         Import-Module "$using:PSScriptRoot/lib/Retry.psm1"
         Import-Module "$using:PSScriptRoot/lib/Verification.psm1"
 
@@ -1026,8 +1137,8 @@ try {
         } else {
             @{ Thumbprint = $CertThumbprint }
         }
-        $laneSourceConn = Connect-PnPOnline -Url $SourceSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection
-        $laneTargetConn = if ($SameSite) { $laneSourceConn } else { Connect-PnPOnline -Url $TargetSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection }
+        $laneSourceConn = Connect-PnPOnline -Url $SourceSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection | Register-PnPUserAgent
+        $laneTargetConn = if ($SameSite) { $laneSourceConn } else { Connect-PnPOnline -Url $TargetSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection | Register-PnPUserAgent }
         # Same rule as Get-CrossHostTargetPrefix (lane runspaces can't see
         # script-scope functions): a cross-host copy, e.g. OneDrive (-my
         # host) into a SharePoint site, needs an absolute -TargetUrl.
@@ -1219,6 +1330,8 @@ try {
         # NO -Force - same in-process clobbering hazard as the SharePoint
         # lane above.
         Import-Module "$using:PSScriptRoot/lib/Events.psm1"
+        Import-Module "$using:PSScriptRoot/lib/UserAgent.psm1"
+        Initialize-MigrationUserAgent
         Import-Module "$using:PSScriptRoot/lib/Retry.psm1"
         Import-Module "$using:PSScriptRoot/lib/BlobTarget.psm1"
 
@@ -1236,7 +1349,7 @@ try {
         } else {
             @{ Thumbprint = $CertThumbprint }
         }
-        $laneSourceConn = Connect-PnPOnline -Url $SourceSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection
+        $laneSourceConn = Connect-PnPOnline -Url $SourceSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection | Register-PnPUserAgent
 
         while (-not $Shared.Stop) {
             if ($LaneIndex -ge $Shared.TargetLaneCount) { break }
@@ -1382,6 +1495,8 @@ try {
         # NO -Force - same in-process clobbering hazard as every other lane
         # (see the SharePoint lane above for the full explanation).
         Import-Module "$using:PSScriptRoot/lib/Events.psm1"
+        Import-Module "$using:PSScriptRoot/lib/UserAgent.psm1"
+        Initialize-MigrationUserAgent
         Import-Module "$using:PSScriptRoot/lib/Retry.psm1"
         Import-Module "$using:PSScriptRoot/lib/OneDriveTarget.psm1"
 
@@ -1407,10 +1522,10 @@ try {
         # filesystem source has no source connection at all, so it opens one
         # against the target OneDrive's own host purely to mint that token.
         $laneSourceConn = if (-not $IsFsSource) {
-            Connect-PnPOnline -Url $SourceSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection
+            Connect-PnPOnline -Url $SourceSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection | Register-PnPUserAgent
         } else { $null }
         $laneOneDriveConn = if ($IsFsSource) {
-            Connect-PnPOnline -Url $TargetOneDriveHostUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection
+            Connect-PnPOnline -Url $TargetOneDriveHostUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection | Register-PnPUserAgent
         } else { $laneSourceConn }
 
         while (-not $Shared.Stop) {
@@ -1551,6 +1666,8 @@ try {
         Import-Module PnP.PowerShell -ErrorAction Stop
         # NO -Force - same in-process clobbering hazard as the other lanes.
         Import-Module "$using:PSScriptRoot/lib/Events.psm1"
+        Import-Module "$using:PSScriptRoot/lib/UserAgent.psm1"
+        Initialize-MigrationUserAgent
         Import-Module "$using:PSScriptRoot/lib/Retry.psm1"
         Import-Module "$using:PSScriptRoot/lib/Verification.psm1"
 
@@ -1568,7 +1685,7 @@ try {
         } else {
             @{ Thumbprint = $CertThumbprint }
         }
-        $laneTargetConn = Connect-PnPOnline -Url $TargetSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection
+        $laneTargetConn = Connect-PnPOnline -Url $TargetSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection | Register-PnPUserAgent
 
         # Target library list, resolved once per lane - used to stamp the
         # original filesystem timestamps onto each uploaded file.

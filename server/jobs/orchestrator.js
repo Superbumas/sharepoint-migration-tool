@@ -702,6 +702,7 @@ function consoleEngineEvent(job, event) {
         : p.phase === 'clearing_folders' ? `recycling emptied folders — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
         : p.phase === 'stamping_folders' ? `restoring folder dates and owners — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
         : p.phase === 'purging' ? `purging recycle bin — ${(p.purged ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
+        : p.phase === 'preflight' ? (p.step === 'permissions' ? `pre-flight: checking permissions — ${(p.scanned ?? 0).toLocaleString()} items` : 'pre-flight: checking paths and sizes')
         : p.phase;
       clog.progress('job', `${name}: ${label}`);
       break;
@@ -756,6 +757,12 @@ function consoleEngineEvent(job, event) {
       const problems = (v.Missing?.length ?? v.missing ?? 0) + (v.SizeMismatch?.length ?? v.sizeMismatch ?? 0) + (v.HashMismatch?.length ?? v.hashMismatch ?? 0);
       if (problems > 0) clog.warn('verify', `${name}: ${problems} problem(s) found`);
       else clog.ok('verify', `${name}: all files verified identical`);
+      break;
+    }
+    case 'preflight_report': {
+      const r = event.preflight || {};
+      if (r.ok) clog.ok('preflight', `${name}: pre-flight OK — ${(r.files ?? 0).toLocaleString()} files, longest target path ${r.longestPath ?? 0}/${r.maxPathLength ?? 400} chars`);
+      else clog.warn('preflight', `${name}: pre-flight found ${r.blockers} file(s) that can't be copied as they are (${r.longPaths?.count ?? 0} long path(s), ${r.largeFiles?.count ?? 0} file(s) over 250 GB)`);
       break;
     }
     case 'source_deleted':
@@ -1012,6 +1019,21 @@ function handleEngineEvent(jobId, event, state) {
       insertLog(jobId, { event_type: 'verification_summary', raw_json: event.verification });
       break;
     }
+    case 'preflight_report': {
+      const report = event.preflight || {};
+      // A run that reused a recent scan skips the (slow) unique-permission
+      // count - keep the figure the earlier check produced.
+      if (report.uniquePermissions?.skipped) {
+        let previous = null;
+        try { previous = JSON.parse(job.preflight_json || 'null'); } catch { previous = null; }
+        report.uniquePermissions = previous?.uniquePermissions && !previous.uniquePermissions.skipped ? previous.uniquePermissions : null;
+      }
+      db.prepare(`UPDATE jobs SET preflight_json = ?, preflight_at = datetime('now') WHERE id = ?`).run(
+        JSON.stringify(report), jobId
+      );
+      insertLog(jobId, { event_type: 'preflight_report', raw_json: event.preflight });
+      break;
+    }
     case 'log': {
       insertLog(jobId, { event_type: 'log', error_message: event.message, level: event.level });
       break;
@@ -1223,6 +1245,94 @@ function verifyJob(jobId, actor, tenantId) {
     emitDashboard({ type: 'job_updated', job: updated }, updated?.tenant_id);
   });
 
+  const updated = getJob(jobId);
+  emitJob(jobId, { type: 'job_updated', job: updated });
+  return updated;
+}
+
+// On-demand pre-flight check (the "Pre-flight check" button) for a job that
+// hasn't finished yet. Spawns the engine in -PreflightOnly mode: it connects,
+// scans the source, emits one preflight_report and exits - nothing is created
+// or copied, and no lifecycle events change the job's status. The scan goes
+// to the job's tree cache, so starting the job straight afterwards reuses it.
+const preflightRuns = new Map(); // jobId -> child process
+function preflightJob(jobId, actor, tenantId) {
+  const job = getJob(jobId, tenantId);
+  if (!job) throw httpError(404, 'Job not found');
+  if (!['queued', 'approved', 'paused', 'failed', 'cancelled'].includes(job.status)) {
+    throw httpError(409, `A pre-flight check runs before or between runs - not while the job is "${job.status}".`);
+  }
+  if (runningJobs.has(jobId)) throw httpError(409, 'The job is running - its own pre-flight report is already in the log.');
+  if (preflightRuns.has(jobId)) throw httpError(409, 'A pre-flight check is already running for this job.');
+  if (verifyRuns.has(jobId) || cleanupRuns.has(jobId)) throw httpError(409, 'Another engine run is active for this job - wait for it to finish.');
+  const blobConnectionString = job.target_provider === 'azure_blob'
+    ? resolveBlobConnectionString(job.tenant_id || config.tenantId) : null;
+  if (job.target_provider === 'azure_blob' && !blobConnectionString) {
+    throw httpError(409, 'Azure Blob archiving is not configured for this project - add a connection string on the Settings page (or set AZURE_BLOB_CONNECTION_STRING on the server).');
+  }
+  if (job.target_provider === 'onedrive' && !config.onedriveTargetEnabled) {
+    throw httpError(409, 'The OneDrive target is not enabled on this server - set ENGINE_ONEDRIVE_TARGET_ENABLED first.');
+  }
+  assertFsSourceAllowed(job);
+  const engineIdentity = resolveEngineIdentity(job.tenant_id || config.tenantId);
+
+  const args = [
+    '-NoProfile',
+    '-NonInteractive',
+    '-File', config.engineScriptPath,
+    '-JobId', jobId,
+    '-SourceProvider', job.source_provider || 'sharepoint',
+    '-SourceSiteUrl', job.source_site_url || '',
+    '-SourceLibrary', job.source_library || '',
+    '-SourcePath', job.source_path,
+    '-TargetProvider', job.target_provider || 'sharepoint',
+    '-Action', job.action,
+    // Its own (never-written) control file: a paused job's real one still
+    // says pauseRequested, which would stop the check before it starts.
+    '-ControlFilePath', controlFilePath(`${jobId}.preflight`),
+    '-TreeCachePath', treeCachePath(jobId),
+    '-ClientId', engineIdentity.clientId,
+    '-TenantId', job.tenant_id || config.tenantId,
+    '-PreflightOnly',
+  ];
+  if (!engineIdentity.certBase64) {
+    args.push('-CertThumbprint', engineIdentity.certThumbprint);
+  }
+  if (job.target_provider === 'azure_blob') {
+    args.push('-TargetContainer', job.target_container || '', '-TargetBlobPrefix', job.target_blob_prefix || '');
+  } else if (job.target_provider === 'onedrive') {
+    args.push(
+      '-TargetOneDriveUpn', job.target_onedrive_upn || '',
+      '-TargetOneDrivePath', job.target_onedrive_path || '',
+      '-TargetOneDriveHostUrl', job.target_onedrive_host_url || ''
+    );
+  } else {
+    args.push('-TargetSiteUrl', job.target_site_url || '', '-TargetLibrary', job.target_library || '', '-TargetPath', job.target_path);
+  }
+  const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'], env: buildEngineSpawnEnv(job, engineIdentity, blobConnectionString) });
+  preflightRuns.set(jobId, child);
+  child.on('error', (err) => insertLog(jobId, { event_type: 'log', level: 'error', error_message: `Failed to start pre-flight engine process: ${err.message}` }));
+  insertLog(jobId, { event_type: 'preflight_started', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
+  attachNdjsonParser(
+    child.stdout,
+    (event) => {
+      // Defence in depth: this mode must never move the job's status.
+      if (/^job_|^paused$/.test(event.type)) return;
+      handleEngineEvent(jobId, event, null);
+    },
+    (rawLine) => insertLog(jobId, { event_type: 'log', error_message: `Unparseable engine output: ${rawLine}` })
+  );
+  child.stderr.on('data', (chunk) => {
+    const text = chunk.toString().trim();
+    if (text) insertLog(jobId, { event_type: 'log', error_message: `[preflight stderr] ${text}` });
+  });
+  child.on('close', () => {
+    preflightRuns.delete(jobId);
+    getDb().prepare('UPDATE jobs SET phase_json = NULL WHERE id = ?').run(jobId);
+    const updated = getJob(jobId);
+    emitJob(jobId, { type: 'job_updated', job: updated });
+    emitDashboard({ type: 'job_updated', job: updated }, updated?.tenant_id);
+  });
   const updated = getJob(jobId);
   emitJob(jobId, { type: 'job_updated', job: updated });
   return updated;
@@ -1537,6 +1647,7 @@ function deleteJob(jobId, actor, tenantId) {
 function assertNoAuxiliaryRun(jobId) {
   if (verifyRuns.has(jobId)) throw httpError(409, 'A verification is currently running for this job - wait for it to finish.');
   if (cleanupRuns.has(jobId)) throw httpError(409, 'A source cleanup/purge is currently running for this job - wait for it to finish.');
+  if (preflightRuns.has(jobId)) throw httpError(409, 'A pre-flight check is currently running for this job - wait for it to finish.');
 }
 
 function httpError(status, message) {
@@ -1557,6 +1668,7 @@ module.exports = {
   pauseJob,
   cancelJob,
   verifyJob,
+  preflightJob,
   cleanupSourceJob,
   purgeRecycleBinJob,
   restartJob,
