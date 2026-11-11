@@ -163,6 +163,13 @@ param(
     # read-only) and written to this JSON file for the job page's CSV export
     # and the reports. Empty = not collected.
     [string]$AccessReportPath,
+    # "Copy item permissions": a JSON file with the job's permission settings
+    # ({ includeGuests, userMap: { sourceUpn: targetUpn } }). When given, a
+    # copy run re-applies the recorded grants to the target items at the end
+    # (engine/lib/Permissions.psm1). -PermissionsOnly does just that step
+    # (connect, apply, exit) for a job that has already been copied.
+    [string]$CopyPermissionsPath,
+    [switch]$PermissionsOnly,
     # How a SharePoint source is enumerated: 'auto' (default) picks Graph
     # delta or the folder-by-folder walk per Select-SharePointScanMethod;
     # 'delta' / 'folders' force one - for troubleshooting a scan, or to
@@ -196,6 +203,7 @@ Import-Module "$PSScriptRoot/lib/OneDriveTarget.psm1" -Force
 Import-Module "$PSScriptRoot/lib/FileSystemSource.psm1" -Force
 Import-Module "$PSScriptRoot/lib/UserAgent.psm1" -Force
 Import-Module "$PSScriptRoot/lib/Preflight.psm1" -Force
+Import-Module "$PSScriptRoot/lib/Permissions.psm1" -Force
 # Before PnP.PowerShell loads: decorates every request this process sends
 # (see engine/lib/UserAgent.psm1).
 Initialize-MigrationUserAgent
@@ -681,6 +689,61 @@ try {
         $verifyArgs.TargetSite = $effTargetSite
         $verifyArgs.TargetLib = $effTargetLib
         $verifyArgs.TargetPathInLib = $targetPathInLib
+    }
+
+    # "Copy item permissions": re-applies the grants the pre-flight recorded
+    # (the access file) to the matching target items. Runs at the end of a
+    # copy run when the job has the setting on, and on its own with
+    # -PermissionsOnly. Writes each grant's outcome back into the access file
+    # (the CSV's Result column). Target writes only - never the source.
+    $runPermissionCopy = {
+        if ($isFsSource -or $isBlobTarget -or $isOneDriveTarget) {
+            Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = 'Copy item permissions: available for SharePoint to SharePoint jobs only - skipped.' }
+            return
+        }
+        if (-not $AccessReportPath -or -not (Test-Path -LiteralPath $AccessReportPath)) {
+            Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = 'Copy item permissions: no "who had access" list yet - run the pre-flight check first. Skipped.' }
+            return
+        }
+        $settings = @{}
+        if ($CopyPermissionsPath -and (Test-Path -LiteralPath $CopyPermissionsPath)) { $settings = Get-Content -LiteralPath $CopyPermissionsPath -Raw | ConvertFrom-Json -AsHashtable }
+        $userMap = @{}
+        foreach ($k in @(($settings.userMap ?? @{}).Keys)) { $userMap["$k".Trim().ToLowerInvariant()] = "$($settings.userMap[$k])".Trim() }
+        $access = Get-Content -LiteralPath $AccessReportPath -Raw | ConvertFrom-Json -AsHashtable
+        $items = @($access.items | Where-Object { $_ -and @($_.grants).Count -gt 0 })
+        if ($items.Count -eq 0) {
+            Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = 'Copy item permissions: no item has its own permissions at the source - nothing to copy.' }
+            return
+        }
+        $hostOf = { param($u) try { ([uri]$u).Host.ToLowerInvariant() } catch { '' } }
+        $tenantOf = { param($h) ($h -replace '-my\.sharepoint\.com$', '.sharepoint.com') }
+        $crossTenant = (& $tenantOf (& $hostOf $SourceSiteUrl)) -ne (& $tenantOf (& $hostOf $effTargetSite))
+        $sameSite = $effTargetSite.TrimEnd('/') -eq $SourceSiteUrl.TrimEnd('/')
+        $includeGuests = [bool]$settings.includeGuests
+        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Copy item permissions: $($items.Count) item(s) with their own permissions$(if ($crossTenant) { " - different tenant, using $($userMap.Count) user mapping(s)" })$(if ($includeGuests) { ', including guests' } else { ', guests skipped' })..." }
+        Write-PhaseProgress -Phase 'permissions' -Data @{ done = 0; total = $items.Count } -Force
+        $permDrive = Get-GraphDriveId -Connection $targetConn -SiteUrl $effTargetSite -Library $effTargetLib
+        $stats = Copy-ItemPermissions -Connection $targetConn -TargetSiteUrl $effTargetSite -TargetDriveId $permDrive `
+            -TargetServerRelRoot ("$targetSiteServerRelative/$targetRoot".Replace('//', '/')) -TargetPathInLib $targetPathInLib `
+            -SourceServerRelRoot ("$sourceSiteServerRelative/$sourceRoot".Replace('//', '/')) -Items $items `
+            -UserMap $userMap -CrossTenant $crossTenant -SameSite $sameSite -IncludeGuests $includeGuests -OnProgress {
+                param($n, $total)
+                Write-PhaseProgress -Phase 'permissions' -Data @{ done = $n; total = $total }
+            }
+        $access.permissionCopy = @{ at = (Get-Date).ToUniversalTime().ToString('o'); includeGuests = $includeGuests; crossTenant = $crossTenant; stats = $stats }
+        $access | ConvertTo-Json -Depth 8 -Compress | Set-Content -LiteralPath $AccessReportPath -Encoding utf8
+        foreach ($it in $items) {
+            foreach ($g in @($it.grants)) {
+                if ("$($g.result)" -like 'failed:*') { Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Copy item permissions: $($it.path) - $($g.name): $($g.result)" } }
+            }
+        }
+        Write-EngineEvent -Type 'permissions_copied' -Data @{ stats = $stats }
+        Write-EngineEvent -Type 'log' -Data @{ level = $(if ($stats.failed) { 'warn' } else { 'info' }); message = "Copy item permissions done: $($stats.items) item(s) - $($stats.granted) grant(s) added, $($stats.linksCreated) new sharing link(s), $($stats.already) already in place, $($stats.skipped) skipped, $($stats.failed) failed. Per-grant results are in 'Export access (CSV)'." }
+    }
+
+    if ($PermissionsOnly) {
+        & $runPermissionCopy
+        exit 0
     }
 
     if ($VerifyOnly) {
@@ -2648,6 +2711,11 @@ try {
                     }
                 }
             }
+        }
+
+        if ($CopyPermissionsPath) {
+            try { & $runPermissionCopy }
+            catch { Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Copy item permissions could not finish (the copied files are unaffected): $($_.Exception.Message)" } }
         }
 
         Write-EngineEvent -Type 'job_completed' -Data @{

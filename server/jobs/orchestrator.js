@@ -5,7 +5,7 @@ const { v4: uuid } = require('uuid');
 const { getDb } = require('../db');
 const config = require('../config');
 const { attachNdjsonParser } = require('./ndjson');
-const { controlFilePath, writeControlFile, removeControlFile, treeCachePath, removeTreeCache, contentCachePath, accessReportPath } = require('./controlFile');
+const { controlFilePath, writeControlFile, removeControlFile, treeCachePath, removeTreeCache, contentCachePath, accessReportPath, writePermissionSettings } = require('./controlFile');
 const { mapJob } = require('../util/mapJob');
 const clog = require('../util/consoleLog');
 const { decrypt } = require('../util/secretCrypto');
@@ -547,6 +547,10 @@ function runJob(jobId, actor, tenantId) {
   if (isResume && job.checkpoint_json) {
     args.push('-CheckpointJson', job.checkpoint_json);
   }
+  // "Copy item permissions": the engine re-applies the recorded grants to the
+  // target items at the end of the run.
+  const permSettingsPath = writePermissionSettings(job);
+  if (permSettingsPath) args.push('-CopyPermissionsPath', permSettingsPath);
 
   // Fresh console per run - but never while another job is running, or its
   // lines would vanish mid-run. Set SPMT_KEEP_CONSOLE=1 to keep everything.
@@ -802,6 +806,7 @@ function consoleEngineEvent(job, event) {
         : p.phase === 'stamping_folders' ? `restoring folder dates and owners — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
         : p.phase === 'repairing' ? `repairing failed files — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}${p.current ? ` · ${String(p.current).split('/').pop()}` : ''}`
         : p.phase === 'content_check' ? `checking content of files SharePoint rewrote — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}${p.bytesTotal ? ` (${Math.round((p.bytesDone || 0) / 1048576).toLocaleString()} of ${Math.round(p.bytesTotal / 1048576).toLocaleString()} MB)` : ''}${p.current ? ` · now: ${String(p.current).split('/').pop()} (${Math.max(1, Math.round((p.currentBytes || 0) / 1048576)).toLocaleString()} MB)` : ''}`
+        : p.phase === 'permissions' ? `copying item permissions — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()} items`
         : p.phase === 'purging' ? `purging recycle bin — ${(p.purged ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
         : p.phase === 'preflight' ? (p.step === 'permissions' ? `pre-flight: checking permissions — ${(p.scanned ?? 0).toLocaleString()} items` : 'pre-flight: checking paths and sizes')
         : p.phase;
@@ -1165,6 +1170,10 @@ function handleEngineEvent(jobId, event, state) {
       insertLog(jobId, { event_type: 'cleanup_summary', raw_json: event });
       break;
     }
+    case 'permissions_copied': {
+      insertLog(jobId, { event_type: 'permissions_copied', raw_json: event });
+      break;
+    }
     case 'purge_summary': {
       // Merged into cleanup_json rather than its own column - the purge is
       // the storage-reclamation tail of the cleanup story.
@@ -1276,7 +1285,7 @@ const verifyRuns = new Map(); // jobId -> child process
 function verifyJob(jobId, actor, tenantId, opts = {}) {
   const job = getJob(jobId, tenantId);
   if (!job) throw httpError(404, 'Job not found');
-  if (job.status !== 'completed') throw httpError(409, `Only completed jobs can be verified (this one is "${job.status}").`);
+  if (job.status !== 'completed') throw httpError(409, `Only completed jobs can be ${opts.permissions ? 'given their permissions' : 'verified'} (this one is "${job.status}").`);
   let repairFromPath = null;
   if (opts.repair) {
     let prev = null;
@@ -1294,7 +1303,15 @@ function verifyJob(jobId, actor, tenantId, opts = {}) {
     fs.mkdirSync(path.dirname(repairFromPath), { recursive: true });
     fs.writeFileSync(repairFromPath, JSON.stringify(prev), 'utf8');
   }
-  if (verifyRuns.has(jobId)) throw httpError(409, 'A verification is already running for this job.');
+  let permSettingsFile = null;
+  if (opts.permissions) {
+    if ((job.source_provider || 'sharepoint') !== 'sharepoint' || (job.target_provider || 'sharepoint') !== 'sharepoint') {
+      throw httpError(409, 'Copying item permissions is available for SharePoint to SharePoint jobs only.');
+    }
+    if (!fs.existsSync(accessReportPath(jobId))) throw httpError(409, 'There is no "who had access" list for this job yet - run the pre-flight check first.');
+    permSettingsFile = writePermissionSettings({ ...job, permissions_json: JSON.stringify({ ...(() => { try { return JSON.parse(job.permissions_json || 'null') || {}; } catch { return {}; } })(), copy: true }) });
+  }
+  if (verifyRuns.has(jobId)) throw httpError(409, 'A verification or permission copy is already running for this job.');
   if (cleanupRuns.has(jobId)) throw httpError(409, 'A source cleanup/purge is currently running for this job - wait for it to finish.');
   const blobConnectionString = job.target_provider === 'azure_blob'
     ? resolveBlobConnectionString(job.tenant_id || config.tenantId) : null;
@@ -1323,7 +1340,8 @@ function verifyJob(jobId, actor, tenantId, opts = {}) {
     '-ControlFilePath', controlFilePath(jobId),
     '-ClientId', engineIdentity.clientId,
     '-TenantId', job.tenant_id || config.tenantId,
-    ...(repairFromPath ? ['-RepairOnly', '-RepairFromPath', repairFromPath] : ['-VerifyOnly']),
+    ...(opts.permissions ? ['-PermissionsOnly', '-AccessReportPath', accessReportPath(jobId), '-CopyPermissionsPath', permSettingsFile]
+      : repairFromPath ? ['-RepairOnly', '-RepairFromPath', repairFromPath] : ['-VerifyOnly']),
     '-OneDriveChunkSizeMB', String(config.oneDriveUploadChunkSizeMB),
     '-FsHashConcurrency', String(config.fsSourceHashConcurrency),
   ];
@@ -1353,15 +1371,15 @@ function verifyJob(jobId, actor, tenantId, opts = {}) {
   // A Verify starts from a clean slate: the previous result is dropped so
   // nothing on the page (or in a report) is based on it while the new check
   // runs. It stays in the job log as its verification_summary line.
-  getDb().prepare('UPDATE jobs SET verification_json = NULL, verified_at = NULL, phase_json = NULL WHERE id = ?').run(jobId);
+  if (!opts.permissions) getDb().prepare('UPDATE jobs SET verification_json = NULL, verified_at = NULL, phase_json = NULL WHERE id = ?').run(jobId);
   const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'], env: buildEngineSpawnEnv(job, engineIdentity, blobConnectionString) });
   verifyRuns.set(jobId, child);
-  activeOps.set(jobId, repairFromPath ? 'repair' : 'verify');
+  activeOps.set(jobId, opts.permissions ? 'permissions' : repairFromPath ? 'repair' : 'verify');
   // Without an 'error' listener a failed spawn (pwsh not installed / not on
   // PATH) is an unhandled EventEmitter error and takes the whole server down.
   // 'close' still fires afterwards and does the cleanup.
   child.on('error', (err) => insertLog(jobId, { event_type: 'log', level: 'error', error_message: `Failed to start verification engine process: ${err.message}` }));
-  insertLog(jobId, { event_type: repairFromPath ? 'repair_started' : 'verify_started', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
+  insertLog(jobId, { event_type: opts.permissions ? 'permissions_started' : repairFromPath ? 'repair_started' : 'verify_started', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
 
   attachNdjsonParser(
     child.stdout,
@@ -1823,6 +1841,8 @@ module.exports = {
   cancelJob,
   verifyJob,
   repairFilesJob: (jobId, actor, tenantId) => verifyJob(jobId, actor, tenantId, { repair: true }),
+  copyPermissionsJob: (jobId, actor, tenantId) => verifyJob(jobId, actor, tenantId, { permissions: true }),
+  insertLog: (...a) => insertLog(...a),
   preflightJob,
   cleanupSourceJob,
   purgeRecycleBinJob,

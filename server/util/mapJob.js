@@ -46,6 +46,7 @@ function mapJob(row) {
     verifiedAt: row.verified_at,
     preflight: safeParse(row.preflight_json),
     preflightAt: row.preflight_at,
+    permissions: safeParse(row.permissions_json),
     cleanup: safeParse(row.cleanup_json),
     cleanedAt: row.cleaned_at,
     createdBy: { name: row.created_by_name, email: row.created_by_email, upn: row.created_by_upn },

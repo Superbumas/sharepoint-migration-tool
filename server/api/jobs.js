@@ -305,14 +305,14 @@ router.get('/jobs/:id/access.csv', (req, res, next) => {
       const s = v == null ? '' : String(v);
       return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
-    const lines = [['Path', 'Type', 'Granted to', 'Email', 'Role', 'Granted via', 'Link scope', 'Link type', 'External / guest', 'Expires', 'Password', 'Note'].join(',')];
+    const lines = [['Path', 'Type', 'Granted to', 'Email', 'Role', 'Granted via', 'Link scope', 'Link type', 'External / guest', 'Expires', 'Password', 'Note', 'Result'].join(',')];
     for (const item of data.items || []) {
       const grants = Array.isArray(item.grants) ? item.grants : (item.grants ? [item.grants] : []);
-      if (item.error) lines.push([item.path, item.type, '', '', '', '', '', '', '', '', '', `could not read permissions: ${item.error}`].map(csv).join(','));
-      else if (grants.length === 0) lines.push([item.path, item.type, '', '', '', '', '', '', '', '', '', 'no grants of its own (inheritance broken, nothing added)'].map(csv).join(','));
+      if (item.error) lines.push([item.path, item.type, '', '', '', '', '', '', '', '', '', `could not read permissions: ${item.error}`, ''].map(csv).join(','));
+      else if (grants.length === 0) lines.push([item.path, item.type, '', '', '', '', '', '', '', '', '', 'no grants of its own (inheritance broken, nothing added)', ''].map(csv).join(','));
       for (const g of grants) {
         lines.push([item.path, item.type, g.name, g.email, g.role, g.source === 'link' ? 'sharing link' : g.source === 'group' ? 'group' : 'direct',
-          g.linkScope, g.linkType, g.external ? 'yes' : '', g.expires, g.hasPassword ? 'yes' : '', ''].map(csv).join(','));
+          g.linkScope, g.linkType, g.external ? 'yes' : '', g.expires, g.hasPassword ? 'yes' : '', '', g.result || (data.permissionCopy ? '' : 'not copied')].map(csv).join(','));
       }
     }
     const day = new Date().toISOString().slice(0, 10);
@@ -321,6 +321,40 @@ router.get('/jobs/:id/access.csv', (req, res, next) => {
     res.setHeader('Content-Disposition', `attachment; filename="${name} - who had access - ${day}.csv"`);
     res.send('﻿' + lines.join('\r\n') + '\r\n');
   } catch (err) { next(err); }
+});
+
+// "Copy item permissions" setting: { copy, includeGuests, userMap } - the
+// user mapping arrives as CSV text (source UPN, target UPN per line).
+router.patch('/jobs/:id/permissions-settings', (req, res, next) => {
+  try {
+    const job = visibleJob(req, req.params.id);
+    if (!job) return res.status(404).json({ error: 'not_found' });
+    if (['running', 'paused'].includes(job.status)) return res.status(409).json({ error: 'job_running', message: 'Change the permission settings before or after a run, not during one.' });
+    const body = req.body || {};
+    const userMap = {};
+    const bad = [];
+    String(body.userMapCsv || '').split(/\r?\n/).forEach((line, i) => {
+      const s = line.trim();
+      if (!s || s.startsWith('#') || /^source/i.test(s)) return;
+      const [a, b] = s.split(/[,;\t]/).map((x) => (x || '').trim());
+      if (!a || !b || !a.includes('@') || !b.includes('@')) { bad.push(i + 1); return; }
+      userMap[a.toLowerCase()] = b;
+    });
+    if (bad.length) return res.status(400).json({ error: 'bad_user_map', message: `User mapping line(s) ${bad.slice(0, 10).join(', ')} are not "source@x, target@y".` });
+    const settings = { copy: !!body.copy, includeGuests: !!body.includeGuests, userMap };
+    getDb().prepare('UPDATE jobs SET permissions_json = ? WHERE id = ?').run(JSON.stringify(settings), job.id);
+    const actor = getActor(req);
+    orchestrator.insertLog(job.id, { event_type: 'log', level: 'info', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn,
+      error_message: `Permission settings changed: copy item permissions ${settings.copy ? `ON, guests ${settings.includeGuests ? 'included' : 'skipped'}, ${Object.keys(userMap).length} user mapping(s)` : 'off'}` });
+    res.json(mapJob(orchestrator.getJob(job.id)));
+  } catch (err) { next(err); }
+});
+
+// Re-apply the recorded permissions to an already-copied job, on demand.
+router.post('/jobs/:id/copy-permissions', (req, res, next) => {
+  if (!requireVisibleJob(req, res)) return;
+  try { res.json(mapJob(orchestrator.copyPermissionsJob(req.params.id, getActor(req), getTenantId(req)))); }
+  catch (err) { next(err); }
 });
 
 router.post('/jobs/:id/preflight', (req, res, next) => {
