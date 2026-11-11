@@ -96,27 +96,33 @@ router.get('/mappings', (req, res) => {
 router.get('/mappings/crosswalk-template', (req, res) => {
   const rows = [
     {
+      'Source Site': 'https://yourtenant.sharepoint.com/sites/OldSite',
       'Source Path': 'Shared Documents/Company Docs',
       'Target Site': 'https://yourtenant.sharepoint.com/sites/Hub',
       'Target Library': 'Shared Documents',
+      'Target Folder': '',
       'Confidence': 'high',
     },
     {
+      'Source Site': 'https://yourtenant.sharepoint.com/sites/OldSite',
       'Source Path': 'Shared Documents/Research/ANALYSIS',
       'Target Site': 'https://yourtenant.sharepoint.com/sites/Hub',
       'Target Library': 'Shared Documents',
+      'Target Folder': 'Research',
       'Confidence': 'medium',
     },
   ];
   const instructions = [
     ['Field', 'Required', 'What to put in it'],
-    ['Source Path', 'yes', 'Library + folder path on the source site, e.g. "Shared Documents/Company Docs". The folder itself is recreated at the target.'],
-    ['Target Site', 'no', 'Full URL of the destination site, e.g. https://yourtenant.sharepoint.com/sites/Hub'],
+    ['Source Site', 'yes', 'Full URL of the site the folder is on now, e.g. https://yourtenant.sharepoint.com/sites/OldSite'],
+    ['Source Path', 'yes', 'Library + folder path on the source site, e.g. "Shared Documents/Company Docs" (the first part is the library). The folder itself is recreated at the target.'],
+    ['Target Site', 'yes', 'Full URL of the destination site, e.g. https://yourtenant.sharepoint.com/sites/Hub'],
     ['Target Library', 'yes', 'Destination document library, usually "Shared Documents"'],
+    ['Target Folder', 'no', 'Folder inside the target library to put it in. Empty = the library root.'],
     ['Confidence', 'no', 'Free-text note on how sure the mapping is (high / medium / low) - shown in the mappings list'],
     [],
     ['Delete the example rows before importing. Extra columns are ignored.'],
-    ['After importing, remember to grant the migration engine access to every source and target site via the site picker.'],
+    ['The migration engine is granted access to each site automatically when the job runs.'],
   ];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Crosswalk');
@@ -308,6 +314,9 @@ router.delete('/mappings/:id', (req, res) => {
 });
 
 const HEADER_ALIASES = {
+  sourceSite: ['source site', 'sourcesite', 'source site url'],
+  sourceLibrary: ['source library', 'source document library'],
+  targetFolder: ['target folder', 'target path', 'targetpath'],
   sourcePath: ['source path', 'source folder', 'source', 'sourcepath'],
   targetSite: ['target site', 'targetsite', 'target site url', 'site'],
   targetLibrary: ['target library', 'library', 'target document library'],
@@ -350,10 +359,10 @@ router.post('/mappings/import', upload.single('file'), (req, res) => {
   const batchId = uuid();
   const insert = db.prepare(
     `INSERT INTO mappings (
-      id, tenant_id, owner_user_id, source_type, source_path, target_type, target_site_url, target_library, target_path,
+      id, tenant_id, owner_user_id, source_type, source_site_url, source_library, source_path, target_type, target_site_url, target_library, target_path,
       action, confidence, origin, crosswalk_batch_id, crosswalk_row_ref, notes, created_by_name, created_by_email
     ) VALUES (
-      @id, @tenantId, @ownerUserId, 'folder', @sourcePath, 'folder', @targetSiteUrl, @targetLibrary, @targetPath,
+      @id, @tenantId, @ownerUserId, 'folder', @sourceSiteUrl, @sourceLibrary, @sourcePath, 'folder', @targetSiteUrl, @targetLibrary, @targetPath,
       @action, @confidence, 'crosswalk', @batchId, @rowRef, @notes, @createdByName, @createdByEmail
     )`
   );
@@ -382,6 +391,30 @@ router.post('/mappings/import', upload.single('file'), (req, res) => {
         skipped.push({ rowRef, reason: 'missing target library' });
         return;
       }
+      // Rows used to be imported with no source site and no source library
+      // (and the target library repeated as the target folder), so every
+      // job made from them failed at preflight or landed one folder too deep.
+      const sourceSiteUrl = String(findField(normalized, HEADER_ALIASES.sourceSite) || '').trim();
+      if (!/^https:\/\//i.test(sourceSiteUrl)) {
+        skipped.push({ rowRef, reason: 'missing or invalid Source Site URL' });
+        return;
+      }
+      if (!targetSiteUrl || !/^https:\/\//i.test(String(targetSiteUrl).trim())) {
+        skipped.push({ rowRef, reason: 'missing or invalid Target Site URL' });
+        return;
+      }
+      // Source Library column, or else the first segment of Source Path.
+      const cleanPath = String(sourcePath).trim().replace(/^\/+|\/+$/g, '');
+      let sourceLibrary = String(findField(normalized, HEADER_ALIASES.sourceLibrary) || '').trim().replace(/^\/+|\/+$/g, '');
+      let sourcePathInLib = cleanPath;
+      if (sourceLibrary) {
+        if (cleanPath.toLowerCase().startsWith(`${sourceLibrary.toLowerCase()}/`)) sourcePathInLib = cleanPath.slice(sourceLibrary.length + 1);
+      } else {
+        const slash = cleanPath.indexOf('/');
+        sourceLibrary = slash > 0 ? cleanPath.slice(0, slash) : cleanPath;
+        sourcePathInLib = slash > 0 ? cleanPath.slice(slash + 1) : '';
+      }
+      const targetFolder = String(findField(normalized, HEADER_ALIASES.targetFolder) || '').trim().replace(/^\/+|\/+$/g, '');
       // The crosswalk's Action column may still say Migrate-selective/Archive;
       // the engine copies identically regardless, so normalize to 'Migrate'
       // and preserve the original label for audit in notes.
@@ -393,10 +426,12 @@ router.post('/mappings/import', upload.single('file'), (req, res) => {
         id,
         tenantId,
         ownerUserId: actor.id,
-        sourcePath: String(sourcePath).trim(),
-        targetSiteUrl: targetSiteUrl ? String(targetSiteUrl).trim() : null,
+        sourceSiteUrl,
+        sourceLibrary,
+        sourcePath: sourcePathInLib,
+        targetSiteUrl: String(targetSiteUrl).trim(),
         targetLibrary: String(targetLibrary).trim(),
-        targetPath: String(targetLibrary).trim(),
+        targetPath: targetFolder,
         action,
         confidence: confidence ? String(confidence).trim() : null,
         notes: originalAction && originalAction !== 'Migrate' ? `Crosswalk action: ${originalAction}` : null,

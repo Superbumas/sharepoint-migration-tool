@@ -72,6 +72,7 @@ export default function SharePointPicker({ label, onSelect, multi = false, fixed
   const { user } = useAuth();
   const [siteQuery, setSiteQuery] = useState('');
   const [sites, setSites] = useState([]);
+  const [sitesError, setSitesError] = useState(null);
   const [noAccessSite, setNoAccessSite] = useState(null); // a site the admin center lists but this user can't open
   const [site, setSite] = useState(fixedSite);
   const [browseError, setBrowseError] = useState(null);
@@ -147,8 +148,13 @@ export default function SharePointPicker({ label, onSelect, multi = false, fixed
 
   function loadSites(q) {
     setLoading(true);
+    setSitesError(null);
+    // A failed load used to be swallowed and shown as "No sites found",
+    // which sent people hunting for a site URL when the real problem was
+    // sign-in or permissions.
     api.get(`/api/sharepoint/sites${q ? `?search=${encodeURIComponent(q)}` : ''}`)
       .then((r) => { setSites(r.items); setNoAccessSite(null); })
+      .catch((err) => { setSites([]); setSitesError(err.message); })
       .finally(() => setLoading(false));
   }
 
@@ -189,8 +195,10 @@ export default function SharePointPicker({ label, onSelect, multi = false, fixed
   function runSearch() {
     if (!searchQuery.trim()) return loadFolder();
     setLoading(true);
+    setBrowseError(null);
     api.get(`/api/sharepoint/drives/${drive.id}/search?q=${encodeURIComponent(searchQuery)}`)
       .then((r) => { setItems(r.items); setIsSearchResults(true); })
+      .catch((err) => setBrowseError(`Search failed: ${err.message}`))
       .finally(() => setLoading(false));
   }
 
@@ -315,7 +323,8 @@ export default function SharePointPicker({ label, onSelect, multi = false, fixed
                 </button>
               </li>
             ))}
-            {sites.length === 0 && !loading && <li className="text-slate-400 text-xs px-2 py-3">No sites found. Try pasting the site's URL from the SharePoint admin center.</li>}
+            {sitesError && !loading && <li role="alert" className="text-red-600 text-xs px-2 py-3">Couldn't load sites: {sitesError}</li>}
+            {sites.length === 0 && !loading && !sitesError && <li className="text-slate-400 text-xs px-2 py-3">No sites found. Try pasting the site's URL from the SharePoint admin center.</li>}
           </ul>
           {noAccessSite && (
             <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-2 space-y-1">

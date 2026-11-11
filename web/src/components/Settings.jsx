@@ -216,7 +216,7 @@ export default function Settings() {
   }
 
   function refresh() {
-    api.get('/api/settings').then(setSettings);
+    api.get('/api/settings').then(setSettings).catch((err) => setSettings((prev) => prev || { loadError: err.message }));
   }
   useEffect(refresh, []);
 
@@ -253,6 +253,7 @@ export default function Settings() {
   }
 
   if (!settings) return <div className="text-slate-500">Loading settings…</div>;
+  if (settings.loadError) return <div role="alert" className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-md p-3">Couldn't load settings: {settings.loadError}</div>;
 
   const rows = [
     ['Tenant', settings.tenantName || '—'],

@@ -119,14 +119,16 @@ router.post('/jobs/bulk-create', (req, res, next) => {
     const actor = getActor(req);
     const tenantId = getTenantId(req);
     const created = [];
+    const skipped = [];
     const owner = ownerScope(req);
     for (const mid of mappingIds) {
       const mapping = db.prepare(`SELECT * FROM mappings WHERE id = ? AND tenant_id = ?${owner.sql}`)
         .get(mid, tenantId, ...owner.params);
       if (!mapping) continue;
+      if (orchestrator.activeJobForMapping(mapping.id)) { skipped.push(mapping.id); continue; }
       created.push(mapJob(orchestrator.createJobFromMapping(mapping, actor)));
     }
-    res.status(201).json({ items: created });
+    res.status(201).json({ items: created, skippedActive: skipped.length });
   } catch (err) { next(err); }
 });
 

@@ -6,7 +6,7 @@ import StatusPill from './StatusPill';
 
 // Compact action button for the queue table - a real button, not a bare text
 // link, so the primary next step for each job is visually obvious.
-function ActionBtn({ onClick, tone = 'default', children }) {
+function ActionBtn({ onClick, tone = 'default', disabled, children }) {
   const tones = {
     primary: 'bg-blue-600 text-white hover:bg-blue-700',
     success: 'bg-green-600 text-white hover:bg-green-700',
@@ -15,7 +15,7 @@ function ActionBtn({ onClick, tone = 'default', children }) {
     default: 'bg-slate-100 text-slate-600 hover:bg-slate-200',
   };
   return (
-    <button type="button" onClick={onClick} className={`text-xs font-medium rounded-md px-2.5 py-1 transition-colors ${tones[tone]}`}>
+    <button type="button" onClick={onClick} disabled={disabled} className={`text-xs font-medium rounded-md px-2.5 py-1 transition-colors disabled:opacity-50 disabled:cursor-wait ${tones[tone]}`}>
       {children}
     </button>
   );
@@ -96,6 +96,9 @@ export default function JobQueue() {
   const [jobs, setJobs] = useState([]);
   const [error, setError] = useState(null);
   const [showReport, setShowReport] = useState(false);
+  // The job a request is in flight for: its buttons are disabled so a
+  // double-click can't fire Run twice (the second came back as a 409 error).
+  const [busyId, setBusyId] = useState(null);
   const debounceRef = useRef(null);
 
   function refresh() {
@@ -114,6 +117,7 @@ export default function JobQueue() {
 
   async function act(job, action) {
     setError(null);
+    setBusyId(job.id);
     try {
       if (action === 'delete') {
         if (!confirm(`Delete job "${job.name}"? This only hides it from the active queue - the audit log is kept forever and stays exportable.`)) return;
@@ -121,12 +125,20 @@ export default function JobQueue() {
       } else if (action === 'cancel') {
         if (!confirm('Cancel this job? Whatever has already been copied stays copied - there is no automatic rollback.')) return;
         await api.post(`/api/jobs/${job.id}/cancel`);
+      } else if (action === 'approve-run') {
+        // One click for the usual case. Still two audit events (approved,
+        // then started), same as clicking Approve and then Run.
+        await api.post(`/api/jobs/${job.id}/approve`);
+        await api.post(`/api/jobs/${job.id}/run`);
       } else {
         await api.post(`/api/jobs/${job.id}/${action}`);
       }
       refresh();
     } catch (err) {
-      setError(err.message);
+      setError(`${job.name}: ${err.message}`);
+      refresh();
+    } finally {
+      setBusyId(null);
     }
   }
 
@@ -200,15 +212,16 @@ export default function JobQueue() {
                 </td>
                 <td className="px-4 py-3 text-slate-500 whitespace-nowrap">{job.createdBy.name}</td>
                 <td className="px-4 py-3 text-right space-x-1.5 whitespace-nowrap">
-                  {job.status === 'queued' && <ActionBtn tone="primary" onClick={() => act(job, 'approve')}>Approve</ActionBtn>}
-                  {job.status === 'approved' && <ActionBtn tone="success" onClick={() => act(job, 'run')}>Run</ActionBtn>}
-                  {job.status === 'running' && <ActionBtn tone="warn" onClick={() => act(job, 'pause')}>Pause</ActionBtn>}
-                  {job.status === 'paused' && <ActionBtn tone="success" onClick={() => act(job, 'resume')}>Resume</ActionBtn>}
+                  {job.status === 'queued' && <ActionBtn tone="success" disabled={busyId === job.id} onClick={() => act(job, 'approve-run')}>Approve &amp; run</ActionBtn>}
+                  {job.status === 'queued' && <ActionBtn disabled={busyId === job.id} onClick={() => act(job, 'approve')}>Approve only</ActionBtn>}
+                  {job.status === 'approved' && <ActionBtn tone="success" disabled={busyId === job.id} onClick={() => act(job, 'run')}>Run</ActionBtn>}
+                  {job.status === 'running' && <ActionBtn tone="warn" disabled={busyId === job.id} onClick={() => act(job, 'pause')}>Pause</ActionBtn>}
+                  {job.status === 'paused' && <ActionBtn tone="success" disabled={busyId === job.id} onClick={() => act(job, 'resume')}>Resume</ActionBtn>}
                   {['running', 'paused', 'approved', 'queued'].includes(job.status) && (
-                    <ActionBtn tone="danger" onClick={() => act(job, 'cancel')}>Cancel</ActionBtn>
+                    <ActionBtn tone="danger" disabled={busyId === job.id} onClick={() => act(job, 'cancel')}>Cancel</ActionBtn>
                   )}
-                  {['failed', 'cancelled'].includes(job.status) && <ActionBtn tone="success" onClick={() => act(job, 'restart')}>Restart</ActionBtn>}
-                  {['completed', 'failed', 'cancelled'].includes(job.status) && <ActionBtn onClick={() => act(job, 'delete')}>Delete</ActionBtn>}
+                  {['failed', 'cancelled'].includes(job.status) && <ActionBtn tone="success" disabled={busyId === job.id} onClick={() => act(job, 'restart')}>Restart</ActionBtn>}
+                  {['completed', 'failed', 'cancelled'].includes(job.status) && <ActionBtn disabled={busyId === job.id} onClick={() => act(job, 'delete')}>Delete</ActionBtn>}
                 </td>
               </tr>
             ))}

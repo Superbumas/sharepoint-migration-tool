@@ -63,14 +63,15 @@ export default function MappingsPage() {
   const navigate = useNavigate();
 
   function refresh() {
-    api.get('/api/mappings').then((r) => setMappings(r.items));
+    api.get('/api/mappings').then((r) => setMappings(r.items))
+      .catch((err) => setMessage({ type: 'error', text: `Couldn't load mappings: ${err.message}` }));
   }
   useEffect(refresh, []);
   useEffect(() => {
     api.get('/api/settings').then((r) => {
       setBlobArchivingEnabled(!!r.blobArchivingEnabled);
       setOnedriveTargetEnabled(!!r.onedriveTargetEnabled);
-    });
+    }).catch(() => {});
   }, []);
 
   function switchTargetKind(kind) {
@@ -143,16 +144,29 @@ export default function MappingsPage() {
     }
   }
 
+  // These used to have no error handling: a failed request (expired
+  // sign-in, server error, bad spreadsheet) was an unhandled rejection and
+  // the button just did nothing. Errors now show in the page's message box.
   async function createJob(mappingId) {
-    const job = await api.post(`/api/mappings/${mappingId}/jobs`);
-    navigate(`/jobs/${job.id}`);
+    setMessage(null);
+    try {
+      const job = await api.post(`/api/mappings/${mappingId}/jobs`);
+      navigate(`/jobs/${job.id}`);
+    } catch (err) {
+      setMessage({ type: 'error', text: `Couldn't create the job: ${err.message}` });
+    }
   }
 
   async function bulkCreateJobs() {
     if (selectedIds.size === 0) return;
-    await api.post('/api/jobs/bulk-create', { mappingIds: [...selectedIds] });
-    setSelectedIds(new Set());
-    navigate('/jobs');
+    setMessage(null);
+    try {
+      await api.post('/api/jobs/bulk-create', { mappingIds: [...selectedIds] });
+      setSelectedIds(new Set());
+      navigate('/jobs');
+    } catch (err) {
+      setMessage({ type: 'error', text: `Couldn't create the jobs: ${err.message}` });
+    }
   }
 
   async function uploadCrosswalk(e) {
@@ -161,9 +175,13 @@ export default function MappingsPage() {
     if (!file) return;
     const form = new FormData();
     form.append('file', file);
-    const result = await api.postForm('/api/mappings/import', form);
-    setImportResult(result);
-    refresh();
+    try {
+      const result = await api.postForm('/api/mappings/import', form);
+      setImportResult(result);
+      refresh();
+    } catch (err) {
+      setImportResult({ error: err.message });
+    }
   }
 
   function toggleSelected(id) {
@@ -188,7 +206,10 @@ export default function MappingsPage() {
           <input type="file" name="crosswalkFile" accept=".xlsx,.xls" aria-label="Crosswalk spreadsheet" className="text-sm min-w-0" />
           <button type="submit" className="btn-primary">Import</button>
         </form>
-        {importResult && (
+        {importResult?.error && (
+          <div role="alert" className="text-xs bg-red-50 border border-red-200 text-red-700 rounded-md p-2 mt-2">Import failed: {importResult.error}</div>
+        )}
+        {importResult && !importResult.error && (
           <div className="text-xs bg-slate-50 border border-slate-200 rounded-md p-2 mt-2">
             Imported {importResult.importedCount} of {importResult.totalRows} rows from sheet "{importResult.sheetUsed}"
             {importResult.skippedCount > 0 && <span className="text-amber-600"> - {importResult.skippedCount} skipped</span>}.
@@ -320,7 +341,11 @@ export default function MappingsPage() {
                 <td className="px-4 py-2"><MappingStatus job={m.latestJob} /></td>
                 <td className="px-4 py-2 text-slate-400 text-xs">{m.origin}{m.confidence ? ` (${m.confidence})` : ''}</td>
                 <td className="px-4 py-2 text-right">
-                  <button onClick={() => createJob(m.id)} className="text-xs font-medium rounded-md px-2.5 py-1 bg-blue-600 text-white hover:bg-blue-700 transition-colors whitespace-nowrap">Create job</button>
+                  {m.latestJob && ['queued', 'approved', 'running', 'paused'].includes(m.latestJob.status) ? (
+                    <Link to={`/jobs/${m.latestJob.id}`} className="text-xs font-medium rounded-md px-2.5 py-1 bg-slate-100 text-slate-700 hover:bg-slate-200 transition-colors whitespace-nowrap">Open job</Link>
+                  ) : (
+                    <button onClick={() => createJob(m.id)} className="text-xs font-medium rounded-md px-2.5 py-1 bg-blue-600 text-white hover:bg-blue-700 transition-colors whitespace-nowrap">{m.latestJob ? 'Run again' : 'Create job'}</button>
+                  )}
                 </td>
               </tr>
             ))}
