@@ -480,8 +480,8 @@ export default function JobDetail() {
   const backgroundOp = job.status === 'completed' && !!job.phase;
   if (v) {
     notices.push({
-      key: 'verify', tone: backgroundOp ? 'info' : v.ok ? 'ok' : 'error',
-      title: backgroundOp ? 'Previous verification (being re-checked now)' : v.ok ? `Verified: ${v.identical} of ${v.sourceFiles} files byte-identical` : `Verification found ${problemCount} problem(s)`,
+      key: 'verify', tone: backgroundOp ? 'info' : !v.ok ? 'error' : v.contentUnchecked > 0 ? 'warn' : 'ok',
+      title: backgroundOp ? 'Previous verification (being re-checked now)' : v.ok && v.contentUnchecked > 0 ? `Verified, but ${v.contentUnchecked} file(s) not yet content-checked — click Verify to check only those` : v.ok ? `Verified: ${v.identical} of ${v.sourceFiles} files byte-identical` : `Verification found ${problemCount} problem(s)`,
       detail: [
         !v.ok && `${v.missing} missing · ${v.sizeMismatch} size / ${v.hashMismatch} hash mismatches`,
         v.officeRewritten > 0 && (v.contentVerified != null
