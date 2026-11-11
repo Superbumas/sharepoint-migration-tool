@@ -1027,6 +1027,8 @@ try {
         # Same rule as Get-CrossHostTargetPrefix (lane runspaces can't see
         # script-scope functions): a cross-host copy, e.g. OneDrive (-my
         # host) into a SharePoint site, needs an absolute -TargetUrl.
+        # Same list as Verification.psm1's OfficeExtensions.
+        $laneOfficeExtensions = @('.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.docm', '.xlsm', '.pptm', '.one', '.vsdx', '.msg')
         $laneTargetUrlPrefix = ''
         if ($SourceSiteUrl -and $TargetSiteUrl) {
             $laneSrcUri = [Uri]$SourceSiteUrl; $laneTgtUri = [Uri]$TargetSiteUrl
@@ -1107,13 +1109,19 @@ try {
             # lookup, zero network) - same rule as Test-PnPTargetFileMatches:
             # same size AND target at least as new as the source.
             $relKey = if ($relFromRoot) { "$relFromRoot/$($item.Name)" } else { $item.Name }
+            # SharePoint re-stamps Office/Outlook files' embedded properties
+            # on copy, so their copy is never the same size as the source
+            # (verification already treats that as expected). Requiring an
+            # equal size here made every re-run copy every Office file again;
+            # for those, an existing copy at least as new as the source counts.
+            $sizeMayDiffer = $laneOfficeExtensions -contains [System.IO.Path]::GetExtension($item.Name).ToLowerInvariant()
             if ($null -ne $TargetFileMap) {
                 $existing = $TargetFileMap[$relKey]
                 $alreadyDone = $existing -and
-                    ([long]$existing.Size -eq [long]$item.Size) -and
+                    (([long]$existing.Size -eq [long]$item.Size) -or ($sizeMayDiffer -and $item.Modified -and $existing.Modified)) -and
                     (-not $item.Modified -or -not $existing.Modified -or $existing.Modified -ge [datetime]$item.Modified)
             } else {
-                $alreadyDone = Test-PnPTargetFileMatches -Connection $laneTargetConn -TargetServerRelativeUrl $targetFileServerRel -ExpectedSize $item.Size -SourceModified $item.Modified
+                $alreadyDone = Test-PnPTargetFileMatches -Connection $laneTargetConn -TargetServerRelativeUrl $targetFileServerRel -ExpectedSize $item.Size -SourceModified $item.Modified -AllowSizeDifference:$sizeMayDiffer
             }
             if ($alreadyDone) {
                 # Backfill for copies made before the metadata stamp worked
