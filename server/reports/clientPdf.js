@@ -83,10 +83,10 @@ function renderClientPdf(out, data, { title, client, preparedBy, inventory }) {
   r.section('Migrated locations');
   r.table(
     ['Folder', 'Destination', 'Files', 'Size', 'Status'],
-    [r.width * 0.2, r.width * 0.38, r.width * 0.1, r.width * 0.11, r.width * 0.21],
+    [r.width * 0.27, r.width * 0.31, r.width * 0.1, r.width * 0.11, r.width * 0.21],
     folders.map((f) => {
       const st = statusFor(f);
-      return [{ text: f.name, bold: true }, f.target.where, f.migrated.length.toLocaleString(), formatBytes(f.bytes), { text: st.text, color: st.color }];
+      return [{ text: f.name, bold: true, keepStart: true }, f.target.where, f.migrated.length.toLocaleString(), formatBytes(f.bytes), { text: st.text, color: st.color }];
     }),
     { rowHeight: 17, fontSize: 7.5, aligns: ['left', 'left', 'right', 'right', 'left'] }
   );
@@ -94,7 +94,7 @@ function renderClientPdf(out, data, { title, client, preparedBy, inventory }) {
     r.ensure(18);
     const y = doc.y;
     doc.moveTo(r.left, y).lineTo(r.left + r.width, y).lineWidth(0.75).strokeColor(COLORS.ink).stroke();
-    const cols = [r.width * 0.2, r.width * 0.38, r.width * 0.1, r.width * 0.11];
+    const cols = [r.width * 0.27, r.width * 0.31, r.width * 0.1, r.width * 0.11];
     doc.font('Helvetica-Bold').fontSize(7.5).fillColor(COLORS.ink);
     doc.text('Total', r.left + 4, y + 4, { width: cols[0] - 8, lineBreak: false });
     doc.text(totals.files.toLocaleString(), r.left + cols[0] + cols[1] + 4, y + 4, { width: cols[2] - 8, align: 'right', lineBreak: false });
@@ -123,7 +123,8 @@ function renderClientPdf(out, data, { title, client, preparedBy, inventory }) {
   );
   if (anySp && totals.expectedRewrites > 0) {
     r.paragraph(
-      `${totals.expectedRewrites.toLocaleString()} Office document(s) and Outlook messages (.msg) show a small size difference. `
+      `${plural(totals.expectedRewrites, 'file')} (Office documents, Outlook messages and saved web pages) `
+      + `${totals.expectedRewrites === 1 ? 'shows' : 'show'} a small size difference. `
       + 'This is expected: Microsoft 365 updates the properties stored inside these files (author, title, sender and so on) '
       + 'when they are saved to SharePoint. Their content is unchanged.',
       { color: COLORS.muted, size: 8.5 }

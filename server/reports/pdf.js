@@ -55,10 +55,16 @@ class Report {
   // lineBreak:false, which made long file paths spill into the row below.
   // Measure and hard-truncate (keeping the tail - the filename end is the
   // informative part of a path) before drawing.
-  fit(text, width, fontSize, font = 'Helvetica') {
+  fit(text, width, fontSize, font = 'Helvetica', keepStart = false) {
     const s = String(text ?? '');
     this.doc.font(font).fontSize(fontSize);
     if (this.doc.widthOfString(s) <= width) return s;
+    if (keepStart) {
+      // Names (not paths) read from the front: "Catherine James-Ol…".
+      let t = s;
+      while (t.length > 1 && this.doc.widthOfString(`${t}…`) > width) t = t.slice(0, -1);
+      return `${t.trimEnd()}…`;
+    }
     let t = s;
     while (t.length > 1 && this.doc.widthOfString(`…${t}`) > width) {
       t = t.slice(Math.max(1, Math.floor(t.length * 0.1)));
@@ -182,7 +188,7 @@ class Report {
         const font = isObj && cell.bold ? 'Helvetica-Bold' : 'Helvetica';
         // fit() guarantees one line per cell - pdfkit wraps to `width` even
         // with lineBreak:false, which used to pile rows on top of each other.
-        const fitted = this.fit(isObj ? cell.text : cell, widths[i] - 8, fontSize, font);
+        const fitted = this.fit(isObj ? cell.text : cell, widths[i] - 8, fontSize, font, isObj && cell.keepStart);
         doc.font(font).fontSize(fontSize).fillColor(isObj && cell.color ? cell.color : COLORS.ink)
           .text(fitted, x + 4, y + (rowH - fontSize) / 2 - 0.5, { width: widths[i] - 8, align: opts.aligns?.[i] || 'left', lineBreak: false });
         x += widths[i];
