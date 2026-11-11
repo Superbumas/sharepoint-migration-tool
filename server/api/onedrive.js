@@ -1,7 +1,7 @@
 const express = require('express');
 const { requireAuth } = require('../auth/middleware');
 const { graphGet } = require('../graph/client');
-const { verifyUserHasDrive } = require('../graph/onedriveAccess');
+const { verifyUserHasDrive, resolveUserOneDriveSite } = require('../graph/onedriveAccess');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -46,6 +46,18 @@ router.get('/onedrive/verify', async (req, res, next) => {
     const upn = (req.query.upn || '').trim();
     if (!upn) return res.status(400).json({ error: 'upn is required' });
     res.json(await verifyUserHasDrive(req, upn));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Resolves a user's OneDrive to its personal SharePoint site + drive id, for
+// the OneDrive SOURCE picker - which then browses it like any other site.
+router.get('/onedrive/site', async (req, res, next) => {
+  try {
+    const upn = (req.query.upn || '').trim();
+    if (!upn) return res.status(400).json({ error: 'upn is required' });
+    res.json(await resolveUserOneDriveSite(req, upn));
   } catch (err) {
     next(err);
   }
