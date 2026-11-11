@@ -1926,14 +1926,17 @@ try {
             try { $srcDriveId = Get-GraphDriveId -Connection $sourceConn -SiteUrl $SourceSiteUrl -Library $SourceLibrary } catch {}
         }
 
-        # Up to 3 verify->repair->verify rounds; each next round only runs
-        # while the problem count strictly decreases, so transient flakes
-        # clear in round one, stubborn files get the escalated copy method
-        # below, and files nothing can fix stop the loop instead of spinning.
+        # Up to 3 verify->repair->verify rounds. Round 1 re-runs the
+        # server-side copy; round 2 always follows with the escalated stream
+        # copy below (download + upload of the exact bytes), even when round 1
+        # fixed nothing - a server-side copy that keeps producing the same bad
+        # result is exactly the case the stream copy exists for. From round 3
+        # on, a round only runs while the problem count strictly decreases, so
+        # files nothing can fix stop the loop instead of spinning.
         $prevProblemCount = [int]::MaxValue
         for ($repairRound = 1; $repairRound -le 3 -and $verifyOut -and -not $verifyOut.Summary.ok; $repairRound++) {
             $problemPaths = @($verifyOut.Result.Missing) + @($verifyOut.Result.SizeMismatch) + @($verifyOut.Result.HashMismatch)
-            if ($problemPaths.Count -ge $prevProblemCount) {
+            if ($repairRound -gt 2 -and $problemPaths.Count -ge $prevProblemCount) {
                 Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Repair made no further progress - $($problemPaths.Count) file(s) still fail verification (listed on the job). Re-running the job retries only these files." }
                 break
             }
