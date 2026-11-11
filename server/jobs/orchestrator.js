@@ -799,7 +799,7 @@ function consoleEngineEvent(job, event) {
         : p.phase === 'cleaning' ? `cleaning source — ${(p.deleted ?? 0).toLocaleString()} recycled, ${(p.kept ?? 0).toLocaleString()} kept of ${(p.total ?? 0).toLocaleString()}`
         : p.phase === 'clearing_folders' ? `recycling emptied folders — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
         : p.phase === 'stamping_folders' ? `restoring folder dates and owners — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
-        : p.phase === 'content_check' ? `checking content of files SharePoint rewrote — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}${p.bytesTotal ? ` (${Math.round((p.bytesDone || 0) / 1048576).toLocaleString()} of ${Math.round(p.bytesTotal / 1048576).toLocaleString()} MB)` : ''}`
+        : p.phase === 'content_check' ? `checking content of files SharePoint rewrote — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}${p.bytesTotal ? ` (${Math.round((p.bytesDone || 0) / 1048576).toLocaleString()} of ${Math.round(p.bytesTotal / 1048576).toLocaleString()} MB)` : ''}${p.current ? ` · now: ${String(p.current).split('/').pop()} (${Math.max(1, Math.round((p.currentBytes || 0) / 1048576)).toLocaleString()} MB)` : ''}`
         : p.phase === 'purging' ? `purging recycle bin — ${(p.purged ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
         : p.phase === 'preflight' ? (p.step === 'permissions' ? `pre-flight: checking permissions — ${(p.scanned ?? 0).toLocaleString()} items` : 'pre-flight: checking paths and sizes')
         : p.phase;

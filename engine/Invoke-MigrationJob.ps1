@@ -313,6 +313,20 @@ function Invoke-VerificationPhase {
         $isFsSource = $SourceProvider -eq 'filesystem'
         $hashLabel = if ($isBlob) { 'MD5' } else { 'QuickXorHash' }
         Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Verifying migration: comparing existence, size and content hash ($hashLabel) of every source file against its copy..." }
+        # Listing both trees can take minutes on a big library: heartbeat the
+        # job page's progress card on every Graph page, and put a line in the
+        # live log at most every 15 s so the log doesn't look frozen.
+        $vProgress = @{ LogAt = (Get-Date) }
+        $idxSrc = {
+            param($count)
+            Write-PhaseProgress -Phase 'indexing_source' -Data @{ files = $count }
+            if (((Get-Date) - $vProgress.LogAt).TotalSeconds -ge 15) { $vProgress.LogAt = Get-Date; Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Verify: listed $count source file(s) so far..." } }
+        }
+        $idxTgt = {
+            param($count)
+            Write-PhaseProgress -Phase 'indexing_target' -Data @{ files = $count }
+            if (((Get-Date) - $vProgress.LogAt).TotalSeconds -ge 15) { $vProgress.LogAt = Get-Date; Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Verify: listed $count migrated file(s) at the target so far..." } }
+        }
         $result = if ($isOneDrive) {
             # Both sides come from Graph (Get-GraphFileMap), so this is the
             # same generic hash-based comparator every SharePoint target
@@ -326,9 +340,9 @@ function Invoke-VerificationPhase {
                 }
             } else {
                 $srcDriveId = Get-GraphDriveId -Connection $SourceConn -SiteUrl $SourceSite -Library $SourceLib
-                Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib -IncludeDownloadUrl
+                Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib -IncludeDownloadUrl -OnProgress $idxSrc
             }
-            $tgtMap = Get-GraphFileMap -Connection $OneDriveCtx.Connection -DriveId $OneDriveCtx.DriveId -RootPath $OneDriveCtx.PathRoot -IncludeDownloadUrl
+            $tgtMap = Get-GraphFileMap -Connection $OneDriveCtx.Connection -DriveId $OneDriveCtx.DriveId -RootPath $OneDriveCtx.PathRoot -IncludeDownloadUrl -OnProgress $idxTgt
             Compare-MigratedFileMaps -SourceMap $srcMap -TargetMap $tgtMap
         } elseif ($isFsSource) {
             # Local QuickXorHash of every source file vs the hash SharePoint
@@ -339,11 +353,11 @@ function Invoke-VerificationPhase {
                 Write-PhaseProgress -Phase 'hashing_source' -Data @{ files = $count }
             }
             $tgtDriveId = Get-GraphDriveId -Connection $TargetConn -SiteUrl $TargetSite -Library $TargetLib
-            $tgtMap = Get-GraphFileMap -Connection $TargetConn -DriveId $tgtDriveId -RootPath $TargetPathInLib -IncludeDownloadUrl
+            $tgtMap = Get-GraphFileMap -Connection $TargetConn -DriveId $tgtDriveId -RootPath $TargetPathInLib -IncludeDownloadUrl -OnProgress $idxTgt
             Compare-MigratedFileMaps -SourceMap $srcMap -TargetMap $tgtMap
         } elseif ($isBlob) {
             $srcDriveId = Get-GraphDriveId -Connection $SourceConn -SiteUrl $SourceSite -Library $SourceLib
-            $srcMap = Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib
+            $srcMap = Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib -OnProgress $idxSrc
             $tgtMap = Get-BlobKeyMap -BlobEndpoint $BlobCtx.BlobEndpoint -Container $BlobCtx.Container -Sas $BlobCtx.Sas -Prefix $BlobCtx.Prefix
             Compare-BlobMigratedTree -SourceMap $srcMap -TargetMap $tgtMap
         } else {
@@ -351,8 +365,8 @@ function Invoke-VerificationPhase {
             # download links included) for the rewritten-file content check.
             $srcDriveId = Get-GraphDriveId -Connection $SourceConn -SiteUrl $SourceSite -Library $SourceLib
             $tgtDriveId = Get-GraphDriveId -Connection $TargetConn -SiteUrl $TargetSite -Library $TargetLib
-            $srcMap = Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib -IncludeDownloadUrl
-            $tgtMap = Get-GraphFileMap -Connection $TargetConn -DriveId $tgtDriveId -RootPath $TargetPathInLib -IncludeDownloadUrl
+            $srcMap = Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib -IncludeDownloadUrl -OnProgress $idxSrc
+            $tgtMap = Get-GraphFileMap -Connection $TargetConn -DriveId $tgtDriveId -RootPath $TargetPathInLib -IncludeDownloadUrl -OnProgress $idxTgt
             Compare-MigratedFileMaps -SourceMap $srcMap -TargetMap $tgtMap
         }
 
@@ -402,10 +416,17 @@ function Invoke-VerificationPhase {
                     $m = Get-GraphFileMap -Connection $ccTgtLinks.Conn -DriveId $ccTgtLinks.Drive -RootPath $ccTgtLinks.Root -IncludeDownloadUrl; foreach ($k in @($m.Keys)) { $out.Target[$k] = $m[$k].DownloadUrl }
                     $out
                 }
-                $checked = Invoke-RewrittenContentCheck -Items $todo.ToArray() -RefreshLinks $ccRefresh -OnProgress {
-                    param($n, $bytes, $rel, $throttleWait)
+                # -Cache/-CachePath: results are saved as they arrive (every
+                # 25), so a server restart mid-check keeps finished files.
+                $ccLog = @{ At = (Get-Date) }
+                $checked = Invoke-RewrittenContentCheck -Items $todo.ToArray() -RefreshLinks $ccRefresh -Cache $ccCache -CachePath $ccCachePath -OnProgress {
+                    param($n, $bytes, $rel, $throttleWait, $current, $currentBytes)
                     if ($throttleWait) { Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Content check: throttled by SharePoint, pausing about $($throttleWait)s and retrying (nothing is skipped)." } }
-                    Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal; bytesDone = $bytes; bytesTotal = $ccTotalBytes; last = $rel }
+                    Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal; bytesDone = $bytes; bytesTotal = $ccTotalBytes; last = $rel; current = $current; currentBytes = $currentBytes }
+                    if (((Get-Date) - $ccLog.At).TotalSeconds -ge 15) {
+                        $ccLog.At = Get-Date
+                        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Content check: $n of $ccTotal checked ($([Math]::Round($bytes / 1MB)) of $([Math]::Round($ccTotalBytes / 1MB)) MB)$(if ($current) { " · now: $(($current -split '/')[-1]) ($([Math]::Max(1, [Math]::Round($currentBytes / 1MB))) MB)" })" }
+                    }
                 }
                 foreach ($c in $checked) {
                     if (-not (Test-TransientContentResult $c)) { $ccCache[$c.Key] = @{ Status = $c.Status; Detail = $c.Detail } }
@@ -748,10 +769,15 @@ try {
                     $m = Get-GraphFileMap -Connection $ccTgtLinks.Conn -DriveId $ccTgtLinks.Drive -RootPath $ccTgtLinks.Root -IncludeDownloadUrl; foreach ($k in @($m.Keys)) { $out.Target[$k] = $m[$k].DownloadUrl }
                     $out
                 }
-                $checked = Invoke-RewrittenContentCheck -Items $todo.ToArray() -RefreshLinks $ccRefresh -OnProgress {
-                    param($n, $bytes, $rel, $throttleWait)
+                $ccLog = @{ At = (Get-Date) }
+                $checked = Invoke-RewrittenContentCheck -Items $todo.ToArray() -RefreshLinks $ccRefresh -Cache $ccCache -CachePath $ContentCachePath -OnProgress {
+                    param($n, $bytes, $rel, $throttleWait, $current, $currentBytes)
                     if ($throttleWait) { Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Content check: throttled by SharePoint, pausing about $($throttleWait)s and retrying (nothing is skipped)." } }
-                    Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal; bytesDone = $bytes; bytesTotal = $ccTotalBytes; last = $rel }
+                    Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal; bytesDone = $bytes; bytesTotal = $ccTotalBytes; last = $rel; current = $current; currentBytes = $currentBytes }
+                    if (((Get-Date) - $ccLog.At).TotalSeconds -ge 15) {
+                        $ccLog.At = Get-Date
+                        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Cleanup check: $n of $ccTotal checked ($([Math]::Round($bytes / 1MB)) of $([Math]::Round($ccTotalBytes / 1MB)) MB)$(if ($current) { " · now: $(($current -split '/')[-1]) ($([Math]::Max(1, [Math]::Round($currentBytes / 1MB))) MB)" })" }
+                    }
                 }
                 foreach ($c in $checked) {
                     if (-not (Test-TransientContentResult $c)) { $ccCache[$c.Key] = @{ Status = $c.Status; Detail = $c.Detail } }
