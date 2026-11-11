@@ -62,4 +62,11 @@ function contentCachePath(job) {
   return path.join(CONTENT_CACHE_DIR, `${hash}.json`);
 }
 
-module.exports = { controlFilePath, writeControlFile, removeControlFile, treeCachePath, removeTreeCache, contentCachePath };
+// "Who had access" export (engine -AccessReportPath): the grants of every
+// source item with its own permissions, collected during the pre-flight.
+const ACCESS_DIR = path.join(__dirname, '..', '..', 'data', 'access');
+function accessReportPath(jobId) {
+  return path.join(ACCESS_DIR, `${jobId}.json`);
+}
+
+module.exports = { controlFilePath, writeControlFile, removeControlFile, treeCachePath, removeTreeCache, contentCachePath, accessReportPath };

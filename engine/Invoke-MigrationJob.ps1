@@ -158,6 +158,11 @@ param(
     # emits job_* lifecycle events. The scan is still written to
     # -TreeCachePath, so starting the job right after reuses it.
     [switch]$PreflightOnly,
+    # "Who had access" export: during the pre-flight, the grants of every
+    # item with its own permissions are read (Graph driveItem permissions,
+    # read-only) and written to this JSON file for the job page's CSV export
+    # and the reports. Empty = not collected.
+    [string]$AccessReportPath,
     # How a SharePoint source is enumerated: 'auto' (default) picks Graph
     # delta or the folder-by-folder walk per Select-SharePointScanMethod;
     # 'delta' / 'folders' force one - for troubleshooting a scan, or to
@@ -1287,6 +1292,38 @@ try {
         }
         $preflight = New-PreflightReport -Content $content -UniquePerms $uniquePerms -TargetProvider $TargetProvider
         if ($permsSkipped) { $preflight.uniquePermissions = @{ skipped = $true } }
+        # "Who had access": the grants of every item with its own permissions,
+        # read from Graph (read-only) and saved for the CSV export. Capped so a
+        # pathological library can't stall the pre-flight.
+        if ($AccessReportPath -and $uniquePerms -and $uniquePerms.Checked -and @($uniquePerms.Items).Count -gt 0) {
+            try {
+                $accessItems = @($uniquePerms.Items | Select-Object -First 5000)
+                Write-PhaseProgress -Phase 'preflight' -Data @{ step = 'access'; done = 0; total = $accessItems.Count } -Force
+                $accessDrive = Get-GraphDriveId -Connection $sourceConn -SiteUrl $SourceSiteUrl -Library $SourceLibrary
+                $access = Get-ItemAccessGrants -Connection $sourceConn -DriveId $accessDrive -RootPath $SourcePath -Items $accessItems -OnProgress {
+                    param($n, $total)
+                    if ($n % 25 -eq 0) { Write-PhaseProgress -Phase 'preflight' -Data @{ step = 'access'; done = $n; total = $total } }
+                }
+                $allGrants = @($access | ForEach-Object { $_.grants } | Where-Object { $_ })
+                $summary = @{
+                    items        = $access.Count
+                    grants       = $allGrants.Count
+                    links        = @($allGrants | Where-Object { $_.source -eq 'link' }).Count
+                    anyoneLinks  = @($allGrants | Where-Object { $_.source -eq 'link' -and $_.linkScope -eq 'anyone' }).Count
+                    external     = @($allGrants | Where-Object { $_.external }).Count
+                    errors       = @($access | Where-Object { $_.error }).Count
+                    truncated    = (@($uniquePerms.Items).Count -gt $accessItems.Count)
+                    generatedAt  = (Get-Date).ToUniversalTime().ToString('o')
+                }
+                $null = New-Item -ItemType Directory -Force -Path (Split-Path $AccessReportPath -Parent)
+                @{ summary = $summary; sourceSite = $SourceSiteUrl; sourceLibrary = $SourceLibrary; sourcePath = $SourcePath; items = @($access) } |
+                    ConvertTo-Json -Depth 8 -Compress | Set-Content -LiteralPath $AccessReportPath -Encoding utf8
+                $preflight.uniquePermissions.access = $summary
+                Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "PRE-FLIGHT: who had access recorded for $($summary.items) item(s) with their own permissions: $($summary.grants) grant(s), $($summary.links) sharing link grant(s) ($($summary.anyoneLinks) 'anyone'), $($summary.external) external/guest. Use 'Export access (CSV)' on the job page." }
+            } catch {
+                Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "PRE-FLIGHT: could not record who had access (the job is unaffected): $($_.Exception.Message)" }
+            }
+        }
         Write-EngineEvent -Type 'preflight_report' -Data @{ preflight = $preflight }
         foreach ($lp in ($preflight.longFolders.items | Select-Object -First 10)) {
             Write-EngineEvent -Type 'log' -Data @{ level = 'error'; message = "PRE-FLIGHT: folder path is $($lp.length) characters at the target (limit $($preflight.maxPathLength)) - nothing under it can be created: $($lp.path)" }

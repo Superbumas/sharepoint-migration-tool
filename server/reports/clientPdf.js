@@ -132,6 +132,12 @@ function renderClientPdf(out, data, { title, client, preparedBy, inventory }) {
       );
     }
   }
+  if (totals.ownSharing > 0) {
+    r.paragraph(
+      `${plural(totals.ownSharing, 'item')} had ${totals.ownSharing === 1 ? 'its' : 'their'} own sharing at the source; the list was provided separately.`,
+      { color: COLORS.muted, size: 8.5 }
+    );
+  }
 
   // --- Files to review -----------------------------------------------------
   const review = folders.flatMap((f) => f.notMigrated.map((n) => ({ ...n, folder: f.name })));

@@ -117,6 +117,9 @@ function Get-UniquePermissionSummary {
     # Per immediate child folder of the scanned root ('' = the root itself):
     # where the uniquely-permissioned items live.
     $byFolder = @{}
+    # Every uniquely-permissioned item (path relative to the scanned root),
+    # for the "who had access" export.
+    $items = [System.Collections.Generic.List[object]]::new()
     try {
         while ($url) {
             $resp = Invoke-WithRetry -Action { Invoke-PnPSPRestMethod -Method Get -Url $url -Connection $Connection }
@@ -128,6 +131,7 @@ function Get-UniquePermissionSummary {
                 if ($ref -eq $root) { continue }
                 $count++
                 $rel = $ref.Substring($root.Length).TrimStart('/')
+                $items.Add([pscustomobject]@{ path = $rel; isFolder = ([int]$it.FSObjType -eq 1) })
                 # Bucket by the item's folder, two levels deep at most - deep
                 # enough to point at the culprit, shallow enough to stay a
                 # short list.
@@ -142,11 +146,69 @@ function Get-UniquePermissionSummary {
             $url = $next
         }
     } catch {
-        return [pscustomobject]@{ Checked = $false; Count = $count; Scanned = $scanned; Folders = @(); Error = $_.Exception.Message }
+        return [pscustomobject]@{ Checked = $false; Count = $count; Scanned = $scanned; Folders = @(); Items = @(); Error = $_.Exception.Message }
     }
     $folders = @($byFolder.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 15 |
             ForEach-Object { [pscustomobject]@{ path = $(if ($_.Key) { $_.Key } else { '(top level)' }); count = $_.Value } })
-    return [pscustomobject]@{ Checked = $true; Count = $count; Scanned = $scanned; Folders = $folders; Error = $null }
+    return [pscustomobject]@{ Checked = $true; Count = $count; Scanned = $scanned; Folders = $folders; Items = @($items); Error = $null }
+}
+
+# "Who had access": for each item with its own permissions, read its Graph
+# driveItem permissions (read-only - nothing on the source is changed) and
+# return one row per item with its own (non-inherited) grants. $RootPath is
+# the drive-relative path of the scanned root (the job's source path); item
+# paths are relative to it.
+function Get-ItemAccessGrants {
+    param(
+        [Parameter(Mandatory)]$Connection,
+        [Parameter(Mandatory)][string]$DriveId,
+        [AllowEmptyString()][string]$RootPath,
+        [Parameter(Mandatory)][object[]]$Items,
+        [scriptblock]$OnProgress
+    )
+    $esc = { param($p) ((($p -replace '\\', '/') -split '/') | Where-Object { $_ } | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/' }
+    $roleName = { param($roles)
+        $r = @($roles | ForEach-Object { "$_".ToLowerInvariant() })
+        if ($r -contains 'owner' -or $r -contains 'sp.full control') { 'owner' } elseif ($r -contains 'write') { 'edit' } elseif ($r -contains 'read') { 'read' } else { ($r -join '+') } }
+    $isExternal = { param($email, $login)
+        $l = "$login".ToLowerInvariant(); $e = "$email".ToLowerInvariant()
+        $l.Contains('#ext#') -or $e.Contains('#ext#') -or $l.Contains('urn:spo:guest') -or $l.Contains('urn%3aspo%3aguest') }
+    $out = [System.Collections.Generic.List[object]]::new()
+    $done = 0
+    foreach ($item in $Items) {
+        $done++
+        $full = (@($RootPath, $item.path) | Where-Object { $_ }) -join '/'
+        $row = [ordered]@{ path = $item.path; type = $(if ($item.isFolder) { 'folder' } else { 'file' }); grants = @(); error = $null }
+        try {
+            $resp = Invoke-WithRetry -Action { Invoke-PnPGraphMethod -Url "v1.0/drives/$DriveId/root:/$(& $esc $full):/permissions" -Connection $Connection }
+            $grants = foreach ($p in @($resp.value)) {
+                if ($p.inheritedFrom -and ($p.inheritedFrom.path -or $p.inheritedFrom.id -or $p.inheritedFrom.driveId)) { continue }
+                $role = & $roleName $p.roles
+                if ($p.link) {
+                    $scope = switch ("$($p.link.scope)") { 'anonymous' { 'anyone' } 'organization' { 'organisation' } 'users' { 'specific people' } 'existingAccess' { 'existing access' } default { "$($p.link.scope)" } }
+                    $who = @(@($p.grantedToIdentitiesV2) + @($p.grantedToIdentities) | Where-Object { $_ })
+                    if ($who.Count -eq 0) {
+                        [ordered]@{ name = "Sharing link ($scope, $($p.link.type))"; email = ''; role = $role; source = 'link'; linkScope = $scope; linkType = "$($p.link.type)"; external = ($scope -eq 'anyone'); expires = "$($p.expirationDateTime)"; hasPassword = [bool]$p.hasPassword }
+                    }
+                    foreach ($w in $who) {
+                        $u = if ($w.user) { $w.user } elseif ($w.siteUser) { $w.siteUser } elseif ($w.group) { $w.group } else { $w.siteGroup }
+                        [ordered]@{ name = "$($u.displayName)"; email = "$($u.email)"; role = $role; source = 'link'; linkScope = $scope; linkType = "$($p.link.type)"; external = (& $isExternal $u.email $u.loginName); expires = "$($p.expirationDateTime)"; hasPassword = [bool]$p.hasPassword }
+                    }
+                } else {
+                    $g = $p.grantedToV2; if (-not $g) { $g = $p.grantedTo }
+                    $isGroup = [bool]($g.group -or $g.siteGroup)
+                    $u = if ($g.user) { $g.user } elseif ($g.siteUser) { $g.siteUser } elseif ($g.group) { $g.group } else { $g.siteGroup }
+                    [ordered]@{ name = "$($u.displayName)"; email = "$($u.email)"; role = $role; source = $(if ($isGroup) { 'group' } else { 'direct' }); linkScope = ''; linkType = ''; external = (& $isExternal $u.email $u.loginName); expires = "$($p.expirationDateTime)"; hasPassword = $false }
+                }
+            }
+            $row.grants = @($grants)
+        } catch {
+            $row.error = $_.Exception.Message
+        }
+        $out.Add([pscustomobject]$row)
+        if ($OnProgress) { & $OnProgress $done $Items.Count }
+    }
+    return , $out.ToArray()
 }
 
 # Assembles the report the UI shows and the engine logs. $Content from
@@ -203,4 +265,4 @@ function New-PreflightReport {
     }
 }
 
-Export-ModuleMember -Function Test-MigrationContent, Get-UniquePermissionSummary, New-PreflightReport
+Export-ModuleMember -Function Test-MigrationContent, Get-UniquePermissionSummary, Get-ItemAccessGrants, New-PreflightReport

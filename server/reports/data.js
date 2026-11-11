@@ -261,6 +261,12 @@ function buildClientData(db, jobs) {
       contentUnchecked: folders.reduce((s, f) => s + (f.ver.contentUnchecked || 0), 0),
       unverifiedFolders: folders.filter((f) => f.ver.state === 'unverified').length,
       expectedRewrites: folders.reduce((s, f) => s + f.ver.expectedRewrites, 0),
+      // Items whose sharing differed from their parent at the source (from
+      // the pre-flight). Permissions are not copied; the client report names
+      // no one - the "who had access" CSV is provided separately.
+      ownSharing: pickLatestPerMapping(jobs).reduce((s, j) => {
+        try { const p = JSON.parse(j.preflight_json || 'null')?.uniquePermissions; return s + (p?.checked ? (p.count || 0) : 0); } catch { return s; }
+      }, 0),
       from: starts.length ? new Date(Math.min(...starts)) : null,
       to: ends.length ? new Date(Math.max(...ends)) : null,
     },

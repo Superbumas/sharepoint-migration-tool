@@ -5,7 +5,7 @@ const { v4: uuid } = require('uuid');
 const { getDb } = require('../db');
 const config = require('../config');
 const { attachNdjsonParser } = require('./ndjson');
-const { controlFilePath, writeControlFile, removeControlFile, treeCachePath, removeTreeCache, contentCachePath } = require('./controlFile');
+const { controlFilePath, writeControlFile, removeControlFile, treeCachePath, removeTreeCache, contentCachePath, accessReportPath } = require('./controlFile');
 const { mapJob } = require('../util/mapJob');
 const clog = require('../util/consoleLog');
 const { decrypt } = require('../util/secretCrypto');
@@ -517,6 +517,7 @@ function runJob(jobId, actor, tenantId) {
     '-FsHashConcurrency', String(config.fsSourceHashConcurrency),
     '-ControlFilePath', controlFilePath(jobId),
     '-TreeCachePath', treeCachePath(jobId),
+    '-AccessReportPath', accessReportPath(jobId),
     '-ClientId', engineIdentity.clientId,
     '-TenantId', job.tenant_id || config.tenantId,
   ];
@@ -1430,6 +1431,7 @@ function preflightJob(jobId, actor, tenantId) {
     // says pauseRequested, which would stop the check before it starts.
     '-ControlFilePath', controlFilePath(`${jobId}.preflight`),
     '-TreeCachePath', treeCachePath(jobId),
+    '-AccessReportPath', accessReportPath(jobId),
     '-ClientId', engineIdentity.clientId,
     '-TenantId', job.tenant_id || config.tenantId,
     '-PreflightOnly',

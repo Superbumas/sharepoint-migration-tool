@@ -6,6 +6,8 @@ const { mapJob } = require('../util/mapJob');
 const { ensureEngineSiteAccess } = require('../graph/siteAccess');
 const clog = require('../util/consoleLog');
 const config = require('../config');
+const fs = require('node:fs');
+const { accessReportPath } = require('../jobs/controlFile');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -285,6 +287,40 @@ router.post('/jobs/:id/repair-files', (req, res, next) => {
   if (!requireVisibleJob(req, res)) return;
   try { res.json(mapJob(orchestrator.repairFilesJob(req.params.id, getActor(req), getTenantId(req)))); }
   catch (err) { next(err); }
+});
+
+// "Who had access" export: one row per grant on every source item that had
+// its own permissions (collected read-only by the pre-flight). Permissions
+// are not copied by the migration - this is the record of what to re-apply.
+router.get('/jobs/:id/access.csv', (req, res, next) => {
+  try {
+    const job = visibleJob(req, req.params.id);
+    if (!job) return res.status(404).json({ error: 'not_found' });
+    const file = accessReportPath(job.id);
+    if (!fs.existsSync(file)) {
+      return res.status(404).json({ error: 'no_access_report', message: 'No access details for this job yet - run the pre-flight check (or the job) again to collect them.' });
+    }
+    const data = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, ''));
+    const csv = (v) => {
+      const s = v == null ? '' : String(v);
+      return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const lines = [['Path', 'Type', 'Granted to', 'Email', 'Role', 'Granted via', 'Link scope', 'Link type', 'External / guest', 'Expires', 'Password', 'Note'].join(',')];
+    for (const item of data.items || []) {
+      const grants = Array.isArray(item.grants) ? item.grants : (item.grants ? [item.grants] : []);
+      if (item.error) lines.push([item.path, item.type, '', '', '', '', '', '', '', '', '', `could not read permissions: ${item.error}`].map(csv).join(','));
+      else if (grants.length === 0) lines.push([item.path, item.type, '', '', '', '', '', '', '', '', '', 'no grants of its own (inheritance broken, nothing added)'].map(csv).join(','));
+      for (const g of grants) {
+        lines.push([item.path, item.type, g.name, g.email, g.role, g.source === 'link' ? 'sharing link' : g.source === 'group' ? 'group' : 'direct',
+          g.linkScope, g.linkType, g.external ? 'yes' : '', g.expires, g.hasPassword ? 'yes' : '', ''].map(csv).join(','));
+      }
+    }
+    const day = new Date().toISOString().slice(0, 10);
+    const name = String(job.name || 'job').replace(/[^\w .-]+/g, '').trim().slice(0, 60) || 'job';
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${name} - who had access - ${day}.csv"`);
+    res.send('﻿' + lines.join('\r\n') + '\r\n');
+  } catch (err) { next(err); }
 });
 
 router.post('/jobs/:id/preflight', (req, res, next) => {

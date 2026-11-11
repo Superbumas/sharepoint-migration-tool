@@ -420,6 +420,7 @@ export default function JobDetail() {
       ].filter(Boolean).join(' · '),
       action: (
         <>
+          {perms?.access && <a href={`/api/jobs/${job.id}/access.csv`} className="text-xs font-medium text-blue-600 hover:underline shrink-0" title={`Who had access to the ${perms.access.items} item(s) with their own permissions - ${perms.access.grants} grant(s), ${perms.access.external} external/guest`}>Export access (CSV)</a>}
           {hasList && <button type="button" onClick={() => setShowPreflight((s) => !s)} className="text-xs font-medium text-blue-600 hover:underline shrink-0">{showPreflight ? 'Hide details' : 'Show details'}</button>}
         </>
       ),

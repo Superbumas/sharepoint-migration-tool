@@ -173,6 +173,24 @@ router.get('/jobs/:id/report.pdf', (req, res, next) => {
       r.kv([['Result', 'Source files not removed - source remains intact.', COLORS.muted]]);
     }
 
+    // --- Access not copied (items with their own permissions) --------------
+    let preflight = null;
+    try { preflight = JSON.parse(job.preflight_json || 'null'); } catch {}
+    const perms = preflight?.uniquePermissions;
+    if (perms?.checked && perms.count > 0) {
+      const a = perms.access;
+      r.section('Access not copied', { color: COLORS.amber });
+      r.kv([
+        ['Items with their own permissions', `${perms.count.toLocaleString()} (files/folders whose sharing differed from their parent)`],
+        ...(a ? [
+          ['Grants recorded', `${a.grants.toLocaleString()} (${a.links.toLocaleString()} via sharing links, ${a.anyoneLinks.toLocaleString()} of them "anyone" links)`],
+          ['External / guest', String(a.external), a.external > 0 ? COLORS.amber : null],
+          ['Full list', 'Job page > pre-flight notice > "Export access (CSV)" - who had access, role and how it was granted, per item'],
+        ] : [['Full list', 'Not collected - run the pre-flight check again to record who had access']]),
+        ['Status', 'Permissions are not copied by the migration: migrated items take the permissions of their target folder. Re-apply any access that is still needed.', COLORS.amber],
+      ]);
+    }
+
     // --- Problems ----------------------------------------------------------
     if (outcome.notMigrated.length > 0 || keptRows.length > 0) {
       r.section(`Attention required (${outcome.notMigrated.length + keptRows.length})`, { color: COLORS.red });
