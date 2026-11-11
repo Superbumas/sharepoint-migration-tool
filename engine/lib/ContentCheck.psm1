@@ -226,6 +226,48 @@ function Compare-PartMaps([hashtable]$Src, [hashtable]$Tgt) {
 # fetched from each side, whatever the file's size. Any doubt (no Range
 # support, zip64, unreadable index) throws, and the caller falls back to
 # the full download.
+# SharePoint throttles bursts of downloads with 429 (or 503) and a
+# Retry-After header. Every request here waits and retries instead of
+# giving up, so throttling slows a check down but never leaves files
+# "could not be checked".
+# $Gate (a synchronized hashtable shared by all lanes) makes one lane's
+# throttle slow every lane down: nobody sends until Gate.Until has passed.
+function Send-HttpWithRetry([System.Net.Http.HttpClient]$Http, [string]$Url, $Range, $Gate, [int]$MaxAttempts = 8) {
+    for ($attempt = 1; ; $attempt++) {
+        if ($Gate) {
+            $pause = ($Gate.Until - [DateTime]::UtcNow).TotalMilliseconds
+            if ($pause -gt 0) { Start-Sleep -Milliseconds ([int]$pause + (Get-Random -Maximum 500)) }
+        }
+        $req = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $Url)
+        if ($Range) { $req.Headers.Range = $Range }
+        $resp = $Http.SendAsync($req).GetAwaiter().GetResult()
+        $code = [int]$resp.StatusCode
+        if (($code -ne 429 -and $code -ne 503 -and $code -ne 504) -or $attempt -ge $MaxAttempts) { return $resp }
+        $wait = [Math]::Min(60, [Math]::Pow(2, $attempt))
+        $ra = $resp.Headers.RetryAfter
+        if ($ra -and $ra.Delta) { $wait = [Math]::Min(120, [Math]::Max(1, $ra.Delta.Value.TotalSeconds)) }
+        elseif ($ra -and $ra.Date) { $wait = [Math]::Min(120, [Math]::Max(1, ($ra.Date.Value - [DateTimeOffset]::UtcNow).TotalSeconds)) }
+        $resp.Dispose(); $req.Dispose()
+        if ($Gate) {
+            $until = [DateTime]::UtcNow.AddSeconds($wait)
+            [System.Threading.Monitor]::Enter($Gate.SyncRoot)
+            try {
+                if ($until -gt $Gate.Until) { $Gate.Until = $until }
+                $Gate.Throttles++
+                $Gate.LastWait = [int][Math]::Ceiling($wait)
+            } finally { [System.Threading.Monitor]::Exit($Gate.SyncRoot) }
+        } else {
+            Start-Sleep -Milliseconds ([int]($wait * 1000) + (Get-Random -Maximum 1000))
+        }
+    }
+}
+function Get-HttpBytes([System.Net.Http.HttpClient]$Http, [string]$Url, $Gate) {
+    $resp = Send-HttpWithRetry $Http $Url $null $Gate
+    try {
+        if (-not $resp.IsSuccessStatusCode) { throw "download returned $([int]$resp.StatusCode) ($($resp.ReasonPhrase))" }
+        return $resp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+    } finally { $resp.Dispose() }
+}
 function Read-ZipRange([hashtable]$Ref, [long]$Offset, [long]$Count) {
     if ($Count -le 0) { return [byte[]]::new(0) }
     if ($Ref.File) {
@@ -237,15 +279,13 @@ function Read-ZipRange([hashtable]$Ref, [long]$Offset, [long]$Count) {
             return $buf
         } finally { $fs.Dispose() }
     }
-    $req = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $Ref.Url)
-    $req.Headers.Range = [System.Net.Http.Headers.RangeHeaderValue]::new($Offset, $Offset + $Count - 1)
-    $resp = $Ref.Http.SendAsync($req).GetAwaiter().GetResult()
+    $resp = Send-HttpWithRetry $Ref.Http $Ref.Url ([System.Net.Http.Headers.RangeHeaderValue]::new($Offset, $Offset + $Count - 1)) $Ref.Gate
     try {
         if ([int]$resp.StatusCode -ne 206) { throw "range request returned $([int]$resp.StatusCode)" }
         $b = $resp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
         if ($b.Length -ne $Count) { throw 'range request returned the wrong length' }
         return $b
-    } finally { $resp.Dispose(); $req.Dispose() }
+    } finally { $resp.Dispose() }
 }
 function Read-ZipTail([hashtable]$Ref, [int]$Want) {
     if ($Ref.File) {
@@ -253,23 +293,20 @@ function Read-ZipTail([hashtable]$Ref, [int]$Want) {
         $off = [Math]::Max(0, $total - $Want)
         return @{ Bytes = (Read-ZipRange $Ref $off ($total - $off)); Total = $total }
     }
-    $req = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $Ref.Url)
-    $req.Headers.Range = [System.Net.Http.Headers.RangeHeaderValue]::new($null, $Want)
-    $resp = $Ref.Http.SendAsync($req).GetAwaiter().GetResult()
+    $resp = Send-HttpWithRetry $Ref.Http $Ref.Url ([System.Net.Http.Headers.RangeHeaderValue]::new($null, $Want)) $Ref.Gate
     if ([int]$resp.StatusCode -eq 416) {
         # SharePoint answers a suffix range longer than the file with 416
         # (not the whole file, as HTTP allows) - the file is smaller than
         # $Want, so just fetch all of it.
-        $resp.Dispose(); $req.Dispose()
-        $req = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $Ref.Url)
-        $resp = $Ref.Http.SendAsync($req).GetAwaiter().GetResult()
+        $resp.Dispose()
+        $resp = Send-HttpWithRetry $Ref.Http $Ref.Url $null $Ref.Gate
     }
     try {
         $b = $resp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
         if ([int]$resp.StatusCode -eq 200) { return @{ Bytes = $b; Total = [long]$b.Length } }
         if ([int]$resp.StatusCode -ne 206 -or -not $resp.Content.Headers.ContentRange.Length) { throw "range request returned $([int]$resp.StatusCode)" }
         return @{ Bytes = $b; Total = [long]$resp.Content.Headers.ContentRange.Length }
-    } finally { $resp.Dispose(); $req.Dispose() }
+    } finally { $resp.Dispose() }
 }
 function Get-ZipDirectory([hashtable]$Ref) {
     $tail = Read-ZipTail $Ref 65536
@@ -424,6 +461,13 @@ function Invoke-RewrittenContentCheck {
         [int]$LinkMaxMinutes = 40
     )
     $modulePath = $PSCommandPath
+    # Shared by all lanes: throttle pause, and counters for the caller's log.
+    $gate = [hashtable]::Synchronized(@{ Until = [DateTime]::UtcNow; Throttles = 0; LastWait = 0 })
+    # Same decorated User-Agent as the copy engine (UserAgent.psm1);
+    # Microsoft throttles undecorated traffic harder.
+    $ua = if (Get-Command Get-MigrationUserAgent -ErrorAction SilentlyContinue) { Get-MigrationUserAgent } else { $null }
+    $throttlesReported = 0
+    $throttleNoteAt = [datetime]::MinValue
     $done = 0
     [long]$bytesDone = 0
     $results = [System.Collections.Generic.List[object]]::new()
@@ -461,20 +505,22 @@ function Invoke-RewrittenContentCheck {
                 }
                 $http = [System.Net.Http.HttpClient]::new()
                 $http.Timeout = [TimeSpan]::FromMinutes(10)
+                if ($using:ua) { $null = $http.DefaultRequestHeaders.TryAddWithoutValidation('User-Agent', $using:ua) }
+                $gate = $using:gate
                 try {
                     # Modern Office files: compare the zip indexes (a few KB
                     # each) instead of downloading both files.
                     try {
                         $z = Test-RemoteZipContent -Extension $it.Ext `
-                            -Source @{ Http = $http; Url = $it.SourceUrl; File = $it.SourceFile } `
-                            -Target @{ Http = $http; Url = $it.TargetUrl }
+                            -Source @{ Http = $http; Url = $it.SourceUrl; File = $it.SourceFile; Gate = $gate } `
+                            -Target @{ Http = $http; Url = $it.TargetUrl; Gate = $gate }
                         if ($z) { return @{ Rel = $it.Rel; Key = $it.Key; Size = $it.Size; Status = $z.Status; Detail = $z.Detail; Fast = $true } }
                     } catch { }
                     if ($it.Size -gt $using:MaxBytes) {
                         return @{ Rel = $it.Rel; Key = $it.Key; Size = $it.Size; Status = 'unchecked'; Detail = 'too large for a content check' }
                     }
-                    $src = if ($it.SourceFile) { [System.IO.File]::ReadAllBytes($it.SourceFile) } else { $http.GetByteArrayAsync($it.SourceUrl).GetAwaiter().GetResult() }
-                    $tgt = $http.GetByteArrayAsync($it.TargetUrl).GetAwaiter().GetResult()
+                    $src = if ($it.SourceFile) { [System.IO.File]::ReadAllBytes($it.SourceFile) } else { Get-HttpBytes $http $it.SourceUrl $gate }
+                    $tgt = Get-HttpBytes $http $it.TargetUrl $gate
                 } finally { $http.Dispose() }
                 $r = Test-RewrittenFileContent -SourceBytes $src -TargetBytes $tgt -Extension $it.Ext
                 return @{ Rel = $it.Rel; Key = $it.Key; Size = $it.Size; Status = $r.Status; Detail = $r.Detail }
@@ -485,10 +531,15 @@ function Invoke-RewrittenContentCheck {
             $results.Add(@{ Rel = $_.Rel; Key = $_.Key; Status = $_.Status; Detail = $_.Detail })
             $done++
             $bytesDone += [long]$_.Size
-            if ($OnProgress) { & $OnProgress $done $bytesDone $_.Rel }
+            $throttleNote = $null
+            # At most one throttle note every 30 s, so the log isn't flooded.
+            if ($gate.Throttles -gt $throttlesReported -and ((Get-Date) - $throttleNoteAt).TotalSeconds -ge 30) {
+                $throttleNote = $gate.LastWait; $throttlesReported = $gate.Throttles; $throttleNoteAt = Get-Date
+            }
+            if ($OnProgress) { & $OnProgress $done $bytesDone $_.Rel $throttleNote }
         }
     }
     return $results
 }
 
-Export-ModuleMember -Function Test-RewrittenFileContent, Test-RemoteZipContent, Invoke-RewrittenContentCheck
+Export-ModuleMember -Function Test-RewrittenFileContent, Test-RemoteZipContent, Get-HttpBytes, Invoke-RewrittenContentCheck

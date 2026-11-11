@@ -403,7 +403,8 @@ function Invoke-VerificationPhase {
                     $out
                 }
                 $checked = Invoke-RewrittenContentCheck -Items $todo.ToArray() -RefreshLinks $ccRefresh -OnProgress {
-                    param($n, $bytes, $rel)
+                    param($n, $bytes, $rel, $throttleWait)
+                    if ($throttleWait) { Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Content check: throttled by SharePoint, pausing about $($throttleWait)s and retrying (nothing is skipped)." } }
                     Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal; bytesDone = $bytes; bytesTotal = $ccTotalBytes; last = $rel }
                 }
                 foreach ($c in $checked) {
@@ -470,7 +471,7 @@ function Invoke-VerificationPhase {
             problemsTruncated = ($problems -gt $maxReportedProblems)
         }
         Write-EngineEvent -Type 'verification_summary' -Data @{ verification = $summary }
-        $verdict = if ($problems -eq 0) { 'PASSED' } else { "FOUND $problems PROBLEM(S)" }
+        $verdict = if ($problems -gt 0) { "FOUND $problems PROBLEM(S)" } elseif ($contentUnchecked.Count -gt 0) { "PASSED, BUT $($contentUnchecked.Count) FILE(S) NOT YET CONTENT-CHECKED (click Verify again to check only those)" } else { 'PASSED' }
         Write-EngineEvent -Type 'log' -Data @{ level = ($problems -eq 0 ? 'info' : 'error'); message = "Verification ${verdict}: $($result.Identical) of $($result.SourceFiles) files verified identical (hash), $($contentVerified.Count) re-stamped by SharePoint and verified identical in content, $($contentUnchecked.Count) re-stamped but not content-checked, $($result.Missing.Count) missing, $($result.SizeMismatch.Count) size / $($result.HashMismatch.Count) content mismatches." }
         return @{ Summary = $summary; Result = $result }
     } catch {
@@ -748,7 +749,8 @@ try {
                     $out
                 }
                 $checked = Invoke-RewrittenContentCheck -Items $todo.ToArray() -RefreshLinks $ccRefresh -OnProgress {
-                    param($n, $bytes, $rel)
+                    param($n, $bytes, $rel, $throttleWait)
+                    if ($throttleWait) { Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Content check: throttled by SharePoint, pausing about $($throttleWait)s and retrying (nothing is skipped)." } }
                     Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal; bytesDone = $bytes; bytesTotal = $ccTotalBytes; last = $rel }
                 }
                 foreach ($c in $checked) {
