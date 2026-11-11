@@ -80,7 +80,7 @@ function phaseLabel(phase) {
     case 'stamping_folders':
       return `Restoring folder dates and owners — ${n(phase.done)} of ${n(phase.total)}`;
     case 'content_check':
-      return `Checking content of files SharePoint rewrote — ${n(phase.done)} of ${n(phase.total)}`;
+      return `Checking content of files SharePoint rewrote — ${n(phase.done)} of ${n(phase.total)}${phase.bytesTotal ? ` · ${formatBytes(phase.bytesDone || 0)} of ${formatBytes(phase.bytesTotal)}` : ''}${phase.last ? ` · last: ${String(phase.last).split('/').pop()}` : ''}`;
     case 'purging':
       return `Purging recycle bin — ${n(phase.purged)} of ${n(phase.total)} permanently deleted`;
     case 'clearing_folders':

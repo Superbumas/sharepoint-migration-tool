@@ -390,9 +390,21 @@ function Invoke-VerificationPhase {
                 Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Content check: comparing $($todo.Count) file(s) SharePoint rewrote (Office documents, web pages) part by part against their originals$(if ($ccCache.Count) { " ($($result.OfficeRewritten.Count - $todo.Count) unchanged since the last check)" })..." }
                 $ccStart = Get-Date
                 $ccTotal = $todo.Count
-                $checked = Invoke-RewrittenContentCheck -Items $todo.ToArray() -OnProgress {
-                    param($n)
-                    Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal }
+                [long]$ccTotalBytes = ($todo | Measure-Object -Property Size -Sum).Sum
+                # Fresh download links for long checks (Graph's expire after
+                # about an hour): re-list both sides with links included.
+                $ccSrcLinks = if ($isFsSource) { $null } else { @{ Conn = $SourceConn; Drive = $srcDriveId; Root = $SourcePathInLib } }
+                $ccTgtLinks = if ($isOneDrive) { @{ Conn = $OneDriveCtx.Connection; Drive = $OneDriveCtx.DriveId; Root = $OneDriveCtx.PathRoot } } else { @{ Conn = $TargetConn; Drive = $tgtDriveId; Root = $TargetPathInLib } }
+                $ccRefresh = {
+                    Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = 'Content check: refreshing download links (they expire after about an hour)...' }
+                    $out = @{ Source = @{}; Target = @{} }
+                    if ($ccSrcLinks) { $m = Get-GraphFileMap -Connection $ccSrcLinks.Conn -DriveId $ccSrcLinks.Drive -RootPath $ccSrcLinks.Root -IncludeDownloadUrl; foreach ($k in @($m.Keys)) { $out.Source[$k] = $m[$k].DownloadUrl } }
+                    $m = Get-GraphFileMap -Connection $ccTgtLinks.Conn -DriveId $ccTgtLinks.Drive -RootPath $ccTgtLinks.Root -IncludeDownloadUrl; foreach ($k in @($m.Keys)) { $out.Target[$k] = $m[$k].DownloadUrl }
+                    $out
+                }
+                $checked = Invoke-RewrittenContentCheck -Items $todo.ToArray() -RefreshLinks $ccRefresh -OnProgress {
+                    param($n, $bytes, $rel)
+                    Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal; bytesDone = $bytes; bytesTotal = $ccTotalBytes; last = $rel }
                 }
                 foreach ($c in $checked) {
                     $ccCache[$c.Key] = @{ Status = $c.Status; Detail = $c.Detail }
@@ -725,9 +737,19 @@ try {
             if ($todo.Count -gt 0) {
                 Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Cleanup check: comparing $($todo.Count) file(s) SharePoint rewrote part by part against their originals before anything is recycled..." }
                 $ccTotal = $todo.Count
-                $checked = Invoke-RewrittenContentCheck -Items $todo.ToArray() -OnProgress {
-                    param($n)
-                    Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal }
+                [long]$ccTotalBytes = ($todo | Measure-Object -Property Size -Sum).Sum
+                $ccSrcLinks = @{ Conn = $sourceConn; Drive = $srcDriveId; Root = $SourcePath }
+                $ccTgtLinks = if ($isOneDriveTarget) { @{ Conn = $oneDriveCtx.Connection; Drive = $oneDriveCtx.DriveId; Root = $oneDriveCtx.PathRoot } } else { @{ Conn = $targetConn; Drive = $tgtDriveId; Root = $targetPathInLib } }
+                $ccRefresh = {
+                    Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = 'Cleanup check: refreshing download links (they expire after about an hour)...' }
+                    $out = @{ Source = @{}; Target = @{} }
+                    $m = Get-GraphFileMap -Connection $ccSrcLinks.Conn -DriveId $ccSrcLinks.Drive -RootPath $ccSrcLinks.Root -IncludeDownloadUrl; foreach ($k in @($m.Keys)) { $out.Source[$k] = $m[$k].DownloadUrl }
+                    $m = Get-GraphFileMap -Connection $ccTgtLinks.Conn -DriveId $ccTgtLinks.Drive -RootPath $ccTgtLinks.Root -IncludeDownloadUrl; foreach ($k in @($m.Keys)) { $out.Target[$k] = $m[$k].DownloadUrl }
+                    $out
+                }
+                $checked = Invoke-RewrittenContentCheck -Items $todo.ToArray() -RefreshLinks $ccRefresh -OnProgress {
+                    param($n, $bytes, $rel)
+                    Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal; bytesDone = $bytes; bytesTotal = $ccTotalBytes; last = $rel }
                 }
                 foreach ($c in $checked) {
                     $ccCache[$c.Key] = @{ Status = $c.Status; Detail = $c.Detail }

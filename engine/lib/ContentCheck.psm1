@@ -278,41 +278,75 @@ function Test-RewrittenFileContent {
 # SourceUrl | SourceFile; TargetUrl; Key }. Download URLs are Graph's
 # pre-authenticated @microsoft.graph.downloadUrl, so lanes need no PnP
 # connection. Returns one @{ Rel; Key; Status; Detail } per item.
+#
+# Smallest files go first, so most of a library is done quickly and a few
+# big decks don't hold up the count. Work runs in batches: big files (over
+# 50 MB) only two at a time to keep memory down, and Graph's download links
+# (valid about an hour) are refreshed with -RefreshLinks before a batch once
+# they are older than -LinkMaxMinutes. OnProgress gets (done, bytesDone, rel).
 function Invoke-RewrittenContentCheck {
     param(
         [Parameter(Mandatory)][object[]]$Items,
         [int]$ThrottleLimit = 8,
         [long]$MaxBytes = 300MB,
-        [scriptblock]$OnProgress
+        [scriptblock]$OnProgress,
+        # Returns @{ Source = @{ rel = url }; Target = @{ rel = url } }.
+        [scriptblock]$RefreshLinks,
+        [int]$LinkMaxMinutes = 40
     )
     $modulePath = $PSCommandPath
     $done = 0
+    [long]$bytesDone = 0
     $results = [System.Collections.Generic.List[object]]::new()
-    $Items | ForEach-Object -ThrottleLimit $ThrottleLimit -Parallel {
-        $it = $_
-        Import-Module $using:modulePath
-        try {
-            if ($it.Size -gt $using:MaxBytes) {
-                return @{ Rel = $it.Rel; Key = $it.Key; Status = 'unchecked'; Detail = 'too large for a content check' }
-            }
-            if (-not $it.TargetUrl -or (-not $it.SourceUrl -and -not $it.SourceFile)) {
-                return @{ Rel = $it.Rel; Key = $it.Key; Status = 'unchecked'; Detail = 'no download link available' }
-            }
-            $http = [System.Net.Http.HttpClient]::new()
-            $http.Timeout = [TimeSpan]::FromMinutes(10)
-            try {
-                $src = if ($it.SourceFile) { [System.IO.File]::ReadAllBytes($it.SourceFile) } else { $http.GetByteArrayAsync($it.SourceUrl).GetAwaiter().GetResult() }
-                $tgt = $http.GetByteArrayAsync($it.TargetUrl).GetAwaiter().GetResult()
-            } finally { $http.Dispose() }
-            $r = Test-RewrittenFileContent -SourceBytes $src -TargetBytes $tgt -Extension $it.Ext
-            return @{ Rel = $it.Rel; Key = $it.Key; Status = $r.Status; Detail = $r.Detail }
-        } catch {
-            return @{ Rel = $it.Rel; Key = $it.Key; Status = 'unchecked'; Detail = "download failed: $($_.Exception.Message)" }
+    $ordered = @($Items | Sort-Object { [long]$_.Size })
+    $linksAt = Get-Date
+    $bigFile = 50MB
+    $i = 0
+    while ($i -lt $ordered.Count) {
+        $isBig = [long]$ordered[$i].Size -gt $bigFile
+        $batchSize = if ($isBig) { 4 } else { [Math]::Max(1, $ThrottleLimit * 4) }
+        $batch = [System.Collections.Generic.List[object]]::new()
+        while ($i -lt $ordered.Count -and $batch.Count -lt $batchSize -and (([long]$ordered[$i].Size -gt $bigFile) -eq $isBig)) {
+            $batch.Add($ordered[$i]); $i++
         }
-    } | ForEach-Object {
-        $results.Add($_)
-        $done++
-        if ($OnProgress) { & $OnProgress $done }
+        if ($RefreshLinks -and ((Get-Date) - $linksAt).TotalMinutes -ge $LinkMaxMinutes) {
+            try {
+                $fresh = & $RefreshLinks
+                foreach ($it in @($ordered[($i - $batch.Count)..($ordered.Count - 1)])) {
+                    if (-not $it.SourceFile -and $fresh.Source -and $fresh.Source.ContainsKey($it.Rel)) { $it.SourceUrl = $fresh.Source[$it.Rel] }
+                    if ($fresh.Target -and $fresh.Target.ContainsKey($it.Rel)) { $it.TargetUrl = $fresh.Target[$it.Rel] }
+                }
+                $linksAt = Get-Date
+            } catch { }
+        }
+        $lanes = if ($isBig) { [Math]::Min(2, $ThrottleLimit) } else { $ThrottleLimit }
+        $batch.ToArray() | ForEach-Object -ThrottleLimit $lanes -Parallel {
+            $it = $_
+            Import-Module $using:modulePath
+            try {
+                if ($it.Size -gt $using:MaxBytes) {
+                    return @{ Rel = $it.Rel; Key = $it.Key; Size = $it.Size; Status = 'unchecked'; Detail = 'too large for a content check' }
+                }
+                if (-not $it.TargetUrl -or (-not $it.SourceUrl -and -not $it.SourceFile)) {
+                    return @{ Rel = $it.Rel; Key = $it.Key; Size = $it.Size; Status = 'unchecked'; Detail = 'no download link available' }
+                }
+                $http = [System.Net.Http.HttpClient]::new()
+                $http.Timeout = [TimeSpan]::FromMinutes(10)
+                try {
+                    $src = if ($it.SourceFile) { [System.IO.File]::ReadAllBytes($it.SourceFile) } else { $http.GetByteArrayAsync($it.SourceUrl).GetAwaiter().GetResult() }
+                    $tgt = $http.GetByteArrayAsync($it.TargetUrl).GetAwaiter().GetResult()
+                } finally { $http.Dispose() }
+                $r = Test-RewrittenFileContent -SourceBytes $src -TargetBytes $tgt -Extension $it.Ext
+                return @{ Rel = $it.Rel; Key = $it.Key; Size = $it.Size; Status = $r.Status; Detail = $r.Detail }
+            } catch {
+                return @{ Rel = $it.Rel; Key = $it.Key; Size = $it.Size; Status = 'unchecked'; Detail = "download failed: $($_.Exception.Message)" }
+            }
+        } | ForEach-Object {
+            $results.Add(@{ Rel = $_.Rel; Key = $_.Key; Status = $_.Status; Detail = $_.Detail })
+            $done++
+            $bytesDone += [long]$_.Size
+            if ($OnProgress) { & $OnProgress $done $bytesDone $_.Rel }
+        }
     }
     return $results
 }
