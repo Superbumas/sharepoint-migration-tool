@@ -193,18 +193,48 @@ function Get-NormalizedOpcPart([string]$Name, [byte[]]$Bytes) {
     }
     return Get-Sha256Hex $Bytes
 }
+# [Content_Types].xml compared by what it means: the content type each
+# real part of the package resolves to (its Override, else the Default for
+# its extension). SharePoint (and Office on re-save) may add, drop or
+# reorder unused Defaults/Overrides, change case or URL-escaping of part
+# names, which does not change how any part is read. A part whose type
+# really changes is still caught.
+function Get-EffectiveContentTypes([byte[]]$Bytes, [string[]]$PartNames) {
+    [xml]$x = [System.Text.Encoding]::UTF8.GetString($Bytes).TrimStart([char]0xFEFF)
+    $defaults = @{}; $overrides = @{}
+    foreach ($n in $x.DocumentElement.ChildNodes) {
+        if ($n.LocalName -eq 'Default') { $defaults["$($n.Extension)".ToLowerInvariant()] = "$($n.ContentType)".Trim().ToLowerInvariant() }
+        elseif ($n.LocalName -eq 'Override') {
+            $pn = [System.Uri]::UnescapeDataString("$($n.PartName)").TrimStart('/').ToLowerInvariant()
+            $overrides[$pn] = "$($n.ContentType)".Trim().ToLowerInvariant()
+        }
+    }
+    $lines = foreach ($name in $PartNames) {
+        $pn = [System.Uri]::UnescapeDataString($name.Replace('\', '/')).TrimStart('/').ToLowerInvariant()
+        if ($pn.EndsWith('/') -or $pn -eq '[content_types].xml' -or (Test-IgnoredOpcPart $pn)) { continue }
+        $type = if ($overrides.ContainsKey($pn)) { $overrides[$pn] } else {
+            $ext = [System.IO.Path]::GetExtension($pn).TrimStart('.')
+            if ($defaults.ContainsKey($ext)) { $defaults[$ext] } else { '(none)' }
+        }
+        "$pn|$type"
+    }
+    return (($lines | Sort-Object) -join "`n")
+}
 function Get-OpcPartMap([byte[]]$Bytes) {
     $map = @{}
     $ms = [System.IO.MemoryStream]::new($Bytes)
     $zip = [System.IO.Compression.ZipArchive]::new($ms, [System.IO.Compression.ZipArchiveMode]::Read)
     try {
+        $allNames = @($zip.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
         foreach ($e in $zip.Entries) {
             if ($e.FullName.EndsWith('/')) { continue }
             $name = $e.FullName.Replace('\', '/')
             if (Test-IgnoredOpcPart $name) { continue }
             $s = $e.Open(); $buf = [System.IO.MemoryStream]::new()
             try { $s.CopyTo($buf) } finally { $s.Dispose() }
-            $map[$name.ToLowerInvariant()] = Get-NormalizedOpcPart $name $buf.ToArray()
+            $map[$name.ToLowerInvariant()] = if ($name.ToLowerInvariant() -eq '[content_types].xml') {
+                Get-EffectiveContentTypes $buf.ToArray() $allNames
+            } else { Get-NormalizedOpcPart $name $buf.ToArray() }
         }
     } finally { $zip.Dispose(); $ms.Dispose() }
     return $map
@@ -378,7 +408,11 @@ function Test-RemoteZipContent {
         if (-not $t) { $diff.Add("missing $k"); continue }
         if (-not $s) { $diff.Add("added $k"); continue }
         if ($s.Crc -eq $t.Crc -and $s.USize -eq $t.USize) { continue }
-        if ($k -eq '[content_types].xml' -or $k.EndsWith('.rels')) {
+        if ($k -eq '[content_types].xml') {
+            $sNames = @($src.Values | ForEach-Object { $_.Name }); $tNames = @($tgt.Values | ForEach-Object { $_.Name })
+            if ((Get-EffectiveContentTypes (Get-ZipEntryBytes $Source $s) $sNames) -eq (Get-EffectiveContentTypes (Get-ZipEntryBytes $Target $t) $tNames)) { continue }
+        }
+        elseif ($k.EndsWith('.rels')) {
             # Parts SharePoint edits: compare with its own entries removed.
             if ((Get-NormalizedOpcPart $s.Name (Get-ZipEntryBytes $Source $s)) -eq (Get-NormalizedOpcPart $t.Name (Get-ZipEntryBytes $Target $t))) { continue }
         }
