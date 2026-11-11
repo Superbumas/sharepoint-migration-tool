@@ -596,7 +596,7 @@ try {
         # Same acceptance rule as verification: exact size+hash, hash
         # unavailable degrades to size-only, and Office documents may differ
         # (SharePoint property re-stamp) without failing.
-        $officeExtensions = @('.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.docm', '.xlsm', '.pptm', '.one', '.vsdx')
+        $officeExtensions = @('.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.docm', '.xlsm', '.pptm', '.one', '.vsdx', '.xlsb', '.pps', '.ppsx', '.ppsm', '.pot', '.potx', '.potm', '.dot', '.dotx', '.dotm', '.xlt', '.xltx', '.xltm')
         $deleted = 0; $kept = 0
         $keptList = [System.Collections.Generic.List[string]]::new()
         foreach ($rel in @($srcMap.Keys)) {
@@ -644,7 +644,7 @@ try {
         $foldersDeleted = 0
         try {
             Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = 'Files done - scanning the source tree for now-empty folders to recycle (this walks every folder; large trees take a while)...' }
-            $treeAfter = Get-PnPFolderTree -Connection $sourceConn -RootSiteRelativeUrl $sourceRoot -OnProgress {
+            $treeAfter = Get-PnPFolderTree -Connection $sourceConn -RootSiteRelativeUrl $sourceRoot -SkipLibraryFormsFolder:(-not ([string]$SourcePath).Trim('/')) -OnProgress {
                 param($folderCount, $fileCount, $pendingCount)
                 Write-PhaseProgress -Phase 'enumerating' -Data @{ folders = $folderCount; files = $fileCount; pending = $pendingCount }
             }
@@ -802,9 +802,13 @@ try {
             $cache = Get-Content -Path $TreeCachePath -Raw | ConvertFrom-Json
             $ageHours = ((Get-Date).ToUniversalTime() - [datetime]$cache.generatedAtUtc).TotalHours
             if ($cache.sourceKey -eq $sourceKey -and $ageHours -lt $TREE_CACHE_MAX_AGE_HOURS) {
+                # Scans cached before the library "Forms" folder was excluded
+                # (see Get-PnPFolderTree -SkipLibraryFormsFolder) still list
+                # its system files - drop them the same way.
+                $skipForms = -not ([string]$SourcePath).Trim('/')
                 $tree = [pscustomobject]@{
-                    Files   = @($cache.files)
-                    Folders = @($cache.folders | ForEach-Object { [string]$_ })
+                    Files   = @($cache.files | Where-Object { -not ($skipForms -and ($_.RelativeFromRoot -eq 'Forms' -or "$($_.RelativeFromRoot)" -like 'Forms/*')) })
+                    Folders = @($cache.folders | ForEach-Object { [string]$_ } | Where-Object { -not ($skipForms -and ($_ -eq 'Forms' -or $_ -like 'Forms/*')) })
                 }
                 $cachedFoldersEnsuredFor = $cache.foldersEnsuredFor
                 Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Reusing source tree scan from $([Math]::Round($ageHours * 60)) minute(s) ago ($(@($cache.files).Count) files) - every file is still re-verified against the target before copying. Files added to the source since then are picked up by the next fresh run." }
@@ -840,7 +844,7 @@ try {
             }
         } else {
             Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Enumerating source tree under '$sourceRoot'" }
-            $tree = Get-PnPFolderTree -Connection $sourceConn -RootSiteRelativeUrl $sourceRoot -OnProgress {
+            $tree = Get-PnPFolderTree -Connection $sourceConn -RootSiteRelativeUrl $sourceRoot -SkipLibraryFormsFolder:(-not ([string]$SourcePath).Trim('/')) -OnProgress {
                 param($folderCount, $fileCount, $pendingCount)
                 Write-PhaseProgress -Phase 'enumerating' -Data @{ folders = $folderCount; files = $fileCount; pending = $pendingCount }
             }
@@ -1028,7 +1032,7 @@ try {
         # script-scope functions): a cross-host copy, e.g. OneDrive (-my
         # host) into a SharePoint site, needs an absolute -TargetUrl.
         # Same list as Verification.psm1's OfficeExtensions.
-        $laneOfficeExtensions = @('.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.docm', '.xlsm', '.pptm', '.one', '.vsdx', '.msg')
+        $laneOfficeExtensions = @('.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.docm', '.xlsm', '.pptm', '.one', '.vsdx', '.msg', '.xlsb', '.pps', '.ppsx', '.ppsm', '.pot', '.potx', '.potm', '.dot', '.dotx', '.dotm', '.xlt', '.xltx', '.xltm')
         $laneTargetUrlPrefix = ''
         if ($SourceSiteUrl -and $TargetSiteUrl) {
             $laneSrcUri = [Uri]$SourceSiteUrl; $laneTgtUri = [Uri]$TargetSiteUrl
