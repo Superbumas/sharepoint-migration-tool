@@ -56,7 +56,9 @@ function styleFor(line) {
 
 // Log rows that begin a new run of the job: the live log and its
 // Failures/Warnings counts start from the latest one.
-const RUN_START_EVENTS = new Set(['job_restarted', 'job_run', 'job_resumed']);
+// Verify / clean-up / purge on a finished job also start a fresh view, so a
+// Verify doesn't sit under the previous run's copied lines.
+const RUN_START_EVENTS = new Set(['job_restarted', 'job_run', 'job_resumed', 'verify_started', 'cleanup_started', 'purge_started']);
 
 // Human line for the phase banner, per engine phase_progress event shape
 // (engine/Invoke-MigrationJob.ps1's Write-PhaseProgress call sites).
@@ -473,10 +475,13 @@ export default function JobDetail() {
   if (isLive && job.progress.itemsFailed > 0) {
     notices.push({ key: 'failed', tone: 'warn', title: `${job.progress.itemsFailed} file(s) failed so far`, detail: 'see the Failures filter in the log', action: <button type="button" onClick={() => setLogFilter('failures')} className="text-xs font-medium text-blue-600 hover:underline shrink-0">Show in log</button> });
   }
+  // A Verify / clean-up / pre-flight on a finished job reports a phase while
+  // it runs; until it ends, the stored verification is the previous result.
+  const backgroundOp = job.status === 'completed' && !!job.phase;
   if (v) {
     notices.push({
-      key: 'verify', tone: v.ok ? 'ok' : 'error',
-      title: v.ok ? `Verified: ${v.identical} of ${v.sourceFiles} files byte-identical` : `Verification found ${problemCount} problem(s)`,
+      key: 'verify', tone: backgroundOp ? 'info' : v.ok ? 'ok' : 'error',
+      title: backgroundOp ? 'Previous verification (being re-checked now)' : v.ok ? `Verified: ${v.identical} of ${v.sourceFiles} files byte-identical` : `Verification found ${problemCount} problem(s)`,
       detail: [
         !v.ok && `${v.missing} missing · ${v.sizeMismatch} size / ${v.hashMismatch} hash mismatches`,
         v.officeRewritten > 0 && (v.contentVerified != null
@@ -489,7 +494,7 @@ export default function JobDetail() {
           {!v.ok && v.problems?.length > 0 && (
             <button type="button" onClick={() => setShowProblems((s) => !s)} className="text-xs font-medium text-blue-600 hover:underline shrink-0">{showProblems ? 'Hide files' : `Show ${v.problems.length} files`}</button>
           )}
-          {!v.ok && job.status === 'completed' && <button type="button" onClick={() => act('restart')} className="btn-primary shrink-0">Re-run to repair…</button>}
+          {!v.ok && job.status === 'completed' && !backgroundOp && <button type="button" onClick={() => act('restart')} className="btn-primary shrink-0">Re-run to repair…</button>}
         </>
       ),
       expanded: !v.ok && showProblems && v.problems?.length > 0 && (
@@ -527,7 +532,7 @@ export default function JobDetail() {
   }
   // Source cleanup only exists for SharePoint sources - the engine never
   // deletes from a file share (no recycle bin to soften it).
-  if (job.status === 'completed' && v?.ok && !job.cleanup && job.source.provider !== 'filesystem') {
+  if (job.status === 'completed' && !backgroundOp && v?.ok && !job.cleanup && job.source.provider !== 'filesystem') {
     notices.push({
       key: 'archive', tone: 'info', title: 'Archive complete?',
       detail: 'every file is hash-verified at the target · move the source files to the site\'s recycle bin (recoverable ~93 days), each re-verified once more at deletion time',
@@ -568,7 +573,7 @@ export default function JobDetail() {
                 {preflightBusy ? 'Checking…' : 'Pre-flight check'}
               </button>
             )}
-            {job.status === 'completed' && <button type="button" disabled={busy} onClick={() => act('verify')} className="btn-secondary">Verify</button>}
+            {job.status === 'completed' && <button type="button" disabled={busy || backgroundOp} onClick={() => act('verify')} className="btn-secondary">Verify</button>}
             {['completed', 'failed', 'cancelled'].includes(job.status) && <button type="button" disabled={busy} onClick={() => act('delete')} className="btn-secondary">Delete</button>}
           </div>
         </div>
