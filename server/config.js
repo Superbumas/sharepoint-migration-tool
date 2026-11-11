@@ -88,6 +88,11 @@ module.exports = {
 
   defaultJobConcurrency: parseInt(process.env.DEFAULT_JOB_CONCURRENCY || '4', 10),
   globalMaxConcurrency: parseInt(process.env.GLOBAL_MAX_CONCURRENCY || '12', 10),
+  // How many jobs the run queue keeps running at once per client tenant.
+  // The default (3) is GLOBAL_MAX_CONCURRENCY / DEFAULT_JOB_CONCURRENCY, so
+  // queued jobs each get their full concurrency. A job started by hand with
+  // Run is not held back by this.
+  runQueueMaxJobs: Math.max(1, parseInt(process.env.RUN_QUEUE_MAX_JOBS || '3', 10) || 3),
   retryRateBackoffThreshold: parseFloat(process.env.RETRY_RATE_BACKOFF_THRESHOLD || '0.20'),
   slowTransferThresholdMs: parseInt(process.env.SLOW_TRANSFER_THRESHOLD_MS || '30000', 10),
 

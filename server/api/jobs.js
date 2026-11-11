@@ -5,6 +5,7 @@ const orchestrator = require('../jobs/orchestrator');
 const { mapJob } = require('../util/mapJob');
 const { ensureEngineSiteAccess } = require('../graph/siteAccess');
 const clog = require('../util/consoleLog');
+const config = require('../config');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -46,11 +47,14 @@ router.get('/jobs', (req, res) => {
   const includeDeleted = req.query.includeDeleted === 'true';
   const status = req.query.status;
   const owner = ownerScope(req);
-  let sql = `SELECT * FROM jobs WHERE tenant_id = ?${owner.sql}`;
-  const params = [getTenantId(req), ...owner.params];
-  if (!includeDeleted) sql += ' AND deleted_at IS NULL';
-  if (status) { sql += ' AND status = ?'; params.push(status); }
-  sql += ' ORDER BY created_at DESC';
+  // Joined to the mapping only for its project (group) name, so the queue
+  // can be filtered and run one project at a time.
+  const ownerJ = ownerScope(req, 'j');
+  let sql = `SELECT j.*, m.group_name FROM jobs j LEFT JOIN mappings m ON m.id = j.mapping_id WHERE j.tenant_id = ?${ownerJ.sql}`;
+  const params = [getTenantId(req), ...ownerJ.params];
+  if (!includeDeleted) sql += ' AND j.deleted_at IS NULL';
+  if (status) { sql += ' AND j.status = ?'; params.push(status); }
+  sql += ' ORDER BY j.created_at DESC';
   const rows = db.prepare(sql).all(...params);
   res.json({ items: rows.map(mapJob) });
 });
@@ -109,9 +113,9 @@ router.post('/mappings/:mappingId/jobs', (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/jobs/bulk-create', (req, res, next) => {
+router.post('/jobs/bulk-create', async (req, res, next) => {
   try {
-    const { mappingIds, approve } = req.body || {};
+    const { mappingIds, approve, run } = req.body || {};
     if (!Array.isArray(mappingIds) || !mappingIds.length) {
       return res.status(400).json({ error: 'mappingIds array is required' });
     }
@@ -129,11 +133,90 @@ router.post('/jobs/bulk-create', (req, res, next) => {
       let job = orchestrator.createJobFromMapping(mapping, actor);
       // approve: true is "create and approve" in one step for a batch - the
       // same two audit events as doing each job by hand.
-      if (approve === true) job = orchestrator.approveJob(job.id, actor, tenantId);
+      if (approve === true || run === true) job = orchestrator.approveJob(job.id, actor, tenantId);
       created.push(mapJob(job));
     }
-    res.status(201).json({ items: created, skippedActive: skipped.length });
+    // run: true also sends them to the run queue (see /jobs/bulk-run).
+    if (run === true && created.length > 0) {
+      await queueRuns(req, created.map((j) => j.id));
+    }
+    res.status(201).json({ items: created, skippedActive: skipped.length, runQueued: run === true ? created.length : 0 });
   } catch (err) { next(err); }
+});
+
+// Sends approved jobs to the run queue: the orchestrator runs a few at a
+// time and starts the next as each finishes. Engine site access is checked
+// once per distinct site for the whole batch (same best-effort check a
+// single Run does), then every job is queued and the queue is pumped once.
+async function queueRuns(req, jobIds) {
+  const actor = getActor(req);
+  const tenantId = getTenantId(req);
+  const jobs = jobIds.map((id) => visibleJob(req, id)).filter((j) => j && j.status === 'approved');
+  const sites = new Set();
+  for (const job of jobs) {
+    if (job.source_site_url) sites.add(job.source_site_url);
+    if (job.target_provider !== 'azure_blob' && job.target_site_url) sites.add(job.target_site_url);
+  }
+  for (const siteUrl of sites) {
+    try {
+      const result = await ensureEngineSiteAccess(req, siteUrl);
+      if (result.action !== 'already-granted') clog.ok('grant', `Auto-${result.action} engine access on ${siteUrl} before queued run`);
+    } catch (err) {
+      clog.warn('grant', `Pre-run grant check failed for ${siteUrl} (${err.message}) - continuing; engine preflight will verify.`);
+    }
+  }
+  for (const job of jobs) orchestrator.queueRun(job.id, actor, tenantId);
+  orchestrator.pumpRunQueue(tenantId);
+  return jobs.length;
+}
+
+// Approve (where still needed) and queue a list of jobs to run. Jobs in any
+// other status than queued/approved are skipped and counted.
+router.post('/jobs/bulk-run', async (req, res, next) => {
+  try {
+    const { jobIds } = req.body || {};
+    if (!Array.isArray(jobIds) || !jobIds.length) {
+      return res.status(400).json({ error: 'jobIds array is required' });
+    }
+    const actor = getActor(req);
+    const tenantId = getTenantId(req);
+    const ready = [];
+    let skipped = 0;
+    for (const id of jobIds) {
+      const job = visibleJob(req, id);
+      if (!job) continue;
+      if (job.status === 'queued') { orchestrator.approveJob(job.id, actor, tenantId); ready.push(job.id); }
+      else if (job.status === 'approved') ready.push(job.id);
+      else skipped += 1;
+    }
+    const queued = await queueRuns(req, ready);
+    res.json({ queued, skipped, runAtOnce: config.runQueueMaxJobs });
+  } catch (err) { next(err); }
+});
+
+// "Stop the queue": takes every listed job that is still waiting back out, so
+// pausing or cancelling the running ones doesn't just start the next.
+router.post('/jobs/bulk-unqueue-run', (req, res, next) => {
+  try {
+    const { jobIds } = req.body || {};
+    if (!Array.isArray(jobIds) || !jobIds.length) {
+      return res.status(400).json({ error: 'jobIds array is required' });
+    }
+    let removed = 0;
+    for (const id of jobIds) {
+      const job = visibleJob(req, id);
+      if (!job || job.status !== 'approved' || !job.run_queued_at) continue;
+      orchestrator.unqueueRun(job.id, getActor(req), getTenantId(req));
+      removed += 1;
+    }
+    res.json({ removed });
+  } catch (err) { next(err); }
+});
+
+router.post('/jobs/:id/unqueue-run', (req, res, next) => {
+  if (!requireVisibleJob(req, res)) return;
+  try { res.json(mapJob(orchestrator.unqueueRun(req.params.id, getActor(req), getTenantId(req)))); }
+  catch (err) { next(err); }
 });
 
 // Owner gate for every lifecycle action below: the orchestrator functions

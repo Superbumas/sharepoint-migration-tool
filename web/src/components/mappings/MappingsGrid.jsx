@@ -180,9 +180,12 @@ export default function MappingsGrid({ mappings, groupNames, refresh }) {
     });
   }
 
-  function bulkCreateJobs(approve) {
+  // mode: 'create' | 'approve' | 'run'. 'run' also sends the new jobs to the
+  // run queue, which starts a few at a time.
+  function bulkCreateJobs(mode) {
+    if (mode === 'run' && !confirm(`Create, approve and run jobs for ${selected.length} mapping${selected.length === 1 ? '' : 's'}? They run a few at a time, and the rest start on their own as each one finishes.`)) return null;
     return run(async () => {
-      const r = await api.post('/api/jobs/bulk-create', { mappingIds: [...selectedIds], approve });
+      const r = await api.post('/api/jobs/bulk-create', { mappingIds: [...selectedIds], approve: mode !== 'create', run: mode === 'run' });
       if (r.items.length === 0) {
         setMessage({ type: 'error', text: 'No jobs were created: every selected mapping already has an unfinished job.' });
         return;
@@ -471,8 +474,9 @@ export default function MappingsGrid({ mappings, groupNames, refresh }) {
         <div className="bg-blue-50 px-4 py-2 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-sm font-medium text-blue-800 mr-1">{selected.length} selected</span>
-            <button onClick={() => bulkCreateJobs(true)} disabled={busy} className="btn-primary" title="Creates a job for each one and approves it, ready to run from the job queue">Create and approve jobs</button>
-            <button onClick={() => bulkCreateJobs(false)} disabled={busy} className="btn-secondary bg-white border border-slate-200">Create jobs only</button>
+            <button onClick={() => bulkCreateJobs('approve')} disabled={busy} className="btn-primary" title="Creates a job for each one and approves it, ready to run from the job queue">Create and approve jobs</button>
+            <button onClick={() => bulkCreateJobs('run')} disabled={busy} className="btn-secondary bg-white border border-slate-200" title="Also starts them: a few run at a time and the rest wait their turn">…and run</button>
+            <button onClick={() => bulkCreateJobs('create')} disabled={busy} className="btn-secondary bg-white border border-slate-200">Create jobs only</button>
             <span className="w-px h-5 bg-blue-200 mx-1" aria-hidden />
             <button onClick={() => setPanel(panel === 'project' ? null : 'project')} aria-expanded={panel === 'project'} className="btn-secondary bg-white border border-slate-200">Move to project…</button>
             <button onClick={() => setPanel(panel === 'target' ? null : 'target')} aria-expanded={panel === 'target'} className="btn-secondary bg-white border border-slate-200">Change target folder…</button>
