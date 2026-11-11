@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
+import { jobTitle } from '../lib/format';
 import { socket } from '../lib/socket';
 import StatusPill from './StatusPill';
 
@@ -15,7 +16,7 @@ function ActionBtn({ onClick, tone = 'default', disabled, children }) {
     default: 'bg-slate-100 text-slate-600 hover:bg-slate-200',
   };
   return (
-    <button type="button" onClick={onClick} disabled={disabled} className={`text-xs font-medium rounded-md px-2.5 py-1 transition-colors disabled:opacity-50 disabled:cursor-wait ${tones[tone]}`}>
+    <button type="button" onClick={onClick} disabled={disabled} className={`text-xs font-medium rounded-md px-2.5 py-1 whitespace-nowrap transition-colors disabled:opacity-50 disabled:cursor-wait ${tones[tone]}`}>
       {children}
     </button>
   );
@@ -75,7 +76,7 @@ function ClientReportPanel({ jobs, onClose }) {
                 <li key={j.id}>
                   <label className="flex items-center gap-2 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 cursor-pointer">
                     <input type="checkbox" checked={selected.has(j.id)} onChange={() => toggle(j.id)} />
-                    <span className="min-w-0 truncate">{j.name}</span>
+                    <span className="min-w-0 truncate">{jobTitle(j.name)}</span>
                     <span className="ml-auto text-xs text-slate-400 tabular-nums shrink-0">{(j.progress.itemsDone + j.progress.itemsSkipped).toLocaleString()} files</span>
                   </label>
                 </li>
@@ -166,9 +167,9 @@ export default function JobQueue() {
           <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
             <tr>
               <th className="text-left px-4 py-2">Name</th>
-              <th className="text-left px-4 py-2">Status</th>
-              <th className="text-left px-4 py-2">Progress</th>
-              <th className="text-left px-4 py-2">Created by</th>
+              <th className="hidden md:table-cell text-left px-4 py-2">Status</th>
+              <th className="hidden md:table-cell text-left px-4 py-2">Progress</th>
+              <th className="hidden lg:table-cell text-left px-4 py-2">Created by</th>
               <th className="text-right px-4 py-2">Actions</th>
             </tr>
           </thead>
@@ -176,13 +177,20 @@ export default function JobQueue() {
             {jobs.map((job) => (
               <tr key={job.id} className="hover:bg-slate-50">
                 <td className="px-4 py-3">
-                  <Link to={`/jobs/${job.id}`} className="font-medium text-slate-800 hover:text-blue-600 break-words">{job.name}</Link>
+                  <Link to={`/jobs/${job.id}`} className="font-medium text-slate-800 hover:text-blue-600 break-words">{jobTitle(job.name)}</Link>
                   <div className="text-xs text-slate-400">{job.action}</div>
+                  {/* Phone: status and progress fold into the name cell so the
+                      action buttons stay on screen instead of off to the right. */}
+                  <div className="md:hidden mt-1.5 flex flex-wrap items-center gap-2 text-xs text-slate-500 tabular-nums">
+                    <StatusPill status={job.status} label={job.pauseRequested && job.status === 'running' ? 'pausing…' : undefined} />
+                    <span>{(job.progress.itemsDone + job.progress.itemsSkipped).toLocaleString()} / {job.totals.items ? job.totals.items.toLocaleString() : '?'}</span>
+                    {job.progress.itemsFailed > 0 && <span className="text-red-500">{job.progress.itemsFailed} failed</span>}
+                  </div>
                 </td>
-                <td className="px-4 py-3">
+                <td className="hidden md:table-cell px-4 py-3">
                   <StatusPill status={job.status} label={job.pauseRequested && job.status === 'running' ? 'pausing…' : undefined} />
                 </td>
-                <td className="px-4 py-3 w-48 min-w-[10rem]">
+                <td className="hidden md:table-cell px-4 py-3 w-48 min-w-[10rem]">
                   <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
                     <div
                       className={`h-2 rounded-full transition-all duration-500 ${
@@ -210,8 +218,9 @@ export default function JobQueue() {
                     )}
                   </div>
                 </td>
-                <td className="px-4 py-3 text-slate-500 whitespace-nowrap">{job.createdBy.name}</td>
-                <td className="px-4 py-3 text-right space-x-1.5 whitespace-nowrap">
+                <td className="hidden lg:table-cell px-4 py-3 text-slate-500 whitespace-nowrap">{job.createdBy.name}</td>
+                <td className="px-4 py-3 text-right">
+                  <div className="flex flex-wrap justify-end gap-1.5">
                   {job.status === 'queued' && <ActionBtn tone="success" disabled={busyId === job.id} onClick={() => act(job, 'approve-run')}>Approve &amp; run</ActionBtn>}
                   {job.status === 'queued' && <ActionBtn disabled={busyId === job.id} onClick={() => act(job, 'approve')}>Approve only</ActionBtn>}
                   {job.status === 'approved' && <ActionBtn tone="success" disabled={busyId === job.id} onClick={() => act(job, 'run')}>Run</ActionBtn>}
@@ -222,6 +231,7 @@ export default function JobQueue() {
                   )}
                   {['failed', 'cancelled'].includes(job.status) && <ActionBtn tone="success" disabled={busyId === job.id} onClick={() => act(job, 'restart')}>Restart</ActionBtn>}
                   {['completed', 'failed', 'cancelled'].includes(job.status) && <ActionBtn disabled={busyId === job.id} onClick={() => act(job, 'delete')}>Delete</ActionBtn>}
+                  </div>
                 </td>
               </tr>
             ))}

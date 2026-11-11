@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
-import { formatBytes } from '../lib/format';
+import { formatBytes, jobTitle } from '../lib/format';
 import { socket } from '../lib/socket';
 import StatusPill from './StatusPill';
 
@@ -338,7 +338,7 @@ export default function JobDetail() {
         <div className="max-h-48 overflow-y-auto border-t border-slate-100 bg-slate-50/60 pl-11 pr-4 py-1">
           {v.problems.map((p) => (
             <div key={`${p.reason}:${p.path}`} className="grid grid-cols-[72px_minmax(0,1fr)] gap-3 items-baseline text-xs py-1">
-              <span className="rounded bg-red-100 text-red-700 px-1.5 py-0.5 uppercase text-[10px] font-medium text-center">{p.reason}</span>
+              <span className="rounded bg-red-100 text-red-700 px-1.5 py-0.5 uppercase text-[11px] font-medium text-center">{p.reason}</span>
               <span className="font-mono truncate text-slate-700" title={p.path}>{p.path}</span>
             </div>
           ))}
@@ -394,7 +394,7 @@ export default function JobDetail() {
         <Link to="/jobs" className="text-xs text-slate-500 hover:underline">&larr; Back to queue</Link>
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 mt-1">
           <div className="flex items-center gap-3 min-w-0">
-            <h1 className="text-xl font-semibold text-slate-800 break-words sm:truncate">{job.name}</h1>
+            <h1 className="text-xl font-semibold text-slate-800 break-words sm:truncate">{jobTitle(job.name)}</h1>
             <StatusPill status={job.status} />
           </div>
           <div className="flex flex-wrap gap-2 shrink-0">

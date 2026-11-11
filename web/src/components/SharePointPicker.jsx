@@ -316,8 +316,8 @@ export default function SharePointPicker({ label, onSelect, multi = false, fixed
                       ) : (
                         <span className="text-xs text-slate-300">{s.inaccessible ? 'locked' : '—'}</span>
                       )}
-                      {s.noAccess && <div className="text-[10px] font-medium text-amber-700 mt-0.5">no access</div>}
-                      {s.lastActivity && <div className="text-[10px] text-slate-400 mt-0.5">{formatDate(s.lastActivity)}</div>}
+                      {s.noAccess && <div className="text-[11px] font-medium text-amber-700 mt-0.5">no access</div>}
+                      {s.lastActivity && <div className="text-[11px] text-slate-400 mt-0.5">{formatDate(s.lastActivity)}</div>}
                     </div>
                   </div>
                 </button>

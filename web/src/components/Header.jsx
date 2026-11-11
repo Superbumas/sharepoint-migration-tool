@@ -111,7 +111,7 @@ export default function Header() {
           <div className="flex items-center gap-3 shrink-0 h-16">
             <ThemeToggle />
             {user.role === 'admin' && (
-              <span className="hidden sm:inline text-[10px] font-semibold uppercase tracking-wide text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-px" title="Admin - sees every user's mappings and jobs">
+              <span className="hidden sm:inline text-[11px] font-semibold uppercase tracking-wide text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-px" title="Admin - sees every user's mappings and jobs">
                 Admin
               </span>
             )}

@@ -23,9 +23,9 @@ function siteLabel(siteName, siteUrl) {
 // Status badge for a mapping's most recent job. Completed jobs distinguish
 // verified-clean from completed-with-issues so "done" actually means done.
 function MappingStatus({ job }) {
-  if (!job) return <span className="inline-block text-xs rounded-full px-2 py-0.5 bg-slate-100 text-slate-500">not migrated</span>;
+  if (!job) return <span className="inline-block whitespace-nowrap text-xs rounded-full px-2 py-0.5 bg-slate-100 text-slate-500">not migrated</span>;
   const label = (text, cls) => (
-    <Link to={`/jobs/${job.id}`} className={`inline-block text-xs rounded-full px-2 py-0.5 hover:opacity-80 ${cls}`} title={job.completedAt ? `Last run finished ${job.completedAt}` : 'Open latest job'}>
+    <Link to={`/jobs/${job.id}`} className={`inline-block whitespace-nowrap text-xs rounded-full px-2 py-0.5 hover:opacity-80 ${cls}`} title={job.completedAt ? `Last run finished ${job.completedAt}` : 'Open latest job'}>
       {text}
     </Link>
   );
@@ -305,7 +305,7 @@ export default function MappingsPage() {
               <th className="text-left px-4 py-2">Source</th>
               <th className="text-left px-4 py-2">Target</th>
               <th className="text-left px-4 py-2">Status</th>
-              <th className="text-left px-4 py-2">Origin</th>
+              <th className="hidden lg:table-cell text-left px-4 py-2">Origin</th>
               <th className="text-right px-4 py-2"><span className="sr-only">Actions</span></th>
             </tr>
           </thead>
@@ -339,7 +339,7 @@ export default function MappingsPage() {
                     )}
                 </td>
                 <td className="px-4 py-2"><MappingStatus job={m.latestJob} /></td>
-                <td className="px-4 py-2 text-slate-400 text-xs">{m.origin}{m.confidence ? ` (${m.confidence})` : ''}</td>
+                <td className="hidden lg:table-cell px-4 py-2 text-slate-400 text-xs">{m.origin}{m.confidence ? ` (${m.confidence})` : ''}</td>
                 <td className="px-4 py-2 text-right">
                   {m.latestJob && ['queued', 'approved', 'running', 'paused'].includes(m.latestJob.status) ? (
                     <Link to={`/jobs/${m.latestJob.id}`} className="text-xs font-medium rounded-md px-2.5 py-1 bg-slate-100 text-slate-700 hover:bg-slate-200 transition-colors whitespace-nowrap">Open job</Link>

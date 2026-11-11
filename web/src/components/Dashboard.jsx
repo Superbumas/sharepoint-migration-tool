@@ -10,7 +10,7 @@ import {
 } from 'chart.js';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
-import { formatBytes } from '../lib/format';
+import { formatBytes, jobTitle } from '../lib/format';
 import { socket } from '../lib/socket';
 import StatCard from './StatCard';
 import StatusPill, { STATUS_STYLE } from './StatusPill';
@@ -96,7 +96,7 @@ export default function Dashboard() {
               return (
                 <tr key={j.id} className="hover:bg-slate-50">
                   <td className="px-4 py-2.5">
-                    <Link to={`/jobs/${j.id}`} className="font-medium text-slate-800 hover:text-blue-600">{j.name}</Link>
+                    <Link to={`/jobs/${j.id}`} className="font-medium text-slate-800 hover:text-blue-600">{jobTitle(j.name)}</Link>
                   </td>
                   <td className="px-4 py-2.5 w-56 min-w-[10rem]">
                     <div className="text-xs text-slate-500 mb-1">
