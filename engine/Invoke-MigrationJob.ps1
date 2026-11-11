@@ -104,6 +104,10 @@ param(
     # a stale scan can only miss files added after it was taken (a later
     # fresh run picks those up), never corrupt anything.
     [string]$TreeCachePath,
+    # Content-check results (ContentCheck.psm1), keyed per file by path and
+    # both hashes. Named by source+target location on the server side, so
+    # it carries over between runs, re-created jobs and Verify clicks.
+    [string]$ContentCachePath,
     [Parameter(Mandatory)][string]$ClientId,
     [Parameter(Mandatory)][string]$TenantId,
     # Exactly one credential style identifies the app-only identity
@@ -339,7 +343,7 @@ function Invoke-VerificationPhase {
         $contentUnchecked = [System.Collections.Generic.List[object]]::new()
         $contentDifferent = [System.Collections.Generic.List[object]]::new()
         if ($result.OfficeRewritten.Count -gt 0 -and $srcMap -and $tgtMap -and -not $isBlob) {
-            $ccCachePath = if ($TreeCachePath) { Join-Path (Split-Path $TreeCachePath -Parent) "$JobId.content-check.json" } else { $null }
+            $ccCachePath = if ($ContentCachePath) { $ContentCachePath } else { $null }
             $ccCache = @{}
             if ($ccCachePath -and (Test-Path $ccCachePath)) {
                 try { (Get-Content $ccCachePath -Raw | ConvertFrom-Json -AsHashtable).GetEnumerator() | ForEach-Object { $ccCache[$_.Key] = $_.Value } } catch {}

@@ -7,6 +7,7 @@
 # touch left out. Measured on a live tenant (2026-11-11):
 #
 #   OOXML zip (.docx/.xlsx/.pptx/.xlsb/...): SharePoint ADDS customXml/* and
+#     (after a cross-site server-side copy) an OPC [trash]/ entry, and
 #     docProps/custom.xml (ContentTypeId) and CHANGES [Content_Types].xml and
 #     the .rels files only to register those parts. Every content part is
 #     byte-identical.
@@ -161,7 +162,7 @@ function Get-Sha256Hex([byte[]]$Bytes) {
 # --- OOXML -----------------------------------------------------------------
 function Test-IgnoredOpcPart([string]$Name) {
     $n = $Name.ToLowerInvariant()
-    return $n.StartsWith('customxml/') -or $n -eq 'docprops/custom.xml' -or $n -eq 'docprops/core.xml' -or $n -eq 'docprops/app.xml'
+    return $n.StartsWith('customxml/') -or $n.StartsWith('[trash]/') -or $n -eq 'docprops/custom.xml' -or $n -eq 'docprops/core.xml' -or $n -eq 'docprops/app.xml'
 }
 function Test-IgnoredRelTarget([string]$Type, [string]$Target) {
     $t = "$Target".ToLowerInvariant().Replace('\', '/')

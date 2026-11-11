@@ -5,7 +5,7 @@ const { v4: uuid } = require('uuid');
 const { getDb } = require('../db');
 const config = require('../config');
 const { attachNdjsonParser } = require('./ndjson');
-const { controlFilePath, writeControlFile, removeControlFile, treeCachePath, removeTreeCache } = require('./controlFile');
+const { controlFilePath, writeControlFile, removeControlFile, treeCachePath, removeTreeCache, contentCachePath } = require('./controlFile');
 const { mapJob } = require('../util/mapJob');
 const clog = require('../util/consoleLog');
 const { decrypt } = require('../util/secretCrypto');
@@ -493,6 +493,7 @@ function runJob(jobId, actor, tenantId) {
     '-NonInteractive',
     '-File', config.engineScriptPath,
     '-JobId', jobId,
+    '-ContentCachePath', contentCachePath(job),
     '-SourceProvider', job.source_provider || 'sharepoint',
     '-SourceSiteUrl', job.source_site_url || '',
     '-SourceLibrary', job.source_library || '',
@@ -1170,6 +1171,7 @@ function verifyJob(jobId, actor, tenantId) {
     '-NonInteractive',
     '-File', config.engineScriptPath,
     '-JobId', jobId,
+    '-ContentCachePath', contentCachePath(job),
     '-SourceProvider', job.source_provider || 'sharepoint',
     '-SourceSiteUrl', job.source_site_url || '',
     '-SourceLibrary', job.source_library || '',
@@ -1278,6 +1280,7 @@ function cleanupSourceJob(jobId, actor, tenantId) {
     '-NonInteractive',
     '-File', config.engineScriptPath,
     '-JobId', jobId,
+    '-ContentCachePath', contentCachePath(job),
     '-SourceSiteUrl', job.source_site_url || '',
     '-SourceLibrary', job.source_library || '',
     '-SourcePath', job.source_path,
@@ -1365,6 +1368,7 @@ function purgeRecycleBinJob(jobId, actor, tenantId) {
     '-NonInteractive',
     '-File', config.engineScriptPath,
     '-JobId', jobId,
+    '-ContentCachePath', contentCachePath(job),
     '-SourceSiteUrl', job.source_site_url || '',
     '-SourceLibrary', job.source_library || '',
     '-SourcePath', job.source_path,
