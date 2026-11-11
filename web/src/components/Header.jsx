@@ -34,7 +34,7 @@ const NAV = [
   { to: '/jobs', icon: 'jobs', label: 'Jobs' },
   { to: '/mappings', icon: 'mappings', label: 'Mappings' },
   { to: '/settings', icon: 'settings', label: 'Settings' },
-  { to: '/projects', icon: 'projects', label: 'Projects' },
+  { to: '/projects', icon: 'projects', label: 'Clients' },
 ];
 
 function ThemeToggle() {
@@ -78,10 +78,10 @@ export function AuthBanner() {
       <div className="px-6 py-2 flex flex-wrap items-center justify-between gap-2">
         <span>
           {reauth
-            ? 'Your Microsoft sign-in for this project has expired, so sites and files can\'t be loaded.'
-            : 'This project isn\'t connected to its tenant yet. A Global Admin of that tenant needs to finish connecting it once.'}
+            ? 'Your Microsoft sign-in for this client has expired, so sites and files can\'t be loaded.'
+            : 'This client isn\'t connected to its tenant yet. A Global Admin of that tenant needs to finish connecting it once.'}
         </span>
-        <a href={href} className="font-medium underline whitespace-nowrap">{reauth ? 'Reconnect' : 'Connect project'}</a>
+        <a href={href} className="font-medium underline whitespace-nowrap">{reauth ? 'Reconnect' : 'Connect client'}</a>
       </div>
     </div>
   );
@@ -96,8 +96,8 @@ export function Sidebar() {
   return (
     <aside id="sidebar" className="sidebar w-56 shrink-0 bg-sidebar text-sidebar-text flex flex-col sticky top-14 h-[calc(100vh-3.5rem)] overflow-y-auto">
       {project && (
-        <div className="px-4 py-3 border-b border-sidebar-line" title={`Signed into project "${project.name}"${project.tenantName ? ` (tenant ${project.tenantName})` : ''}`}>
-          <div className="text-[11px] font-semibold uppercase tracking-wide text-sidebar-text/80 mb-1">Project</div>
+        <div className="px-4 py-3 border-b border-sidebar-line" title={`Signed into client "${project.name}"${project.tenantName ? ` (tenant ${project.tenantName})` : ''}`}>
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-sidebar-text/80 mb-1">Client</div>
           <div className="flex items-center gap-2 text-sm font-medium text-white min-w-0">
             <span className="relative flex h-1.5 w-1.5 shrink-0">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />

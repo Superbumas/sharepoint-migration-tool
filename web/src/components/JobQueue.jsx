@@ -60,7 +60,7 @@ function ClientReportPanel({ jobs, onClose }) {
           <label className="block text-xs text-slate-600">
             Name on the cover
             <input
-              type="text" value={client} onChange={(e) => setClient(e.target.value)} placeholder="Project name"
+              type="text" value={client} onChange={(e) => setClient(e.target.value)} placeholder="Client name"
               className="mt-1 block w-full sm:w-80 rounded-md border border-slate-300 px-2.5 py-1.5 text-sm"
             />
           </label>

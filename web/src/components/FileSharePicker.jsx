@@ -119,7 +119,7 @@ export default function FileSharePicker({ label, onSelect, multi = false }) {
           <div className="text-3xl">🗄️</div>
           <div className="text-sm font-medium text-slate-700">No file shares configured yet</div>
           <p className="text-xs text-slate-500 max-w-xs mx-auto">
-            Add the UNC paths of the shares this project may migrate from (e.g. <span className="font-mono">\\corp\dfs\Departments</span>) — takes a few seconds.
+            Add the UNC paths of the shares this client may migrate from (e.g. <span className="font-mono">\\corp\dfs\Departments</span>) — takes a few seconds.
           </p>
           <Link to="/settings" className="inline-block text-xs font-medium text-white bg-violet-600 hover:bg-violet-700 rounded-md px-3 py-1.5 transition-colors">
             Add shares in Settings →
@@ -131,7 +131,7 @@ export default function FileSharePicker({ label, onSelect, multi = false }) {
       {rootsInfo && !root && rootsInfo.roots.length > 0 && (
         <div className="space-y-2">
           <div className="text-xs text-slate-400 flex items-center justify-between">
-            <span>{rootsInfo.roots.length} share{rootsInfo.roots.length === 1 ? '' : 's'} available to this project</span>
+            <span>{rootsInfo.roots.length} share{rootsInfo.roots.length === 1 ? '' : 's'} available to this client</span>
             <Link to="/settings" className="text-violet-600 hover:underline">manage</Link>
           </div>
           <ul className="max-h-72 overflow-y-auto space-y-1 text-sm pr-0.5">
