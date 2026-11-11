@@ -14,10 +14,10 @@ export const AUTH_ERROR_MESSAGES = {
   // Set when someone opened a specific Project's "sign in" link but
   // authenticated with a different tenant's account than that project is
   // already bound to.
-  wrong_tenant_for_project: 'That project is connected to a different Microsoft 365 tenant - sign in with the Global Admin account for the tenant this project belongs to.',
+  wrong_tenant_for_project: 'That client is connected to a different Microsoft 365 tenant - sign in with the Global Admin account for the tenant this client belongs to.',
   // Set when ALLOWED_LOGIN_DOMAINS is configured and the authenticated
   // account's domain isn't on the list - this instance is team-only.
-  account_not_allowed: 'That account is not allowed to sign in here - use your team account. Client-tenant accounts (e.g. a Global Admin connecting their tenant) can only sign in through their project\'s own sign-in link - ask the person running your migration to send it to you.',
+  account_not_allowed: 'That account is not allowed to sign in here - use your team account. Client-tenant accounts (e.g. a Global Admin connecting their tenant) can only sign in through their client\'s own sign-in link - ask the person running your migration to send it to you.',
 };
 
 // Lists every Project (server/api/projects.js) and lets you sign into one or
@@ -64,11 +64,11 @@ export default function ProjectPicker() {
       <div className="w-12 h-12 mx-auto mb-3 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white text-xl font-bold shadow" aria-hidden>
         ⇥
       </div>
-      <h1 className="text-lg font-semibold text-slate-800 mb-1 text-center">Projects</h1>
+      <h1 className="text-lg font-semibold text-slate-800 mb-1 text-center">Clients</h1>
       <p className="text-sm text-slate-500 mb-6 text-center">
-        One project per tenant. Pick one to sign into — or just{' '}
+        One client per tenant. Pick one to sign into — or just{' '}
         <a href="/auth/login" className="text-blue-600 hover:underline">sign in with Microsoft</a>{' '}
-        and land in your account's tenant automatically (new tenants get their project created on first sign-in).
+        and land in your account's tenant automatically (new tenants get their client created on first sign-in).
       </p>
 
       {authError && AUTH_ERROR_MESSAGES[authError] && (
@@ -78,10 +78,10 @@ export default function ProjectPicker() {
       )}
 
       {loading ? (
-        <div className="text-sm text-slate-400 text-center">Loading projects…</div>
+        <div className="text-sm text-slate-400 text-center">Loading clients…</div>
       ) : signedOut ? (
         <div className="text-center space-y-3 mb-2">
-          <p className="text-sm text-slate-500">Sign in first — you'll land in your account's tenant automatically, and can switch projects from here afterwards.</p>
+          <p className="text-sm text-slate-500">Sign in first — you'll land in your account's tenant automatically, and can switch clients from here afterwards.</p>
           <a href="/auth/login" className="btn-primary inline-block">Sign in with Microsoft</a>
         </div>
       ) : projects.length > 0 ? (
@@ -109,20 +109,20 @@ export default function ProjectPicker() {
           ))}
         </ul>
       ) : (
-        <div className="text-sm text-slate-400 text-center mb-6">No projects yet - create the first one below.</div>
+        <div className="text-sm text-slate-400 text-center mb-6">No clients yet - create the first one below.</div>
       )}
 
       {!signedOut && <form onSubmit={createProject} className="flex items-center gap-2 border-t border-slate-100 pt-4">
         <input
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
-          placeholder="New project name, e.g. Contoso Ltd…"
-          aria-label="New project name"
+          placeholder="New client name, e.g. Contoso Ltd…"
+          aria-label="New client name"
           autoComplete="off"
           className="flex-1 border border-slate-300 rounded-md px-2 py-1 text-sm"
         />
         <button type="submit" disabled={creating || !newName.trim()} className="btn-primary">
-          {creating ? 'Creating…' : '+ New project'}
+          {creating ? 'Creating…' : '+ New client'}
         </button>
       </form>}
       {error && <div role="alert" className="text-xs text-red-600 mt-2">{error}</div>}

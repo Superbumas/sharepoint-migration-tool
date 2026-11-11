@@ -29,7 +29,7 @@ router.get('/fs/browse', (req, res) => {
   const dir = normalizeFsPath(req.query.path);
   const rootEntry = findFsRootEntry(dir, getTenantId(req));
   if (!rootEntry) {
-    return res.status(403).json({ error: 'path_not_allowed', message: 'That path is outside this project\'s allowed file-share roots (see Settings).' });
+    return res.status(403).json({ error: 'path_not_allowed', message: 'That path is outside this client\'s allowed file-share roots (see Settings).' });
   }
   // Roots with their own credentials: authenticate to the share's server as
   // that user before reading (cached per server+user for 10 minutes).

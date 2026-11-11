@@ -115,7 +115,7 @@ export default function PermissionsPanel() {
             {health.engineApp.dedicated ? (
               <>
                 <p className="text-xs text-slate-500">
-                  This project’s own engine app (<span className="font-mono">{health.engineApp.clientId}</span>) is what
+                  This client’s own engine app (<span className="font-mono">{health.engineApp.clientId}</span>) is what
                   actually reads and writes content. Re-sync it after enabling a feature like the OneDrive target so it
                   gains the new permission{health.engineApp.onedriveTargetEnabled ? ' (Files.ReadWrite.All)' : ''}.
                 </p>
@@ -126,7 +126,7 @@ export default function PermissionsPanel() {
               </>
             ) : (
               <p className="text-xs text-slate-500">
-                This project uses the shared engine app — change its permissions by re-running
+                This client uses the shared engine app — change its permissions by re-running
                 <span className="font-mono"> setup/New-AppRegistration.ps1</span> on the server.
               </p>
             )}
@@ -136,7 +136,7 @@ export default function PermissionsPanel() {
           <div className="space-y-1.5 border-t border-slate-100 pt-3">
             <h3 className="text-xs font-semibold text-slate-600">Site access</h3>
             {health.sites.length === 0 ? (
-              <p className="text-xs text-slate-500">No SharePoint sites are used by this project’s mappings yet.</p>
+              <p className="text-xs text-slate-500">No SharePoint sites are used by this client’s mappings yet.</p>
             ) : (
               <>
                 <div className="space-y-1">

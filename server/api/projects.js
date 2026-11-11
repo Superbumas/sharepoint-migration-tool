@@ -44,7 +44,7 @@ router.get('/projects', (req, res) => {
 });
 
 router.post('/projects', (req, res) => {
-  if (isClientSession(req)) return res.status(403).json({ error: 'forbidden', message: 'Only team accounts can create projects.' });
+  if (isClientSession(req)) return res.status(403).json({ error: 'forbidden', message: 'Only team accounts can create clients.' });
   const name = (req.body?.name || '').trim();
   if (!name) return res.status(400).json({ error: 'name is required' });
   const db = getDb();

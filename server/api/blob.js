@@ -13,7 +13,7 @@ router.use(requireAuth);
 router.get('/blob/containers', async (req, res, next) => {
   const connectionString = resolveBlobConnectionString(getTenantId(req));
   if (!connectionString) {
-    return res.status(503).json({ error: 'blob_not_configured', message: 'No Azure Blob connection string is configured for this project - add one in Settings.' });
+    return res.status(503).json({ error: 'blob_not_configured', message: 'No Azure Blob connection string is configured for this client - add one in Settings.' });
   }
   try {
     const items = await listContainers(connectionString);

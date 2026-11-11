@@ -268,7 +268,7 @@ async function insertMapping(req, b, driveChecks) {
       return fail(400, { error: 'sourcePath (the share directory) is required for a file-share source' });
     }
     if (!isAllowedFsPath(b.sourcePath, getTenantId(req))) {
-      return fail(403, { error: 'path_not_allowed', message: 'That path is outside this project\'s allowed file-share roots (see Settings).' });
+      return fail(403, { error: 'path_not_allowed', message: 'That path is outside this client\'s allowed file-share roots (see Settings).' });
     }
     if (targetProvider !== 'sharepoint' && targetProvider !== 'onedrive') {
       return fail(400, { error: 'A file-share source can only migrate into SharePoint or a OneDrive.' });

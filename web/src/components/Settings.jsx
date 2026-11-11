@@ -115,12 +115,12 @@ function FsSourceRootsEditor({ settings, onSaved }) {
 
   return (
     <div className="bg-white border border-slate-200 rounded-lg p-4">
-      <h2 className="text-sm font-semibold text-slate-700 mb-2">File share (DFS) migration source (this project)</h2>
+      <h2 className="text-sm font-semibold text-slate-700 mb-2">File share (DFS) migration source (this client)</h2>
       <p className="text-xs text-slate-500 mb-3">
-        UNC paths of the file shares this project may browse and migrate into SharePoint. By default the migration
+        UNC paths of the file shares this client may browse and migrate into SharePoint. By default the migration
         server's own account reads them; give a root its own <span className="font-medium">username + password</span> to
         connect to that server as a different user instead (stored encrypted, tested on save). Everyone signed into this
-        project can browse everything under these roots — list the folders actually being migrated, not a whole drive.
+        client can browse everything under these roots — list the folders actually being migrated, not a whole drive.
       </p>
       <ul className="space-y-1 mb-2">
         {roots.map((e) => {
@@ -229,7 +229,7 @@ export default function Settings() {
       await api.post('/api/settings/blob-connection-string', { connectionString: connectionString.trim() });
       setConnectionString('');
       setPasteInfo(null);
-      setMessage({ type: 'success', text: 'Saved for this project.' });
+      setMessage({ type: 'success', text: 'Saved for this client.' });
       refresh();
     } catch (err) {
       setMessage({ type: 'error', text: err.message });
@@ -243,7 +243,7 @@ export default function Settings() {
     setMessage(null);
     try {
       await api.del('/api/settings/blob-connection-string');
-      setMessage({ type: 'success', text: 'Cleared for this project.' });
+      setMessage({ type: 'success', text: 'Cleared for this client.' });
       refresh();
     } catch (err) {
       setMessage({ type: 'error', text: err.message });
@@ -269,16 +269,16 @@ export default function Settings() {
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold text-slate-800">Settings</h1>
-        <p className="text-sm text-slate-500 mt-0.5">Per-project configuration and audit exports.</p>
+        <p className="text-sm text-slate-500 mt-0.5">Per-client configuration and audit exports.</p>
       </div>
 
       <PermissionsPanel />
 
       <div className="bg-white border border-slate-200 rounded-lg p-4">
-        <h2 className="text-sm font-semibold text-slate-700 mb-2">Azure Blob archiving (this project)</h2>
+        <h2 className="text-sm font-semibold text-slate-700 mb-2">Azure Blob archiving (this client)</h2>
         <p className="text-xs text-slate-500 mb-1.5">
-          Storage account connection string used when this project archives to an Azure Blob container instead of
-          another SharePoint site. Set per-project here - never leaves this project's own data.{' '}
+          Storage account connection string used when this client archives to an Azure Blob container instead of
+          another SharePoint site. Set per-client here - never leaves this client's own data.{' '}
           {settings.blobArchivingEnabled ? (
             <span className="text-green-700 font-medium">Currently configured.</span>
           ) : (

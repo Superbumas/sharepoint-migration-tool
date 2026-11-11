@@ -72,7 +72,7 @@ router.post('/settings/blob-connection-string', (req, res) => {
   if (!config.credentialEncryptionKey) {
     return res.status(409).json({
       error: 'credential_encryption_not_configured',
-      message: 'CREDENTIAL_ENCRYPTION_KEY is not set on this server - an operator needs to add it to .env and restart before per-project secrets can be saved.',
+      message: 'CREDENTIAL_ENCRYPTION_KEY is not set on this server - an operator needs to add it to .env and restart before per-client secrets can be saved.',
     });
   }
   const encrypted = encrypt(connectionString, config.credentialEncryptionKey);
