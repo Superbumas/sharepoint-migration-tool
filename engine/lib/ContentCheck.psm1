@@ -256,6 +256,14 @@ function Read-ZipTail([hashtable]$Ref, [int]$Want) {
     $req = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $Ref.Url)
     $req.Headers.Range = [System.Net.Http.Headers.RangeHeaderValue]::new($null, $Want)
     $resp = $Ref.Http.SendAsync($req).GetAwaiter().GetResult()
+    if ([int]$resp.StatusCode -eq 416) {
+        # SharePoint answers a suffix range longer than the file with 416
+        # (not the whole file, as HTTP allows) - the file is smaller than
+        # $Want, so just fetch all of it.
+        $resp.Dispose(); $req.Dispose()
+        $req = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $Ref.Url)
+        $resp = $Ref.Http.SendAsync($req).GetAwaiter().GetResult()
+    }
     try {
         $b = $resp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
         if ([int]$resp.StatusCode -eq 200) { return @{ Bytes = $b; Total = [long]$b.Length } }
