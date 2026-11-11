@@ -16,7 +16,7 @@ body {
   /* One visible keyboard focus ring for every control, instead of relying on
      each component to remember a focus: class. Mouse clicks don't show it. */
   :focus-visible {
-    outline: 2px solid #EF5F24;
+    outline: 2px solid #1976D2;
     outline-offset: 2px;
   }
   button, a, input, select, textarea, summary { touch-action: manipulation; }
@@ -55,100 +55,114 @@ body {
    sprinkled across every component. The job log console is already dark and
    is left alone.
 --------------------------------------------------------------------------- */
-.dark body { background-color: #09090b; color: #e4e4e7; }
-.dark :focus-visible { outline-color: #F38354; }
+.dark body { background-color: #11141c; color: #e6e9ef; }
+.dark :focus-visible { outline-color: #60a5fa; }
 
 /* Surfaces */
-.dark .bg-white { background-color: #18181b; }
-.dark .bg-white\/70 { background-color: rgb(24 24 27 / 0.7); }
-.dark .bg-white\/90 { background-color: rgb(24 24 27 / 0.9); }
-.dark .bg-slate-50 { background-color: #27272a; }
-.dark .bg-slate-50\/60 { background-color: rgb(39 39 42 / 0.6); }
-.dark .bg-slate-100 { background-color: #27272a; }
-.dark .bg-slate-200 { background-color: #3f3f46; }
-.dark .hover\:bg-slate-50:hover { background-color: #27272a; }
-.dark .hover\:bg-slate-100:hover { background-color: #3f3f46; }
-.dark .hover\:bg-slate-200:hover { background-color: #3f3f46; }
-.dark .hover\:bg-slate-200\/70:hover { background-color: rgb(63 63 70 / 0.7); }
-.dark .hover\:bg-blue-50\/40:hover { background-color: rgb(239 95 36 / 0.1); }
-.dark .hover\:bg-blue-50\/50:hover { background-color: rgb(239 95 36 / 0.1); }
+.dark .bg-white { background-color: #1a1e2a; }
+.dark .bg-white\/70 { background-color: rgb(26 30 42 / 0.7); }
+.dark .bg-white\/90 { background-color: rgb(26 30 42 / 0.9); }
+.dark .bg-slate-50 { background-color: #232838; }
+.dark .bg-slate-50\/60 { background-color: rgb(35 40 56 / 0.6); }
+.dark .bg-slate-100 { background-color: #232838; }
+.dark .bg-slate-200 { background-color: #323a4d; }
+.dark .hover\:bg-slate-50:hover { background-color: #232838; }
+.dark .hover\:bg-slate-100:hover { background-color: #323a4d; }
+.dark .hover\:bg-slate-200:hover { background-color: #323a4d; }
+.dark .hover\:bg-slate-200\/70:hover { background-color: rgb(50 58 77 / 0.7); }
+.dark .hover\:bg-blue-50\/40:hover { background-color: rgb(30 58 138 / 0.15); }
+.dark .hover\:bg-blue-50\/50:hover { background-color: rgb(30 58 138 / 0.15); }
 
 /* Borders & dividers */
-.dark .border-slate-100 { border-color: #27272a; }
-.dark .border-slate-200 { border-color: #27272a; }
-.dark .border-slate-300 { border-color: #3f3f46; }
-.dark .divide-slate-100 > :not([hidden]) ~ :not([hidden]) { border-color: #27272a; }
-.dark .ring-slate-100 { --tw-ring-color: #3f3f46; }
+.dark .border-slate-100 { border-color: #232838; }
+.dark .border-slate-200 { border-color: #2a3041; }
+.dark .border-slate-300 { border-color: #323a4d; }
+.dark .divide-slate-100 > :not([hidden]) ~ :not([hidden]) { border-color: #232838; }
+.dark .ring-slate-100 { --tw-ring-color: #323a4d; }
 
 /* Text */
 .dark .text-slate-900 { color: #fafafa; }
-.dark .text-slate-800 { color: #e4e4e7; }
-.dark .text-slate-700 { color: #d4d4d8; }
-.dark .text-slate-600 { color: #a1a1aa; }
-.dark .text-slate-500 { color: #a1a1aa; }
-.dark .text-slate-400 { color: #71717a; }
-.dark .text-slate-300 { color: #d4d4d8; }
+.dark .text-slate-800 { color: #e6e9ef; }
+.dark .text-slate-700 { color: #d3d8e2; }
+.dark .text-slate-600 { color: #a3abbb; }
+.dark .text-slate-500 { color: #a3abbb; }
+.dark .text-slate-400 { color: #7d8597; }
+.dark .text-slate-300 { color: #d3d8e2; }
 .dark .hover\:text-slate-800:hover { color: #fafafa; }
 
 /* Tinted panels (success / error / warning / info) */
 .dark .bg-green-50 { background-color: rgb(5 46 22 / 0.5); }
 .dark .bg-red-50 { background-color: rgb(69 10 10 / 0.5); }
 .dark .bg-amber-50 { background-color: rgb(69 26 3 / 0.5); }
-.dark .bg-blue-50 { background-color: rgb(239 95 36 / 0.12); }
-.dark .bg-indigo-50 { background-color: rgb(239 95 36 / 0.12); }
-.dark .hover\:bg-blue-100:hover { background-color: rgb(239 95 36 / 0.22); }
+.dark .bg-blue-50 { background-color: rgb(23 37 84 / 0.5); }
+.dark .bg-indigo-50 { background-color: rgb(30 27 75 / 0.5); }
+.dark .hover\:bg-blue-100:hover { background-color: rgb(23 37 84 / 0.8); }
 .dark .hover\:bg-amber-100:hover { background-color: rgb(69 26 3 / 0.8); }
 .dark .hover\:bg-red-100:hover { background-color: rgb(69 10 10 / 0.8); }
 .dark .border-green-200 { border-color: #166534; }
 .dark .border-red-200 { border-color: #991b1b; }
 .dark .border-amber-200 { border-color: #92400e; }
-.dark .border-blue-200 { border-color: #7A2B0A; }
-.dark .border-indigo-100 { border-color: #7A2B0A; }
-.dark .hover\:border-blue-300:hover { border-color: #C4440F; }
+.dark .border-blue-200 { border-color: #1e40af; }
+.dark .border-indigo-100 { border-color: #3730a3; }
+.dark .hover\:border-blue-300:hover { border-color: #1d4ed8; }
 .dark .text-green-800, .dark .text-green-900 { color: #86efac; }
 .dark .text-green-700 { color: #4ade80; }
 .dark .text-red-700, .dark .text-red-600 { color: #fca5a5; }
 .dark .text-amber-800, .dark .text-amber-700 { color: #fcd34d; }
-.dark .text-blue-800, .dark .text-blue-900, .dark .text-blue-700 { color: #F7A985; }
-.dark .text-indigo-700 { color: #F7A985; }
-.dark .text-blue-600 { color: #F38354; }
-.dark .hover\:text-blue-800:hover, .dark .hover\:text-blue-600:hover { color: #F7A985; }
-.dark .text-blue-400 { color: #F38354; }
-.dark .text-blue-500 { color: #F38354; }
+.dark .text-blue-800, .dark .text-blue-900, .dark .text-blue-700 { color: #93c5fd; }
+.dark .text-indigo-700 { color: #a5b4fc; }
+.dark .text-blue-600 { color: #60a5fa; }
+.dark .hover\:text-blue-800:hover, .dark .hover\:text-blue-600:hover { color: #93c5fd; }
+.dark .text-blue-400 { color: #60a5fa; }
+.dark .text-blue-500 { color: #60a5fa; }
 
 /* Status pills / badges (bg-*-100 text-*-700/800 family) */
-.dark .bg-slate-100.text-slate-600, .dark .bg-slate-200.text-slate-600 { background-color: #27272a; color: #a1a1aa; }
+.dark .bg-slate-100.text-slate-600, .dark .bg-slate-200.text-slate-600 { background-color: #232838; color: #a3abbb; }
 .dark .bg-sky-100 { background-color: rgb(8 47 73 / 0.7); }
 .dark .text-sky-700 { color: #7dd3fc; }
-.dark .bg-blue-100, .dark .bg-brand-100 { background-color: rgb(239 95 36 / 0.2); }
+.dark .bg-blue-100 { background-color: rgb(23 37 84 / 0.7); }
 .dark .bg-green-100 { background-color: rgb(5 46 22 / 0.7); }
 .dark .bg-emerald-100 { background-color: rgb(2 44 34 / 0.7); }
 .dark .text-emerald-700 { color: #6ee7b7; }
 .dark .bg-amber-100 { background-color: rgb(69 26 3 / 0.7); }
 .dark .bg-red-100 { background-color: rgb(69 10 10 / 0.7); }
-.dark .bg-indigo-100 { background-color: rgb(239 95 36 / 0.2); }
+.dark .bg-indigo-100 { background-color: rgb(30 27 75 / 0.7); }
 .dark .bg-green-200 { background-color: rgb(5 46 22 / 0.9); }
 
 /* Gradient banners (phase banner, connection card, hero chips) */
-.dark .from-blue-50 { --tw-gradient-from: rgb(239 95 36 / 0.14) var(--tw-gradient-from-position); --tw-gradient-to: rgb(239 95 36 / 0); --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to); }
-.dark .to-indigo-50 { --tw-gradient-to: rgb(239 95 36 / 0.06) var(--tw-gradient-to-position); }
+.dark .from-blue-50 { --tw-gradient-from: rgb(23 37 84 / 0.5) var(--tw-gradient-from-position); --tw-gradient-to: rgb(23 37 84 / 0); --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to); }
+.dark .to-indigo-50 { --tw-gradient-to: rgb(30 27 75 / 0.5) var(--tw-gradient-to-position); }
 .dark .from-green-50 { --tw-gradient-from: rgb(5 46 22 / 0.5) var(--tw-gradient-from-position); --tw-gradient-to: rgb(5 46 22 / 0); --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to); }
 .dark .to-emerald-50 { --tw-gradient-to: rgb(2 44 34 / 0.5) var(--tw-gradient-to-position); }
 
 /* Progress track backgrounds */
-.dark .bg-slate-100.rounded-full, .dark .bg-blue-100.rounded-full { background-color: #27272a; }
+.dark .bg-slate-100.rounded-full, .dark .bg-blue-100.rounded-full { background-color: #232838; }
 
 /* Form controls */
 .dark input:not([type=checkbox]):not([type=radio]):not([type=file]), .dark select, .dark textarea {
-  background-color: #27272a;
-  color: #e4e4e7;
-  border-color: #3f3f46;
+  background-color: #232838;
+  color: #e6e9ef;
+  border-color: #323a4d;
 }
-.dark input::placeholder, .dark textarea::placeholder { color: #71717a; }
-.dark input:disabled, .dark select:disabled, .dark textarea:disabled { background-color: #18181b; color: #71717a; }
+.dark input::placeholder, .dark textarea::placeholder { color: #7d8597; }
+.dark input:disabled, .dark select:disabled, .dark textarea:disabled { background-color: #1a1e2a; color: #7d8597; }
 
 /* Buttons */
-.dark .btn-secondary { background-color: #27272a; color: #d4d4d8; }
-.dark .btn-secondary:hover { background-color: #3f3f46; }
+.dark .btn-secondary { background-color: #232838; color: #d3d8e2; }
+.dark .btn-secondary:hover { background-color: #323a4d; }
 .dark .btn-danger { background-color: rgb(69 10 10 / 0.5); color: #fca5a5; }
 .dark .btn-danger:hover { background-color: rgb(69 10 10 / 0.8); }
+
+/* Page titles are blue, as in the Knowall CRM. The id beats the grey utility
+   class each page puts on its <h1>, so no component needs editing. */
+#main h1 { color: #1976D2; }
+.dark #main h1 { color: #64B5F6; }
+
+/* Outlined status pills keep a see-through fill on the dark theme. */
+.dark .pill-outline { background-color: transparent; }
+.dark .border-slate-300.pill-outline { border-color: #4a5368; }
+.dark .border-green-300 { border-color: #166534; }
+.dark .border-red-300 { border-color: #991b1b; }
+.dark .border-amber-300 { border-color: #92400e; }
+.dark .border-blue-300 { border-color: #1e4f8f; }
+.dark .border-sky-300 { border-color: #075985; }

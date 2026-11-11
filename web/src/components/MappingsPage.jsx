@@ -299,7 +299,7 @@ export default function MappingsPage() {
         </div>
         <div className="relative overflow-x-auto">
         <table className="w-full text-sm">
-          <thead className="bg-brand-100 text-slate-800 text-xs uppercase">
+          <thead className="bg-slate-50 text-slate-600 text-xs font-semibold uppercase tracking-wide">
             <tr>
               <th className="px-4 py-2"><span className="sr-only">Select</span></th>
               <th className="text-left px-4 py-2">Source</th>
