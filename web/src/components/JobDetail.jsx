@@ -478,6 +478,13 @@ export default function JobDetail() {
   // A Verify / clean-up / pre-flight on a finished job reports a phase while
   // it runs; until it ends, the stored verification is the previous result.
   const backgroundOp = job.status === 'completed' && (!!job.activeOperation || !!job.phase);
+  // While a Verify / clean-up / pre-flight runs, the progress card shows
+  // that run, not the finished copy's "Completed — N of N".
+  const OP_LABELS = { verify: 'Verifying', preflight: 'Pre-flight check', cleanup: 'Cleaning source', purge: 'Purging recycle bin' };
+  const opPhase = backgroundOp ? job.phase : null;
+  const opDone = opPhase ? (opPhase.done ?? opPhase.deleted ?? opPhase.purged) : null;
+  const opTotal = opPhase?.total || null;
+  const opPct = opTotal ? Math.min(100, ((opDone || 0) / opTotal) * 100) : null;
   if (job.activeOperation === 'verify') {
     notices.push({ key: 'verifying', tone: 'info', title: 'Verifying now', detail: 'every file is being re-checked against its copy · the result appears here when it finishes' });
   }
@@ -635,18 +642,20 @@ export default function JobDetail() {
       {/* Progress + phase + stats in one fixed-shape card. The phase line and
           the file count share a slot, so the card is the same height whether
           the engine is enumerating, copying or paused. */}
-      {(isLive || phaseText || kpis) && (
+      {(isLive || phaseText || kpis || backgroundOp) && (
         <div className="bg-white border border-slate-200 rounded-lg p-4 space-y-3">
           <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 text-sm">
             <div className="flex items-center gap-2.5 min-w-0">
-              {job.status === 'running' && (
+              {(job.status === 'running' || backgroundOp) && (
                 <span className="relative flex h-3 w-3 shrink-0">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
                   <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500" />
                 </span>
               )}
               <span className="font-medium text-slate-700 truncate">
-                {phaseText
+                {backgroundOp && !phaseText
+                  ? `${OP_LABELS[job.activeOperation] || 'Working'} — connecting and indexing…`
+                  : phaseText
                   ? phaseText
                   : job.status === 'paused'
                     ? `Paused — ${done.toLocaleString()} of ${totalText} files`
@@ -656,15 +665,17 @@ export default function JobDetail() {
               </span>
               {isLive && job.progress.itemsFailed > 0 && <span className="text-red-600 shrink-0">· {job.progress.itemsFailed} failed</span>}
             </div>
-            <span className="text-slate-500 tabular-nums shrink-0">{formatBytes(job.progress.bytesDone)} / {formatBytes(job.totals.bytes)} · {pct.toFixed(1)}%</span>
+            {backgroundOp
+              ? <span className="text-slate-500 tabular-nums shrink-0">{opPct != null ? `${opPct.toFixed(1)}%` : ''}</span>
+              : <span className="text-slate-500 tabular-nums shrink-0">{formatBytes(job.progress.bytesDone)} / {formatBytes(job.totals.bytes)} · {pct.toFixed(1)}%</span>}
           </div>
           <div className="h-2.5 bg-slate-100 rounded-full overflow-hidden">
             <div
-              className={`h-full rounded-full transition-all duration-500 ${job.status === 'paused' ? 'bg-amber-400' : job.status === 'completed' ? 'bg-green-500' : 'bg-gradient-to-r from-blue-500 to-indigo-500'}`}
-              style={{ width: `${job.phase?.phase === 'preparing_folders' && job.phase.total > 0 ? Math.min(100, (job.phase.done / job.phase.total) * 100) : pct}%` }}
+              className={`h-full rounded-full transition-all duration-500 ${backgroundOp ? `bg-gradient-to-r from-blue-500 to-indigo-500${opPct == null ? ' animate-pulse' : ''}` : job.status === 'paused' ? 'bg-amber-400' : job.status === 'completed' ? 'bg-green-500' : 'bg-gradient-to-r from-blue-500 to-indigo-500'}`}
+              style={{ width: `${backgroundOp ? (opPct ?? 100) : job.phase?.phase === 'preparing_folders' && job.phase.total > 0 ? Math.min(100, (job.phase.done / job.phase.total) * 100) : pct}%` }}
             />
           </div>
-          {stats && job.activeOperation !== 'verify' && (
+          {stats && !backgroundOp && (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-4 pt-3 border-t border-slate-100">
               {stats.map((s) => (
                 <div key={s.label} className="min-w-0">
