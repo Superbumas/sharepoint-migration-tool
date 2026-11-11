@@ -1231,6 +1231,10 @@ function verifyJob(jobId, actor, tenantId) {
       '-TargetPath', job.target_path
     );
   }
+  // A Verify starts from a clean slate: the previous result is dropped so
+  // nothing on the page (or in a report) is based on it while the new check
+  // runs. It stays in the job log as its verification_summary line.
+  getDb().prepare('UPDATE jobs SET verification_json = NULL, verified_at = NULL, phase_json = NULL WHERE id = ?').run(jobId);
   const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'], env: buildEngineSpawnEnv(job, engineIdentity, blobConnectionString) });
   verifyRuns.set(jobId, child);
   activeOps.set(jobId, 'verify');
