@@ -1168,6 +1168,14 @@ try {
                     $tgtItem = Get-PnPListItem -List $laneTargetList -Query $caml -Connection $laneTargetConn -ErrorAction Stop | Select-Object -First 1
                     if (-not $tgtItem) { throw }
                 }
+                # Get-PnPFile can also return $null instead of throwing for
+                # such a name - same exact-path lookup then.
+                if (-not $tgtItem -or -not $tgtItem.Id) {
+                    $esc = [System.Security.SecurityElement]::Escape($TargetFileServerRel)
+                    $caml = "<View Scope='RecursiveAll'><Query><Where><Eq><FieldRef Name='FileRef'/><Value Type='Text'>$esc</Value></Eq></Where></Query><RowLimit>1</RowLimit></View>"
+                    $tgtItem = Get-PnPListItem -List $laneTargetList -Query $caml -Connection $laneTargetConn -ErrorAction Stop | Select-Object -First 1
+                    if (-not $tgtItem) { throw "target item not found: $TargetFileServerRel" }
+                }
                 try {
                     Set-PnPListItem -List $laneTargetList -Identity $tgtItem.Id -Values ($values + $people) -Connection $laneTargetConn -ErrorAction Stop | Out-Null
                     return $true
@@ -1755,6 +1763,9 @@ try {
                                 # Literal %XX in a name defeats Get-PnPFile's URL decoding - look the item up by exact path.
                                 Get-PnPListItem -List $laneTargetList -Query "<View Scope='RecursiveAll'><Query><Where><Eq><FieldRef Name='FileRef'/><Value Type='Text'>$([System.Security.SecurityElement]::Escape($targetFileServerRel))</Value></Eq></Where></Query><RowLimit>1</RowLimit></View>" -Connection $laneTargetConn -ErrorAction Stop | Select-Object -First 1
                             }
+                            if (-not $tgtItem -or -not $tgtItem.Id) {
+                                $tgtItem = Get-PnPListItem -List $laneTargetList -Query "<View Scope='RecursiveAll'><Query><Where><Eq><FieldRef Name='FileRef'/><Value Type='Text'>$([System.Security.SecurityElement]::Escape($targetFileServerRel))</Value></Eq></Where></Query><RowLimit>1</RowLimit></View>" -Connection $laneTargetConn -ErrorAction Stop | Select-Object -First 1
+                            }
                             if (-not $tgtItem) { throw "target item not found: $targetFileServerRel" }
                             Set-PnPListItem -List $laneTargetList -Identity $tgtItem.Id -Values $values -Connection $laneTargetConn -ErrorAction Stop | Out-Null
                         }
@@ -1796,6 +1807,9 @@ try {
                                 $tgtItem = try { Get-PnPFile -Url $targetFileServerRel -AsListItem -Connection $laneTargetConn -ErrorAction Stop } catch {
                                     # Literal %XX in a name defeats Get-PnPFile's URL decoding - look the item up by exact path.
                                     Get-PnPListItem -List $laneTargetList -Query "<View Scope='RecursiveAll'><Query><Where><Eq><FieldRef Name='FileRef'/><Value Type='Text'>$([System.Security.SecurityElement]::Escape($targetFileServerRel))</Value></Eq></Where></Query><RowLimit>1</RowLimit></View>" -Connection $laneTargetConn -ErrorAction Stop | Select-Object -First 1
+                                }
+                                if (-not $tgtItem -or -not $tgtItem.Id) {
+                                    $tgtItem = Get-PnPListItem -List $laneTargetList -Query "<View Scope='RecursiveAll'><Query><Where><Eq><FieldRef Name='FileRef'/><Value Type='Text'>$([System.Security.SecurityElement]::Escape($targetFileServerRel))</Value></Eq></Where></Query><RowLimit>1</RowLimit></View>" -Connection $laneTargetConn -ErrorAction Stop | Select-Object -First 1
                                 }
                                 if (-not $tgtItem) { throw "target item not found: $targetFileServerRel" }
                                 Set-PnPListItem -List $laneTargetList -Identity $tgtItem.Id -Values $values -Connection $laneTargetConn -ErrorAction Stop | Out-Null
