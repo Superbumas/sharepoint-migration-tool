@@ -77,8 +77,40 @@ function clearScreen(url) {
   return true;
 }
 
+// Everything the terminal shows (these lines AND any raw console.* output
+// from elsewhere) is also appended, without colours, to a daily file under
+// <data dir>/logs/server-YYYY-MM-DD.log - so clearing the screen at a run
+// start never throws anything away.
+let fileLogDir = null;
+function installFileLog(dir) {
+  if (fileLogDir || process.env.SPMT_NO_FILE_LOG === '1') return;
+  const fs = require('node:fs');
+  const path = require('node:path');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch { return; }
+  fileLogDir = dir;
+  const strip = (t) => t.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/\x1bc/g, '');
+  const tee = (stream) => {
+    const orig = stream.write.bind(stream);
+    stream.write = (chunk, ...rest) => {
+      try {
+        const text = strip(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+        if (text) {
+          const d = new Date();
+          const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+          fs.appendFileSync(path.join(dir, `server-${day}.log`), text);
+        }
+      } catch { /* never let file logging break the terminal */ }
+      return orig(chunk, ...rest);
+    };
+  };
+  tee(process.stdout);
+  tee(process.stderr);
+}
+
 module.exports = {
   clearScreen,
+  installFileLog,
+  logDir: () => fileLogDir,
   C,
   bar,
   spin,

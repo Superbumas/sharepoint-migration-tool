@@ -536,8 +536,8 @@ function runJob(jobId, actor, tenantId) {
 
   // Fresh console per run - but never while another job is running, or its
   // lines would vanish mid-run. Set SPMT_KEEP_CONSOLE=1 to keep everything.
-  if (runningJobs.size === 0 && clog.clearScreen(`http://localhost:${config.port}`)) {
-    clog.dim('job', `${job.name || jobId}: console cleared for this run - earlier lines stay in the job's reports and exports.`);
+  if (runningJobs.size === 0 && clog.logDir() && clog.clearScreen(`http://localhost:${config.port}`)) {
+    clog.dim('job', `${job.name || jobId}: console cleared for this run - earlier lines are kept in ${clog.logDir() || 'the job reports and exports'}.`);
   }
 
   const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'], env: buildEngineSpawnEnv(job, engineIdentity, blobConnectionString) });
