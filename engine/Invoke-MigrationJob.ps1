@@ -159,6 +159,23 @@ function Join-UrlSegments {
     ($Segments | Where-Object { $_ } | ForEach-Object { $_.Trim('/') } | Where-Object { $_ }) -join '/'
 }
 
+# Copy-PnPFile runs on the SOURCE connection and resolves a server-relative
+# -TargetUrl against the source's own host. That is fine when both sites
+# share a host, but a OneDrive source lives on <tenant>-my.sharepoint.com
+# while the target is on <tenant>.sharepoint.com, so the copy was aimed at a
+# path that doesn't exist on the -my host ("Cannot contact site at the
+# specified URL"). Returns the scheme+host to prefix onto server-relative
+# target URLs when the hosts differ, or '' when they match (unchanged
+# behaviour for same-host copies).
+function Get-CrossHostTargetPrefix {
+    param([string]$SourceSiteUrl, [string]$TargetSiteUrl)
+    if (-not $SourceSiteUrl -or -not $TargetSiteUrl) { return '' }
+    $src = [Uri]$SourceSiteUrl
+    $tgt = [Uri]$TargetSiteUrl
+    if ($src.Authority -ieq $tgt.Authority) { return '' }
+    return "$($tgt.Scheme)://$($tgt.Authority)"
+}
+
 function Get-ServerRelativeSitePath {
     param([string]$SiteUrl)
     if (-not $SiteUrl) { return '' }
@@ -1007,6 +1024,14 @@ try {
         }
         $laneSourceConn = Connect-PnPOnline -Url $SourceSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection
         $laneTargetConn = if ($SameSite) { $laneSourceConn } else { Connect-PnPOnline -Url $TargetSiteUrl -ClientId $ClientId -Tenant $TenantId @certArgs -ReturnConnection }
+        # Same rule as Get-CrossHostTargetPrefix (lane runspaces can't see
+        # script-scope functions): a cross-host copy, e.g. OneDrive (-my
+        # host) into a SharePoint site, needs an absolute -TargetUrl.
+        $laneTargetUrlPrefix = ''
+        if ($SourceSiteUrl -and $TargetSiteUrl) {
+            $laneSrcUri = [Uri]$SourceSiteUrl; $laneTgtUri = [Uri]$TargetSiteUrl
+            if ($laneSrcUri.Authority -ine $laneTgtUri.Authority) { $laneTargetUrlPrefix = "$($laneTgtUri.Scheme)://$($laneTgtUri.Authority)" }
+        }
 
         # Target library list, resolved once per lane - used to stamp original
         # metadata (Created/Modified/Author/Editor) onto each copied file.
@@ -1122,7 +1147,7 @@ try {
                 }
                 try {
                     Invoke-WithRetry -MaxAttempts 5 -Action {
-                        Copy-PnPFile -SourceUrl $sourceFileServerRel -TargetUrl $targetFolderServerRel `
+                        Copy-PnPFile -SourceUrl $sourceFileServerRel -TargetUrl "$laneTargetUrlPrefix$targetFolderServerRel" `
                             -Force -OverwriteIfAlreadyExists -Connection $laneSourceConn -ErrorAction Stop
                     } -OnRetry {
                         param($attempt, $waitMs, $reason, $statusCode, $message)
@@ -1989,7 +2014,7 @@ try {
                             try {
                                 Invoke-WithRetry -MaxAttempts 3 -Action {
                                     $tgtFolderRel = "$targetSiteServerRelative/$targetRoot/$relFromRoot".TrimEnd('/').Replace('//', '/')
-                                    Copy-PnPFile -SourceUrl $srcRel -TargetUrl $tgtFolderRel -Force -OverwriteIfAlreadyExists -Connection $sourceConn -ErrorAction Stop
+                                    Copy-PnPFile -SourceUrl $srcRel -TargetUrl "$(Get-CrossHostTargetPrefix -SourceSiteUrl $SourceSiteUrl -TargetSiteUrl $effTargetSite)$tgtFolderRel" -Force -OverwriteIfAlreadyExists -Connection $sourceConn -ErrorAction Stop
                                 }
                             } catch {
                                 Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Server-side re-copy failed for '$rel' ($($_.Exception.Message)) - retrying as a stream copy..." }
