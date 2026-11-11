@@ -164,7 +164,7 @@ export default function JobQueue() {
 
       <div className="bg-white border border-slate-200 rounded-lg overflow-x-auto">
         <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
+          <thead className="bg-brand-100 text-slate-800 text-xs uppercase">
             <tr>
               <th className="text-left px-4 py-2">Name</th>
               <th className="hidden md:table-cell text-left px-4 py-2">Status</th>

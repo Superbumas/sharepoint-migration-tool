@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import Logo from './Logo';
 
 const navItem = ({ isActive }) =>
   `shrink-0 px-3 py-2 rounded-md text-sm font-medium whitespace-nowrap transition-colors ${
-    isActive ? 'bg-slate-900 text-white shadow-sm dark:bg-slate-100 dark:text-slate-900' : 'text-slate-600 hover:bg-slate-200/70'
+    isActive ? 'bg-brand-100 text-slate-900' : 'text-slate-600 hover:bg-slate-200/70'
   }`;
 
 function NavLinks() {
@@ -72,24 +73,21 @@ export default function Header() {
   const { user } = useAuth();
 
   return (
-    <header className="bg-white/90 backdrop-blur border-b border-slate-200 sticky top-0 z-10">
+    <header className="bg-white/90 backdrop-blur border-b-2 border-brand-500 sticky top-0 z-10">
       {/* One row from lg up. Below lg the nav drops to its own horizontally
           scrollable row, so the page never scrolls sideways. The signed-in
           name and email live in the avatar's tooltip - there's no room for
           them next to the nav and the project chip without wrapping. */}
       <div className="max-w-7xl mx-auto px-4 flex flex-wrap lg:flex-nowrap items-center justify-between gap-x-4">
         <div className="flex items-center gap-5 min-w-0 h-16">
-          <div className="flex items-center gap-2.5 shrink-0">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white text-sm font-bold shadow-sm" aria-hidden>
-              ⇥
-            </div>
-            <span className="font-semibold text-slate-800 whitespace-nowrap">
-              <span className="hidden sm:inline">SharePoint Migration Tool</span>
-              <span className="sm:hidden">Migration Tool</span>
+          <div className="flex items-center gap-3 shrink-0">
+            <Logo height={26} />
+            <span className="font-semibold text-slate-800 whitespace-nowrap border-l border-slate-200 pl-3">
+              Migration Tool
             </span>
           </div>
           {user?.project && (
-            <span className="hidden xl:inline-flex items-center gap-1.5 text-xs font-medium text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-full px-2.5 py-1 whitespace-nowrap max-w-xs" title={`Signed into project "${user.project.name}"${user.project.tenantName ? ` (tenant ${user.project.tenantName})` : ''}`}>
+            <span className="hidden xl:inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 bg-slate-50 border border-slate-200 rounded-full px-2.5 py-1 whitespace-nowrap max-w-xs" title={`Signed into project "${user.project.name}"${user.project.tenantName ? ` (tenant ${user.project.tenantName})` : ''}`}>
               <span className="relative flex h-1.5 w-1.5">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
                 <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-green-500" />
@@ -98,7 +96,7 @@ export default function Header() {
               {/* Suffix only when it adds information - a project named after
                   its tenant would otherwise read "x.onmicrosoft.com · x.onmicrosoft.com" */}
               {user.project.tenantName && user.project.tenantName.toLowerCase() !== user.project.name?.toLowerCase() && (
-                <span className="text-indigo-400 font-normal truncate">· {user.project.tenantName}</span>
+                <span className="text-slate-400 font-normal truncate">· {user.project.tenantName}</span>
               )}
             </span>
           )}

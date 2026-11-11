@@ -1,6 +1,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { AUTH_ERROR_MESSAGES } from './ProjectPicker';
+import Logo from './Logo';
 
 // The pre-login landing page: one "Sign in with Microsoft" button, nothing
 // else to decide. The server resolves (or auto-creates) the project for
@@ -12,9 +13,7 @@ export default function SignIn() {
 
   return (
     <div className="max-w-md mx-auto mt-24 bg-white border border-slate-200 rounded-xl p-8 shadow-sm text-center">
-      <div className="w-12 h-12 mx-auto mb-3 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white text-xl font-bold shadow" aria-hidden>
-        ⇥
-      </div>
+      <Logo height={34} className="mx-auto mb-5 block" />
       <h1 className="text-lg font-semibold text-slate-800 mb-1">SharePoint Migration Tool</h1>
       <p className="text-sm text-slate-500 mb-6">
         Sign in with your Microsoft work account. You'll go straight back to the project you used last, or your organisation's project the first time.
