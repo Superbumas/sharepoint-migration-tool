@@ -218,6 +218,127 @@ function Compare-PartMaps([hashtable]$Src, [hashtable]$Tgt) {
     return $diff
 }
 
+# --- OOXML by zip index (no full download) ---------------------------------
+# A zip ends with a central directory listing every part with its size and
+# the CRC32 of its uncompressed content. Download links accept HTTP Range,
+# so only the last 64 KB (plus the few small [Content_Types].xml / .rels
+# parts SharePoint edits, which are normalised as in a full check) are
+# fetched from each side, whatever the file's size. Any doubt (no Range
+# support, zip64, unreadable index) throws, and the caller falls back to
+# the full download.
+function Read-ZipRange([hashtable]$Ref, [long]$Offset, [long]$Count) {
+    if ($Count -le 0) { return [byte[]]::new(0) }
+    if ($Ref.File) {
+        $fs = [System.IO.File]::OpenRead($Ref.File)
+        try {
+            $null = $fs.Seek($Offset, 'Begin'); $buf = [byte[]]::new($Count); $read = 0
+            while ($read -lt $Count) { $n = $fs.Read($buf, $read, $Count - $read); if ($n -le 0) { break }; $read += $n }
+            if ($read -ne $Count) { throw 'short read' }
+            return $buf
+        } finally { $fs.Dispose() }
+    }
+    $req = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $Ref.Url)
+    $req.Headers.Range = [System.Net.Http.Headers.RangeHeaderValue]::new($Offset, $Offset + $Count - 1)
+    $resp = $Ref.Http.SendAsync($req).GetAwaiter().GetResult()
+    try {
+        if ([int]$resp.StatusCode -ne 206) { throw "range request returned $([int]$resp.StatusCode)" }
+        $b = $resp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+        if ($b.Length -ne $Count) { throw 'range request returned the wrong length' }
+        return $b
+    } finally { $resp.Dispose(); $req.Dispose() }
+}
+function Read-ZipTail([hashtable]$Ref, [int]$Want) {
+    if ($Ref.File) {
+        $total = (Get-Item -LiteralPath $Ref.File).Length
+        $off = [Math]::Max(0, $total - $Want)
+        return @{ Bytes = (Read-ZipRange $Ref $off ($total - $off)); Total = $total }
+    }
+    $req = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $Ref.Url)
+    $req.Headers.Range = [System.Net.Http.Headers.RangeHeaderValue]::new($null, $Want)
+    $resp = $Ref.Http.SendAsync($req).GetAwaiter().GetResult()
+    try {
+        $b = $resp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+        if ([int]$resp.StatusCode -eq 200) { return @{ Bytes = $b; Total = [long]$b.Length } }
+        if ([int]$resp.StatusCode -ne 206 -or -not $resp.Content.Headers.ContentRange.Length) { throw "range request returned $([int]$resp.StatusCode)" }
+        return @{ Bytes = $b; Total = [long]$resp.Content.Headers.ContentRange.Length }
+    } finally { $resp.Dispose(); $req.Dispose() }
+}
+function Get-ZipDirectory([hashtable]$Ref) {
+    $tail = Read-ZipTail $Ref 65536
+    $b = $tail.Bytes
+    $eocd = -1
+    for ($i = $b.Length - 22; $i -ge 0; $i--) {
+        if ($b[$i] -eq 0x50 -and $b[$i + 1] -eq 0x4B -and $b[$i + 2] -eq 0x05 -and $b[$i + 3] -eq 0x06) { $eocd = $i; break }
+    }
+    if ($eocd -lt 0) { throw 'zip index not found in the last 64 KB' }
+    [long]$cdSize = [BitConverter]::ToUInt32($b, $eocd + 12)
+    [long]$cdOff = [BitConverter]::ToUInt32($b, $eocd + 16)
+    if ($cdOff -eq 0xFFFFFFFFL -or $cdSize -eq 0xFFFFFFFFL) { throw 'zip64' }
+    if ($cdSize -le 0) { throw 'empty zip index' }
+    $tailStart = $tail.Total - $b.Length
+    $cd = if ($cdOff -ge $tailStart -and ($cdOff + $cdSize) -le $tail.Total) {
+        [byte[]]$b[($cdOff - $tailStart)..($cdOff - $tailStart + $cdSize - 1)]
+    } else { Read-ZipRange $Ref $cdOff $cdSize }
+    $map = @{}
+    $p = 0
+    while ($p + 46 -le $cd.Length -and [BitConverter]::ToUInt32($cd, $p) -eq 0x02014B50) {
+        $nameLen = [BitConverter]::ToUInt16($cd, $p + 28)
+        $extraLen = [BitConverter]::ToUInt16($cd, $p + 30)
+        $commentLen = [BitConverter]::ToUInt16($cd, $p + 32)
+        $name = [System.Text.Encoding]::UTF8.GetString($cd, $p + 46, $nameLen).Replace('\', '/')
+        $e = @{
+            Name = $name
+            Method = [BitConverter]::ToUInt16($cd, $p + 10)
+            Crc = [BitConverter]::ToUInt32($cd, $p + 16)
+            CSize = [long][BitConverter]::ToUInt32($cd, $p + 20)
+            USize = [long][BitConverter]::ToUInt32($cd, $p + 24)
+            Offset = [long][BitConverter]::ToUInt32($cd, $p + 42)
+        }
+        if ($e.CSize -eq 0xFFFFFFFFL -or $e.USize -eq 0xFFFFFFFFL -or $e.Offset -eq 0xFFFFFFFFL) { throw 'zip64' }
+        if (-not $name.EndsWith('/')) { $map[$name.ToLowerInvariant()] = $e }
+        $p += 46 + $nameLen + $extraLen + $commentLen
+    }
+    if ($map.Count -eq 0) { throw 'empty or unreadable zip index' }
+    return $map
+}
+function Get-ZipEntryBytes([hashtable]$Ref, [hashtable]$Entry) {
+    $h = Read-ZipRange $Ref $Entry.Offset 30
+    if ([BitConverter]::ToUInt32($h, 0) -ne 0x04034B50) { throw "bad local header for $($Entry.Name)" }
+    $dataOff = $Entry.Offset + 30 + [BitConverter]::ToUInt16($h, 26) + [BitConverter]::ToUInt16($h, 28)
+    $data = Read-ZipRange $Ref $dataOff $Entry.CSize
+    if ($Entry.Method -eq 0) { return $data }
+    if ($Entry.Method -ne 8) { throw "unsupported compression in $($Entry.Name)" }
+    $in = [System.IO.MemoryStream]::new($data); $out = [System.IO.MemoryStream]::new()
+    $z = [System.IO.Compression.DeflateStream]::new($in, [System.IO.Compression.CompressionMode]::Decompress)
+    try { $z.CopyTo($out) } finally { $z.Dispose(); $in.Dispose() }
+    return $out.ToArray()
+}
+# Returns $null for a non-zip extension; throws when the index route can't
+# decide (caller then downloads both files in full).
+function Test-RemoteZipContent {
+    param([Parameter(Mandatory)][hashtable]$Source, [Parameter(Mandatory)][hashtable]$Target, [Parameter(Mandatory)][string]$Extension)
+    if ($script:ZipExtensions -notcontains $Extension.ToLowerInvariant()) { return $null }
+    $src = Get-ZipDirectory $Source
+    $tgt = Get-ZipDirectory $Target
+    $diff = [System.Collections.Generic.List[string]]::new()
+    $names = [System.Collections.Generic.HashSet[string]]::new([string[]]@($src.Keys + $tgt.Keys))
+    foreach ($k in $names) {
+        $s = $src[$k]; $t = $tgt[$k]
+        $display = if ($s) { $s.Name } else { $t.Name }
+        if (Test-IgnoredOpcPart $display) { continue }
+        if (-not $t) { $diff.Add("missing $k"); continue }
+        if (-not $s) { $diff.Add("added $k"); continue }
+        if ($s.Crc -eq $t.Crc -and $s.USize -eq $t.USize) { continue }
+        if ($k -eq '[content_types].xml' -or $k.EndsWith('.rels')) {
+            # Parts SharePoint edits: compare with its own entries removed.
+            if ((Get-NormalizedOpcPart $s.Name (Get-ZipEntryBytes $Source $s)) -eq (Get-NormalizedOpcPart $t.Name (Get-ZipEntryBytes $Target $t))) { continue }
+        }
+        $diff.Add("changed $k")
+    }
+    if ($diff.Count -eq 0) { return @{ Status = 'equivalent'; Detail = 'all document parts identical by zip index (only SharePoint property parts differ)' } }
+    return @{ Status = 'different'; Detail = (($diff | Select-Object -First 5) -join '; ') }
+}
+
 # --- HTML ------------------------------------------------------------------
 $script:MsoXmlns = ' xmlns:mso="urn:schemas-microsoft-com:office:office" xmlns:msdt="uuid:C2F41010-65B3-11d1-A29F-00AA00C14882"'
 function Remove-SharePointHtmlProperties([byte[]]$Bytes) {
@@ -302,11 +423,14 @@ function Invoke-RewrittenContentCheck {
     $linksAt = Get-Date
     $bigFile = 50MB
     $i = 0
+    # Zip-based Office files are checked from their index, so only other
+    # big files (downloaded in full) count as big.
+    $heavy = { param($x) [long]$x.Size -gt $bigFile -and $script:ZipExtensions -notcontains "$($x.Ext)".ToLowerInvariant() }
     while ($i -lt $ordered.Count) {
-        $isBig = [long]$ordered[$i].Size -gt $bigFile
+        $isBig = & $heavy $ordered[$i]
         $batchSize = if ($isBig) { 4 } else { [Math]::Max(1, $ThrottleLimit * 4) }
         $batch = [System.Collections.Generic.List[object]]::new()
-        while ($i -lt $ordered.Count -and $batch.Count -lt $batchSize -and (([long]$ordered[$i].Size -gt $bigFile) -eq $isBig)) {
+        while ($i -lt $ordered.Count -and $batch.Count -lt $batchSize -and ((& $heavy $ordered[$i]) -eq $isBig)) {
             $batch.Add($ordered[$i]); $i++
         }
         if ($RefreshLinks -and ((Get-Date) - $linksAt).TotalMinutes -ge $LinkMaxMinutes) {
@@ -324,15 +448,23 @@ function Invoke-RewrittenContentCheck {
             $it = $_
             Import-Module $using:modulePath
             try {
-                if ($it.Size -gt $using:MaxBytes) {
-                    return @{ Rel = $it.Rel; Key = $it.Key; Size = $it.Size; Status = 'unchecked'; Detail = 'too large for a content check' }
-                }
                 if (-not $it.TargetUrl -or (-not $it.SourceUrl -and -not $it.SourceFile)) {
                     return @{ Rel = $it.Rel; Key = $it.Key; Size = $it.Size; Status = 'unchecked'; Detail = 'no download link available' }
                 }
                 $http = [System.Net.Http.HttpClient]::new()
                 $http.Timeout = [TimeSpan]::FromMinutes(10)
                 try {
+                    # Modern Office files: compare the zip indexes (a few KB
+                    # each) instead of downloading both files.
+                    try {
+                        $z = Test-RemoteZipContent -Extension $it.Ext `
+                            -Source @{ Http = $http; Url = $it.SourceUrl; File = $it.SourceFile } `
+                            -Target @{ Http = $http; Url = $it.TargetUrl }
+                        if ($z) { return @{ Rel = $it.Rel; Key = $it.Key; Size = $it.Size; Status = $z.Status; Detail = $z.Detail; Fast = $true } }
+                    } catch { }
+                    if ($it.Size -gt $using:MaxBytes) {
+                        return @{ Rel = $it.Rel; Key = $it.Key; Size = $it.Size; Status = 'unchecked'; Detail = 'too large for a content check' }
+                    }
                     $src = if ($it.SourceFile) { [System.IO.File]::ReadAllBytes($it.SourceFile) } else { $http.GetByteArrayAsync($it.SourceUrl).GetAwaiter().GetResult() }
                     $tgt = $http.GetByteArrayAsync($it.TargetUrl).GetAwaiter().GetResult()
                 } finally { $http.Dispose() }
@@ -351,4 +483,4 @@ function Invoke-RewrittenContentCheck {
     return $results
 }
 
-Export-ModuleMember -Function Test-RewrittenFileContent, Invoke-RewrittenContentCheck
+Export-ModuleMember -Function Test-RewrittenFileContent, Test-RemoteZipContent, Invoke-RewrittenContentCheck
