@@ -8,7 +8,7 @@
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  @apply bg-slate-100 text-slate-900;
+  @apply bg-slate-100 text-slate-700;
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -16,7 +16,7 @@ body {
   /* One visible keyboard focus ring for every control, instead of relying on
      each component to remember a focus: class. Mouse clicks don't show it. */
   :focus-visible {
-    outline: 2px solid #3b82f6;
+    outline: 2px solid #EF5F24;
     outline-offset: 2px;
   }
   button, a, input, select, textarea, summary { touch-action: manipulation; }
@@ -56,7 +56,7 @@ body {
    is left alone.
 --------------------------------------------------------------------------- */
 .dark body { background-color: #09090b; color: #e4e4e7; }
-.dark :focus-visible { outline-color: #60a5fa; }
+.dark :focus-visible { outline-color: #F38354; }
 
 /* Surfaces */
 .dark .bg-white { background-color: #18181b; }
@@ -70,8 +70,8 @@ body {
 .dark .hover\:bg-slate-100:hover { background-color: #3f3f46; }
 .dark .hover\:bg-slate-200:hover { background-color: #3f3f46; }
 .dark .hover\:bg-slate-200\/70:hover { background-color: rgb(63 63 70 / 0.7); }
-.dark .hover\:bg-blue-50\/40:hover { background-color: rgb(30 58 138 / 0.15); }
-.dark .hover\:bg-blue-50\/50:hover { background-color: rgb(30 58 138 / 0.15); }
+.dark .hover\:bg-blue-50\/40:hover { background-color: rgb(239 95 36 / 0.1); }
+.dark .hover\:bg-blue-50\/50:hover { background-color: rgb(239 95 36 / 0.1); }
 
 /* Borders & dividers */
 .dark .border-slate-100 { border-color: #27272a; }
@@ -94,44 +94,44 @@ body {
 .dark .bg-green-50 { background-color: rgb(5 46 22 / 0.5); }
 .dark .bg-red-50 { background-color: rgb(69 10 10 / 0.5); }
 .dark .bg-amber-50 { background-color: rgb(69 26 3 / 0.5); }
-.dark .bg-blue-50 { background-color: rgb(23 37 84 / 0.5); }
-.dark .bg-indigo-50 { background-color: rgb(30 27 75 / 0.5); }
-.dark .hover\:bg-blue-100:hover { background-color: rgb(23 37 84 / 0.8); }
+.dark .bg-blue-50 { background-color: rgb(239 95 36 / 0.12); }
+.dark .bg-indigo-50 { background-color: rgb(239 95 36 / 0.12); }
+.dark .hover\:bg-blue-100:hover { background-color: rgb(239 95 36 / 0.22); }
 .dark .hover\:bg-amber-100:hover { background-color: rgb(69 26 3 / 0.8); }
 .dark .hover\:bg-red-100:hover { background-color: rgb(69 10 10 / 0.8); }
 .dark .border-green-200 { border-color: #166534; }
 .dark .border-red-200 { border-color: #991b1b; }
 .dark .border-amber-200 { border-color: #92400e; }
-.dark .border-blue-200 { border-color: #1e40af; }
-.dark .border-indigo-100 { border-color: #3730a3; }
-.dark .hover\:border-blue-300:hover { border-color: #1d4ed8; }
+.dark .border-blue-200 { border-color: #7A2B0A; }
+.dark .border-indigo-100 { border-color: #7A2B0A; }
+.dark .hover\:border-blue-300:hover { border-color: #C4440F; }
 .dark .text-green-800, .dark .text-green-900 { color: #86efac; }
 .dark .text-green-700 { color: #4ade80; }
 .dark .text-red-700, .dark .text-red-600 { color: #fca5a5; }
 .dark .text-amber-800, .dark .text-amber-700 { color: #fcd34d; }
-.dark .text-blue-800, .dark .text-blue-900, .dark .text-blue-700 { color: #93c5fd; }
-.dark .text-indigo-700 { color: #a5b4fc; }
-.dark .text-blue-600 { color: #60a5fa; }
-.dark .hover\:text-blue-800:hover, .dark .hover\:text-blue-600:hover { color: #93c5fd; }
-.dark .text-blue-400 { color: #60a5fa; }
-.dark .text-blue-500 { color: #60a5fa; }
+.dark .text-blue-800, .dark .text-blue-900, .dark .text-blue-700 { color: #F7A985; }
+.dark .text-indigo-700 { color: #F7A985; }
+.dark .text-blue-600 { color: #F38354; }
+.dark .hover\:text-blue-800:hover, .dark .hover\:text-blue-600:hover { color: #F7A985; }
+.dark .text-blue-400 { color: #F38354; }
+.dark .text-blue-500 { color: #F38354; }
 
 /* Status pills / badges (bg-*-100 text-*-700/800 family) */
 .dark .bg-slate-100.text-slate-600, .dark .bg-slate-200.text-slate-600 { background-color: #27272a; color: #a1a1aa; }
 .dark .bg-sky-100 { background-color: rgb(8 47 73 / 0.7); }
 .dark .text-sky-700 { color: #7dd3fc; }
-.dark .bg-blue-100 { background-color: rgb(23 37 84 / 0.7); }
+.dark .bg-blue-100, .dark .bg-brand-100 { background-color: rgb(239 95 36 / 0.2); }
 .dark .bg-green-100 { background-color: rgb(5 46 22 / 0.7); }
 .dark .bg-emerald-100 { background-color: rgb(2 44 34 / 0.7); }
 .dark .text-emerald-700 { color: #6ee7b7; }
 .dark .bg-amber-100 { background-color: rgb(69 26 3 / 0.7); }
 .dark .bg-red-100 { background-color: rgb(69 10 10 / 0.7); }
-.dark .bg-indigo-100 { background-color: rgb(30 27 75 / 0.7); }
+.dark .bg-indigo-100 { background-color: rgb(239 95 36 / 0.2); }
 .dark .bg-green-200 { background-color: rgb(5 46 22 / 0.9); }
 
 /* Gradient banners (phase banner, connection card, hero chips) */
-.dark .from-blue-50 { --tw-gradient-from: rgb(23 37 84 / 0.5) var(--tw-gradient-from-position); --tw-gradient-to: rgb(23 37 84 / 0); --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to); }
-.dark .to-indigo-50 { --tw-gradient-to: rgb(30 27 75 / 0.5) var(--tw-gradient-to-position); }
+.dark .from-blue-50 { --tw-gradient-from: rgb(239 95 36 / 0.14) var(--tw-gradient-from-position); --tw-gradient-to: rgb(239 95 36 / 0); --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to); }
+.dark .to-indigo-50 { --tw-gradient-to: rgb(239 95 36 / 0.06) var(--tw-gradient-to-position); }
 .dark .from-green-50 { --tw-gradient-from: rgb(5 46 22 / 0.5) var(--tw-gradient-from-position); --tw-gradient-to: rgb(5 46 22 / 0); --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to); }
 .dark .to-emerald-50 { --tw-gradient-to: rgb(2 44 34 / 0.5) var(--tw-gradient-to-position); }
 

@@ -149,7 +149,7 @@ export default function Dashboard() {
             </div>
           ) : (
             <Bar
-              data={{ labels: retryLabels, datasets: [{ label: 'Items', data: retryData, backgroundColor: '#f59e0b' }] }}
+              data={{ labels: retryLabels, datasets: [{ label: 'Items', data: retryData, backgroundColor: '#EF5F24' }] }}
               options={{ responsive: true, plugins: { legend: { display: false } } }}
             />
           )}
