@@ -397,6 +397,15 @@ function Remove-SharePointHtmlProperties([byte[]]$Bytes) {
     return $enc.GetBytes($s)
 }
 
+# A result that only says this attempt failed (download error, throttling,
+# missing link) must never be cached: the next Verify has to try the file
+# again rather than replay the failure.
+function Test-TransientContentResult($Result) {
+    if (-not $Result -or $Result.Status -ne 'unchecked') { return $false }
+    $d = "$($Result.Detail)"
+    return $d -like 'download failed*' -or $d -like 'no download link*'
+}
+
 # --- Entry point -----------------------------------------------------------
 function Test-RewrittenFileContent {
     param(
@@ -542,4 +551,4 @@ function Invoke-RewrittenContentCheck {
     return $results
 }
 
-Export-ModuleMember -Function Test-RewrittenFileContent, Test-RemoteZipContent, Get-HttpBytes, Invoke-RewrittenContentCheck
+Export-ModuleMember -Function Test-RewrittenFileContent, Test-RemoteZipContent, Get-HttpBytes, Invoke-RewrittenContentCheck, Test-TransientContentResult

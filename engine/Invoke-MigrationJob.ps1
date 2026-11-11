@@ -376,7 +376,7 @@ function Invoke-VerificationPhase {
             foreach ($rel in $result.OfficeRewritten) {
                 $s = $srcMap[$rel]; $t = $tgtMap[$rel]
                 $key = "$rel|$($s.Hash)|$($s.Size)|$($t.Hash)|$($t.Size)"
-                if ($ccCache.ContainsKey($key) -and $s.Hash -and $t.Hash) {
+                if ($ccCache.ContainsKey($key) -and $s.Hash -and $t.Hash -and -not (Test-TransientContentResult $ccCache[$key])) {
                     $c = $ccCache[$key]
                     if ($c.Status -eq 'equivalent') { $contentVerified.Add($rel) }
                     elseif ($c.Status -eq 'different') { $contentDifferent.Add(@{ path = $rel; detail = $c.Detail }) }
@@ -408,7 +408,7 @@ function Invoke-VerificationPhase {
                     Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal; bytesDone = $bytes; bytesTotal = $ccTotalBytes; last = $rel }
                 }
                 foreach ($c in $checked) {
-                    $ccCache[$c.Key] = @{ Status = $c.Status; Detail = $c.Detail }
+                    if (-not (Test-TransientContentResult $c)) { $ccCache[$c.Key] = @{ Status = $c.Status; Detail = $c.Detail } }
                     if ($c.Status -eq 'equivalent') { $contentVerified.Add($c.Rel) }
                     elseif ($c.Status -eq 'different') { $contentDifferent.Add(@{ path = $c.Rel; detail = $c.Detail }) }
                     else { $contentUnchecked.Add(@{ path = $c.Rel; detail = $c.Detail }) }
@@ -728,7 +728,7 @@ try {
                 if (-not ($officeExtensions -contains ([System.IO.Path]::GetExtension($rel).ToLowerInvariant()))) { continue }
                 if ([long]$s.Size -eq [long]$t.Size -and $s.Hash -and $t.Hash -and $s.Hash -eq $t.Hash) { continue }  # byte-identical, no rewrite
                 $key = "$rel|$($s.Hash)|$($s.Size)|$($t.Hash)|$($t.Size)"
-                if ($s.Hash -and $t.Hash -and $ccCache.ContainsKey($key)) {
+                if ($s.Hash -and $t.Hash -and $ccCache.ContainsKey($key) -and -not (Test-TransientContentResult $ccCache[$key])) {
                     $c = $ccCache[$key]
                     if ($c.Status -eq 'equivalent') { $null = $contentProven.Add($rel) } else { $contentReason[$rel] = "content check: $($c.Detail)" }
                     continue
@@ -754,7 +754,7 @@ try {
                     Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal; bytesDone = $bytes; bytesTotal = $ccTotalBytes; last = $rel }
                 }
                 foreach ($c in $checked) {
-                    $ccCache[$c.Key] = @{ Status = $c.Status; Detail = $c.Detail }
+                    if (-not (Test-TransientContentResult $c)) { $ccCache[$c.Key] = @{ Status = $c.Status; Detail = $c.Detail } }
                     if ($c.Status -eq 'equivalent') { $null = $contentProven.Add($c.Rel) } else { $contentReason[$c.Rel] = "content check: $($c.Detail)" }
                 }
                 if ($ContentCachePath) {

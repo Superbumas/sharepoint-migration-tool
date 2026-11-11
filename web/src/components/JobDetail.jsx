@@ -477,7 +477,10 @@ export default function JobDetail() {
   }
   // A Verify / clean-up / pre-flight on a finished job reports a phase while
   // it runs; until it ends, the stored verification is the previous result.
-  const backgroundOp = job.status === 'completed' && !!job.phase;
+  const backgroundOp = job.status === 'completed' && (!!job.activeOperation || !!job.phase);
+  if (job.activeOperation === 'verify') {
+    notices.push({ key: 'verifying', tone: 'info', title: 'Verifying now', detail: 'every file is being re-checked against its copy · the result appears here when it finishes' });
+  }
   if (v) {
     notices.push({
       key: 'verify', tone: backgroundOp ? 'info' : !v.ok ? 'error' : v.contentUnchecked > 0 ? 'warn' : 'ok',
@@ -534,7 +537,9 @@ export default function JobDetail() {
   // deletes from a file share (no recycle bin to soften it).
   // Only offered from a verification that content-checked the files
   // SharePoint rewrote (older ones only assumed them fine - click Verify).
-  const contentProven = v && (v.contentVerified != null || !(v.officeRewritten > 0));
+  // ... and only once every rewritten file was content-checked: with some
+  // still unchecked, Verify again first (it re-checks only those).
+  const contentProven = v && (v.contentVerified != null || !(v.officeRewritten > 0)) && !(v.contentUnchecked > 0);
   if (job.status === 'completed' && !backgroundOp && v?.ok && contentProven && !job.cleanup && job.source.provider !== 'filesystem') {
     notices.push({
       key: 'archive', tone: 'info', title: 'Archive complete?',
@@ -659,7 +664,7 @@ export default function JobDetail() {
               style={{ width: `${job.phase?.phase === 'preparing_folders' && job.phase.total > 0 ? Math.min(100, (job.phase.done / job.phase.total) * 100) : pct}%` }}
             />
           </div>
-          {stats && (
+          {stats && job.activeOperation !== 'verify' && (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-4 pt-3 border-t border-slate-100">
               {stats.map((s) => (
                 <div key={s.label} className="min-w-0">

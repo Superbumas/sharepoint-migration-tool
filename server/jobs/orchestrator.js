@@ -1169,6 +1169,7 @@ function maybeAdaptConcurrency(jobId, job, state) {
 // emits log / verify_mismatch / verification_summary, so a completed job's
 // status can never change. Useful weeks later, e.g. right before
 // decommissioning the source site.
+const activeOps = require('./activeOps');
 const verifyRuns = new Map(); // jobId -> child process
 function verifyJob(jobId, actor, tenantId) {
   const job = getJob(jobId, tenantId);
@@ -1230,8 +1231,13 @@ function verifyJob(jobId, actor, tenantId) {
       '-TargetPath', job.target_path
     );
   }
+  // A Verify starts from a clean slate: the previous result is dropped so
+  // nothing on the page (or in a report) is based on it while the new check
+  // runs. It stays in the job log as its verification_summary line.
+  getDb().prepare('UPDATE jobs SET verification_json = NULL, verified_at = NULL, phase_json = NULL WHERE id = ?').run(jobId);
   const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'], env: buildEngineSpawnEnv(job, engineIdentity, blobConnectionString) });
   verifyRuns.set(jobId, child);
+  activeOps.set(jobId, 'verify');
   // Without an 'error' listener a failed spawn (pwsh not installed / not on
   // PATH) is an unhandled EventEmitter error and takes the whole server down.
   // 'close' still fires afterwards and does the cleanup.
@@ -1249,6 +1255,7 @@ function verifyJob(jobId, actor, tenantId) {
   });
   child.on('close', () => {
     verifyRuns.delete(jobId);
+    activeOps.clear(jobId);
     // A verify-only run emits phase heartbeats (hashing_source etc.) but no
     // lifecycle events - without this, the last heartbeat sticks as a frozen
     // "Hashing source files - N files" banner on the completed job forever.
@@ -1324,6 +1331,7 @@ function preflightJob(jobId, actor, tenantId) {
   }
   const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'], env: buildEngineSpawnEnv(job, engineIdentity, blobConnectionString) });
   preflightRuns.set(jobId, child);
+  activeOps.set(jobId, 'preflight');
   child.on('error', (err) => insertLog(jobId, { event_type: 'log', level: 'error', error_message: `Failed to start pre-flight engine process: ${err.message}` }));
   insertLog(jobId, { event_type: 'preflight_started', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
   attachNdjsonParser(
@@ -1341,6 +1349,7 @@ function preflightJob(jobId, actor, tenantId) {
   });
   child.on('close', () => {
     preflightRuns.delete(jobId);
+    activeOps.clear(jobId);
     getDb().prepare('UPDATE jobs SET phase_json = NULL WHERE id = ?').run(jobId);
     const updated = getJob(jobId);
     emitJob(jobId, { type: 'job_updated', job: updated });
@@ -1426,6 +1435,7 @@ function cleanupSourceJob(jobId, actor, tenantId) {
   }
   const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'], env: buildEngineSpawnEnv(job, engineIdentity, blobConnectionString) });
   cleanupRuns.set(jobId, child);
+  activeOps.set(jobId, 'cleanup');
   child.on('error', (err) => insertLog(jobId, { event_type: 'log', level: 'error', error_message: `Failed to start cleanup engine process: ${err.message}` }));
   insertLog(jobId, { event_type: 'cleanup_started', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
   clog.warn('cleanup', `${job.name}: source cleanup started by ${actor.name} - verified files are being moved to the source recycle bin`);
@@ -1441,6 +1451,7 @@ function cleanupSourceJob(jobId, actor, tenantId) {
   });
   child.on('close', () => {
     cleanupRuns.delete(jobId);
+    activeOps.clear(jobId);
     // Same stuck-banner guard as the verify close handler: if the run died
     // without emitting its summary event, the last phase heartbeat would
     // freeze on the job page forever.
@@ -1510,6 +1521,7 @@ function purgeRecycleBinJob(jobId, actor, tenantId) {
     env: buildEngineSpawnEnv(job, engineIdentity, job.target_provider === 'azure_blob' ? 'unused=1;AccountName=unused;AccountKey=dW51c2Vk' : null),
   });
   cleanupRuns.set(jobId, child);
+  activeOps.set(jobId, 'purge');
   child.on('error', (err) => insertLog(jobId, { event_type: 'log', level: 'error', error_message: `Failed to start purge engine process: ${err.message}` }));
   insertLog(jobId, { event_type: 'purge_started', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
   clog.warn('purge', `${job.name}: recycle-bin purge started by ${actor.name}`);
@@ -1525,6 +1537,7 @@ function purgeRecycleBinJob(jobId, actor, tenantId) {
   });
   child.on('close', () => {
     cleanupRuns.delete(jobId);
+    activeOps.clear(jobId);
     // Same stuck-banner guard as the verify close handler: if the run died
     // without emitting its summary event, the last phase heartbeat would
     // freeze on the job page forever.

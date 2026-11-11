@@ -4,6 +4,8 @@
 // those two paths sending different shapes for the "same" job was a real bug:
 // the initial page load (REST) rendered fine, but the first live update
 // (raw row, no nested source/target) crashed the page on job.source.path.
+const activeOps = require('../jobs/activeOps');
+
 function safeParse(json) {
   if (!json) return null;
   try { return JSON.parse(json); } catch { return null; }
@@ -32,6 +34,8 @@ function mapJob(row) {
     pauseRequested: !!row.pause_requested,
     cancelRequested: !!row.cancel_requested,
     phase: safeParse(row.phase_json),
+    // verify / preflight / cleanup / purge currently running, or null.
+    activeOperation: activeOps.get(row.id),
     errorMessage: row.error_message,
     verification: safeParse(row.verification_json),
     verifiedAt: row.verified_at,
