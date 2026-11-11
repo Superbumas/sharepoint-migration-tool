@@ -19,6 +19,8 @@ const EVENT_STYLE = {
   verify_mismatch: { badge: '⚠ verify', badgeClass: 'bg-red-500/20 text-red-400 font-semibold', rowClass: 'text-red-300', rowBg: 'bg-red-500/10' },
   verification_summary: { badge: '🛡 verify', badgeClass: 'bg-sky-500/15 text-sky-400', rowClass: 'text-sky-300' },
   verify_started: { badge: '🛡 verify', badgeClass: 'bg-sky-500/15 text-sky-400', rowClass: 'text-sky-300' },
+  preflight_started: { badge: '✈ pre-flight', badgeClass: 'bg-sky-500/15 text-sky-400', rowClass: 'text-sky-300' },
+  preflight_report: { badge: '✈ pre-flight', badgeClass: 'bg-sky-500/15 text-sky-400', rowClass: 'text-sky-300' },
   job_created: { badge: '● created', badgeClass: 'text-slate-300 font-semibold', rowClass: 'text-slate-300' },
   job_approved: { badge: '● approved', badgeClass: 'text-slate-300 font-semibold', rowClass: 'text-slate-300' },
   job_run: { badge: '▶ run', badgeClass: 'bg-blue-500/15 text-blue-400 font-semibold', rowClass: 'text-slate-200' },
@@ -73,6 +75,10 @@ function phaseLabel(phase) {
       return `Purging recycle bin — ${n(phase.purged)} of ${n(phase.total)} permanently deleted`;
     case 'clearing_folders':
       return `Recycling emptied folders — ${n(phase.done)} of ${n(phase.total)}`;
+    case 'preflight':
+      return phase.step === 'permissions'
+        ? `Pre-flight — checking item permissions (${n(phase.scanned)} items read)`
+        : 'Pre-flight — checking target path lengths and file sizes';
     default:
       return null;
   }
@@ -125,6 +131,12 @@ export default function JobDetail() {
   const [logFilter, setLogFilter] = useState('all');
   const [follow, setFollow] = useState(true);
   const [showProblems, setShowProblems] = useState(false);
+  const [showPreflight, setShowPreflight] = useState(false);
+  // True from clicking "Pre-flight check" until its report lands (or the run
+  // ends without one) - the job's status doesn't change during the check, so
+  // this is what lets the phase banner show for an approved/paused job.
+  const [preflightBusy, setPreflightBusy] = useState(false);
+  const preflightSawPhase = useRef(false);
   const kpiDebounce = useRef(null);
   const logRef = useRef(null);
   // Pin the log view to the newest line, but stop pinning while the user has
@@ -251,6 +263,7 @@ export default function JobDetail() {
         return;
       }
       await api.post(`/api/jobs/${id}/${action}`);
+      if (action === 'preflight') { preflightSawPhase.current = false; setPreflightBusy(true); setShowPreflight(false); }
       refreshJob();
     } catch (err) {
       setError(err.message);
@@ -259,7 +272,14 @@ export default function JobDetail() {
 
   if (!job) return <div className="text-slate-500">Loading job…</div>;
 
-  const phaseText = job.phase && phaseLabel(job.phase) && ['running', 'completed'].includes(job.status) ? phaseLabel(job.phase) : null;
+  if (preflightBusy && job.phase) preflightSawPhase.current = true;
+  if (preflightBusy && preflightSawPhase.current && !job.phase) {
+    // The check's process closed (phase cleared) - report or not, it's over.
+    preflightSawPhase.current = false;
+    setTimeout(() => setPreflightBusy(false), 0);
+  }
+
+  const phaseText = job.phase && phaseLabel(job.phase) && (['running', 'completed'].includes(job.status) || preflightBusy) ? phaseLabel(job.phase) : null;
   const isLive = ['running', 'paused'].includes(job.status);
   const done = (job.progress.itemsDone || 0) + (job.progress.itemsSkipped || 0);
   // total_items stays NULL until the engine has finished scanning the source.
@@ -283,6 +303,82 @@ export default function JobDetail() {
   const problemCount = v && !v.ok ? v.missing + v.sizeMismatch + v.hashMismatch : 0;
 
   const notices = [];
+  const pf = job.preflight;
+  if (pf && pf.files != null) {
+    const perms = pf.uniquePermissions;
+    const permsWarn = perms && ['warn', 'error', 'unknown'].includes(perms.level);
+    const hasList = pf.longPaths?.count > 0 || pf.largeFiles?.count > 0 || pf.longFolders?.count > 0 || perms?.folders?.length > 0;
+    notices.push({
+      key: 'preflight', tone: !pf.ok ? 'error' : permsWarn ? 'warn' : 'ok',
+      title: pf.ok
+        ? `Pre-flight OK: ${pf.files.toLocaleString()} files checked`
+        : `Pre-flight: ${pf.blockers.toLocaleString()} file(s) can't be copied as they are`,
+      detail: [
+        !pf.ok && pf.longPaths?.count > 0 && `${pf.longPaths.count.toLocaleString()} target path(s) over ${pf.maxPathLength} characters`,
+        !pf.ok && pf.largeFiles?.count > 0 && `${pf.largeFiles.count} file(s) over 250 GB`,
+        `longest target path ${pf.longestPath} of ${pf.maxPathLength} characters (${pf.prefixLength} used by the target location)`,
+        perms?.checked && perms.count > 0 && `${perms.count.toLocaleString()} item(s) with their own permissions (not copied)`,
+        perms?.checked && perms.count === 0 && 'no items with their own permissions',
+        perms && !perms.checked && 'permission check could not run',
+        job.preflightAt && `checked ${job.preflightAt}`,
+      ].filter(Boolean).join(' · '),
+      action: (
+        <>
+          {hasList && <button type="button" onClick={() => setShowPreflight((s) => !s)} className="text-xs font-medium text-blue-600 hover:underline shrink-0">{showPreflight ? 'Hide details' : 'Show details'}</button>}
+        </>
+      ),
+      expanded: showPreflight && hasList && (
+        <div className="max-h-64 overflow-y-auto border-t border-slate-100 bg-slate-50/60 pl-11 pr-4 py-2 space-y-2 text-xs">
+          {pf.longFolders?.count > 0 && (
+            <div>
+              <div className="font-medium text-slate-700 mb-0.5">Folders whose own target path is too long (shorten these first — everything inside them fails)</div>
+              {pf.longFolders.items.map((f) => (
+                <div key={`lf:${f.path}`} className="grid grid-cols-[56px_minmax(0,1fr)] gap-3 items-baseline py-0.5">
+                  <span className="rounded bg-red-100 text-red-700 px-1.5 py-0.5 text-[10px] font-medium text-center tabular-nums">{f.length}</span>
+                  <span className="font-mono truncate text-slate-700" title={f.path}>{f.path}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {pf.longPaths?.count > 0 && (
+            <div>
+              <div className="font-medium text-slate-700 mb-0.5">Longest file paths over the limit{pf.longPaths.count > pf.longPaths.items.length ? ` (top ${pf.longPaths.items.length} of ${pf.longPaths.count.toLocaleString()})` : ''}</div>
+              {pf.longPaths.items.map((f) => (
+                <div key={`lp:${f.path}`} className="grid grid-cols-[56px_minmax(0,1fr)] gap-3 items-baseline py-0.5">
+                  <span className="rounded bg-red-100 text-red-700 px-1.5 py-0.5 text-[10px] font-medium text-center tabular-nums">{f.length}</span>
+                  <span className="font-mono truncate text-slate-700" title={f.path}>{f.path}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {pf.largeFiles?.count > 0 && (
+            <div>
+              <div className="font-medium text-slate-700 mb-0.5">Files over SharePoint's 250 GB limit</div>
+              {pf.largeFiles.items.map((f) => (
+                <div key={`lg:${f.path}`} className="grid grid-cols-[72px_minmax(0,1fr)] gap-3 items-baseline py-0.5">
+                  <span className="rounded bg-red-100 text-red-700 px-1.5 py-0.5 text-[10px] font-medium text-center">{formatBytes(f.size)}</span>
+                  <span className="font-mono truncate text-slate-700" title={f.path}>{f.path}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {perms?.folders?.length > 0 && (
+            <div>
+              <div className="font-medium text-slate-700 mb-0.5">
+                Where the items with their own permissions are ({perms.count.toLocaleString()} in total; Microsoft recommends under {perms.recommended.toLocaleString()} per library, supports {perms.supported.toLocaleString()}). Permissions are not copied — re-apply them on the target.
+              </div>
+              {perms.folders.map((f) => (
+                <div key={`pm:${f.path}`} className="grid grid-cols-[56px_minmax(0,1fr)] gap-3 items-baseline py-0.5">
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium text-center tabular-nums ${perms.level === 'error' ? 'bg-red-100 text-red-700' : perms.level === 'warn' ? 'bg-amber-100 text-amber-700' : 'bg-slate-200 text-slate-700'}`}>{f.count.toLocaleString()}</span>
+                  <span className="font-mono truncate text-slate-700" title={f.path}>{f.path}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ),
+    });
+  }
   if (isLive && job.progress.itemsFailed > 0) {
     notices.push({ key: 'failed', tone: 'warn', title: `${job.progress.itemsFailed} file(s) failed so far`, detail: 'see the Failures filter in the log', action: <button type="button" onClick={() => setLogFilter('failures')} className="text-xs font-medium text-blue-600 hover:underline shrink-0">Show in log</button> });
   }
@@ -373,6 +469,11 @@ export default function JobDetail() {
             {job.status === 'paused' && <button type="button" onClick={() => act('resume')} className="btn-primary">Resume</button>}
             {['running', 'paused', 'approved', 'queued'].includes(job.status) && <button type="button" onClick={() => act('cancel')} className="btn-danger">Cancel</button>}
             {['failed', 'cancelled'].includes(job.status) && <button type="button" onClick={() => act('restart')} className="btn-primary">Restart</button>}
+            {['queued', 'approved', 'paused', 'failed', 'cancelled'].includes(job.status) && (
+              <button type="button" onClick={() => act('preflight')} disabled={preflightBusy} className="btn-secondary" title="Scan the source and check target path lengths, file sizes and item permissions - nothing is copied">
+                {preflightBusy ? 'Checking…' : 'Pre-flight check'}
+              </button>
+            )}
             {job.status === 'completed' && <button type="button" onClick={() => act('verify')} className="btn-secondary">Verify</button>}
             {['completed', 'failed', 'cancelled'].includes(job.status) && <button type="button" onClick={() => act('delete')} className="btn-secondary">Delete</button>}
           </div>

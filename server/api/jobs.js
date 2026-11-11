@@ -191,6 +191,12 @@ router.post('/jobs/:id/verify', (req, res, next) => {
   catch (err) { next(err); }
 });
 
+router.post('/jobs/:id/preflight', (req, res, next) => {
+  if (!requireVisibleJob(req, res)) return;
+  try { res.json(mapJob(orchestrator.preflightJob(req.params.id, getActor(req), getTenantId(req)))); }
+  catch (err) { next(err); }
+});
+
 router.post('/jobs/:id/restart', (req, res, next) => {
   if (!requireVisibleJob(req, res)) return;
   try { res.json(mapJob(orchestrator.restartJob(req.params.id, getActor(req), getTenantId(req)))); }

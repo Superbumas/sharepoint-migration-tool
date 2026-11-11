@@ -29,6 +29,18 @@ deletion time).
   get one automatic re-copy pass and a second verification. Office documents that
   SharePoint legitimately re-stamps on ingestion (property promotion) are classified
   separately, not reported as corruption.
+- **Pre-flight check before anything is copied.** Every run (and the job page's
+  *Pre-flight check* button, which copies nothing) checks the scanned tree first:
+  target paths over SharePoint's 400-character limit — counted with the full target
+  site/library/folder prefix, the usual surprise — files over 250 GB, and how many
+  source items carry their own permissions (these are not copied; Microsoft recommends
+  under 5,000 per library). The report is in the job log and on the job page.
+- **Fast, throttling-friendly scans.** SharePoint sources are enumerated with one
+  Microsoft Graph delta walk of the library instead of two calls per folder (falls back
+  to the folder walk for a small folder in a large library, or if delta fails). All
+  traffic — PnP, CSOM, Graph, OneDrive, Blob and the server's own calls — carries a
+  `NONISV|Knowall|SharePointMigrationTool/<version>` User-Agent, which Microsoft
+  prioritises when a tenant is being throttled.
 - **Original metadata carried over (SharePoint → SharePoint).** Every copied file and
   folder keeps its original Created / Modified dates and Created by / Modified by
   people, and folders keep their colour. A person who can't be found on the target
