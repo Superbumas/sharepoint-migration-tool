@@ -29,7 +29,7 @@ function Test-PnPTargetFileMatches {
         if ($SourceModified) {
             $targetModified = $null
             try { $targetModified = $existing.TimeLastModified } catch {}
-            if ($targetModified -and $targetModified -lt [datetime]$SourceModified) { return $false }
+            if ($targetModified -and $targetModified -lt ([datetime]$SourceModified).AddSeconds(-5))  # 5s: file vs list-item timestamps can differ by ~1s { return $false }
         }
         return $true
     } catch {

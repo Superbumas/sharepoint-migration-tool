@@ -144,6 +144,12 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+# Source "last modified" comes from the file (TimeLastModified) while the
+# date the engine stamps on the target comes from the list item (Modified);
+# SharePoint can keep those a second or so apart, which made the stamped
+# copy look older than its source and re-copied the file on every run.
+# Anything within 5 seconds counts as the same moment (literal AddSeconds(5)
+# in each skip check - the lanes run in separate runspaces).
 Import-Module "$PSScriptRoot/lib/Events.psm1" -Force
 Import-Module "$PSScriptRoot/lib/Retry.psm1" -Force
 Import-Module "$PSScriptRoot/lib/Verification.psm1" -Force
@@ -1123,7 +1129,7 @@ try {
                 $existing = $TargetFileMap[$relKey]
                 $alreadyDone = $existing -and
                     (([long]$existing.Size -eq [long]$item.Size) -or ($sizeMayDiffer -and $item.Modified -and $existing.Modified)) -and
-                    (-not $item.Modified -or -not $existing.Modified -or $existing.Modified -ge [datetime]$item.Modified)
+                    (-not $item.Modified -or -not $existing.Modified -or ([datetime]$existing.Modified).AddSeconds(5) -ge [datetime]$item.Modified)
             } else {
                 $alreadyDone = Test-PnPTargetFileMatches -Connection $laneTargetConn -TargetServerRelativeUrl $targetFileServerRel -ExpectedSize $item.Size -SourceModified $item.Modified -AllowSizeDifference:$sizeMayDiffer
             }
@@ -1261,7 +1267,7 @@ try {
                 $existing = $TargetFileMap[$relKey]
                 $alreadyDone = $existing -and
                     ([long]$existing.Size -eq [long]$item.Size) -and
-                    (-not $item.Modified -or -not $existing.Modified -or $existing.Modified -ge [datetime]$item.Modified)
+                    (-not $item.Modified -or -not $existing.Modified -or ([datetime]$existing.Modified).AddSeconds(5) -ge [datetime]$item.Modified)
             } else {
                 $alreadyDone = Test-BlobTargetMatches -BlobEndpoint $BlobEndpoint -Container $Container -Sas $Sas `
                     -BlobKey $blobKey -ExpectedSize $item.Size -SourceModified $item.Modified
@@ -1449,7 +1455,7 @@ try {
                 $existing = $TargetFileMap[$relKey]
                 $alreadyDone = $existing -and
                     ([long]$existing.Size -eq [long]$item.Size) -and
-                    (-not $item.Modified -or -not $existing.Modified -or $existing.Modified -ge [datetime]$item.Modified)
+                    (-not $item.Modified -or -not $existing.Modified -or ([datetime]$existing.Modified).AddSeconds(5) -ge [datetime]$item.Modified)
             } else {
                 $alreadyDone = Test-OneDriveTargetMatches -Connection $laneOneDriveConn -DriveId $TargetDriveId `
                     -RelPath $targetRelPath -ExpectedSize $item.Size -SourceModified $item.Modified
@@ -1604,7 +1610,7 @@ try {
                 $existing = $TargetFileMap[$relKey]
                 $alreadyDone = $existing -and
                     ([long]$existing.Size -eq [long]$item.Size) -and
-                    (-not $item.Modified -or -not $existing.Modified -or $existing.Modified -ge [datetime]$item.Modified)
+                    (-not $item.Modified -or -not $existing.Modified -or ([datetime]$existing.Modified).AddSeconds(5) -ge [datetime]$item.Modified)
             } else {
                 $alreadyDone = Test-PnPTargetFileMatches -Connection $laneTargetConn -TargetServerRelativeUrl $targetFileServerRel -ExpectedSize $item.Size -SourceModified $item.Modified
             }

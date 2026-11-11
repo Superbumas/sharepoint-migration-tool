@@ -743,7 +743,11 @@ function consoleEngineEvent(job, event) {
       clog.stop('job', `${name}: paused`);
       break;
     case 'job_completed':
-      clog.ok('job', `${name}: completed — ${(job.items_done ?? 0).toLocaleString()} files, ${fmtBytes(job.bytes_done)}`);
+      {
+        const copied = job.items_done ?? 0;
+        const skipped = job.items_skipped ?? 0;
+        clog.ok('job', `${name}: completed — ${copied.toLocaleString()} copied${skipped ? `, ${skipped.toLocaleString()} already there` : ''} (${fmtBytes(job.bytes_done)} total)`);
+      }
       break;
     case 'job_failed':
       clog.error('job', `${name}: FAILED — ${event.error || 'unknown engine error'}`);
@@ -755,7 +759,13 @@ function consoleEngineEvent(job, event) {
       const v = event.verification || {};
       const problems = (v.Missing?.length ?? v.missing ?? 0) + (v.SizeMismatch?.length ?? v.sizeMismatch ?? 0) + (v.HashMismatch?.length ?? v.hashMismatch ?? 0);
       if (problems > 0) clog.warn('verify', `${name}: ${problems} problem(s) found`);
-      else clog.ok('verify', `${name}: all files verified identical`);
+      else {
+        const identical = v.identical ?? v.Identical;
+        const rewritten = v.officeRewritten ?? v.OfficeRewritten ?? 0;
+        clog.ok('verify', identical != null
+          ? `${name}: verification passed — ${Number(identical).toLocaleString()} identical${rewritten ? `, ${Number(rewritten).toLocaleString()} re-stamped by SharePoint (expected)` : ''}, 0 problems`
+          : `${name}: verification passed — 0 problems`);
+      }
       break;
     }
     case 'source_deleted':
