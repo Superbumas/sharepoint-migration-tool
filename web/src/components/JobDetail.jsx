@@ -331,14 +331,32 @@ export default function JobDetail() {
   }
   const earlierCount = runStart;
   const runLog = showEarlierRuns ? log : log.slice(runStart);
+  // Verification problems that a repair round then fixed are history, not
+  // failures: once the job verifies clean every one of them is resolved, and
+  // before that a mismatch is resolved by a later successful re-copy of the
+  // same file (mismatch paths are library-relative, copy paths are full).
+  const isVerifyProblem = (l) => l.event_type === 'verify_mismatch'
+    || (l.event_type === 'log' && l.level === 'error' && /^Verification FOUND/i.test(l.error_message || ''));
+  const verifiedClean = job.status !== 'running' && !!(job.verification && job.verification.ok);
+  const resolvedRows = new Set();
+  runLog.forEach((l, i) => {
+    if (!isVerifyProblem(l)) return;
+    if (verifiedClean) { resolvedRows.add(l); return; }
+    if (l.event_type !== 'verify_mismatch' || !l.source_path) return;
+    const tail = '/' + String(l.source_path).replace(/^\/+/, '');
+    for (let j = i + 1; j < runLog.length; j++) {
+      const r = runLog[j];
+      if (r.event_type === 'item_success' && r.source_path && String(r.source_path).endsWith(tail)) { resolvedRows.add(l); break; }
+    }
+  });
   const visibleLog = runLog.filter((l) => {
     if (logFilter === 'all') return true;
-    if (logFilter === 'failures') return l.event_type === 'item_failed' || l.event_type === 'verify_mismatch' || l.event_type === 'job_failed' || (l.event_type === 'log' && l.level === 'error');
+    if (logFilter === 'failures') return !resolvedRows.has(l) && (l.event_type === 'item_failed' || l.event_type === 'verify_mismatch' || l.event_type === 'job_failed' || (l.event_type === 'log' && l.level === 'error'));
     if (logFilter === 'warnings') return l.event_type === 'item_retry' || l.event_type === 'source_kept' || l.event_type === 'job_interrupted' || (l.event_type === 'log' && l.level === 'warn');
     if (logFilter === 'job') return String(l.event_type || '').startsWith('job_') || ['verification_summary', 'verify_started', 'cleanup_started', 'cleanup_summary', 'purge_started', 'purge_summary'].includes(l.event_type);
     return true;
   });
-  const failureCount = runLog.filter((l) => l.event_type === 'item_failed' || l.event_type === 'verify_mismatch' || (l.event_type === 'log' && l.level === 'error')).length;
+  const failureCount = runLog.filter((l) => !resolvedRows.has(l) && (l.event_type === 'item_failed' || l.event_type === 'verify_mismatch' || (l.event_type === 'log' && l.level === 'error'))).length;
   const warningCount = runLog.filter((l) => l.event_type === 'item_retry' || (l.event_type === 'log' && l.level === 'warn')).length;
   const v = job.verification;
   const problemCount = v && !v.ok ? v.missing + v.sizeMismatch + v.hashMismatch : 0;
@@ -596,7 +614,7 @@ export default function JobDetail() {
             {visibleLog.map((l, i) => {
               const s = styleFor(l);
               return (
-                <div key={i} className={`grid grid-cols-[64px_96px_minmax(0,1fr)_72px_56px] gap-2 items-baseline rounded px-1 -mx-1 ${s.rowClass} ${s.rowBg || ''}`}>
+                <div key={i} className={`grid grid-cols-[64px_96px_minmax(0,1fr)_72px_56px] gap-2 items-baseline rounded px-1 -mx-1 ${resolvedRows.has(l) ? 'text-slate-500 opacity-60' : `${s.rowClass} ${s.rowBg || ''}`}`} title={resolvedRows.has(l) ? 'Fixed later in this run by a repair re-copy' : undefined}>
                   <span className="text-slate-600 tabular-nums">{formatTime(l.ts)}</span>
                   <span className={`rounded px-1 text-center truncate ${s.badgeClass}`}>{s.badge}</span>
                   <span className="min-w-0 truncate" title={[l.source_path, l.error_message].filter(Boolean).join(' — ')}>
