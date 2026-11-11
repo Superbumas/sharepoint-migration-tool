@@ -54,6 +54,10 @@ function styleFor(line) {
   return EVENT_STYLE[line.event_type] || { badge: line.event_type, badgeClass: 'text-slate-500', rowClass: 'text-slate-300' };
 }
 
+// Log rows that begin a new run of the job: the live log and its
+// Failures/Warnings counts start from the latest one.
+const RUN_START_EVENTS = new Set(['job_restarted', 'job_run', 'job_resumed']);
+
 // Human line for the phase banner, per engine phase_progress event shape
 // (engine/Invoke-MigrationJob.ps1's Write-PhaseProgress call sites).
 function phaseLabel(phase) {
@@ -73,6 +77,8 @@ function phaseLabel(phase) {
       return `Cleaning source — ${n(phase.deleted)} recycled · ${n(phase.kept)} kept of ${n(phase.total)}`;
     case 'stamping_folders':
       return `Restoring folder dates and owners — ${n(phase.done)} of ${n(phase.total)}`;
+    case 'content_check':
+      return `Checking content of files SharePoint rewrote — ${n(phase.done)} of ${n(phase.total)}`;
     case 'purging':
       return `Purging recycle bin — ${n(phase.purged)} of ${n(phase.total)} permanently deleted`;
     case 'clearing_folders':
@@ -215,7 +221,7 @@ export default function JobDetail() {
       // phase_progress/checkpoint heartbeats never become rows at all.
       if (msg.type === 'log_row' && msg.row) {
         setLog((prev) => [...prev.slice(-299), msg.row]);
-        if (msg.row.event_type === 'job_restarted') setShowEarlierRuns(false);
+        if (RUN_START_EVENTS.has(msg.row.event_type)) setShowEarlierRuns(false);
       }
       if (msg.type === 'engine_event' && msg.event) {
         const ev = msg.event;
@@ -346,8 +352,14 @@ export default function JobDetail() {
   const preCopyPhase = job.phase && ['enumerating', 'preparing_folders', 'indexing'].includes(job.phase.phase);
   const showLaneRows = laneEntries.length > 0 || (!preCopyPhase && done > 0);
   let runStart = 0;
+  // Every Run / Resume / Restart starts a fresh view (a restart writes
+  // job_restarted then job_run - keep both lines).
   for (let i = log.length - 1; i > 0; i--) {
-    if (log[i].event_type === 'job_restarted') { runStart = i; break; }
+    if (RUN_START_EVENTS.has(log[i].event_type)) {
+      runStart = i;
+      while (runStart > 0 && RUN_START_EVENTS.has(log[runStart - 1].event_type)) runStart--;
+      break;
+    }
   }
   const earlierCount = runStart;
   const runLog = showEarlierRuns ? log : log.slice(runStart);
@@ -467,7 +479,9 @@ export default function JobDetail() {
       title: v.ok ? `Verified: ${v.identical} of ${v.sourceFiles} files byte-identical` : `Verification found ${problemCount} problem(s)`,
       detail: [
         !v.ok && `${v.missing} missing · ${v.sizeMismatch} size / ${v.hashMismatch} hash mismatches`,
-        v.officeRewritten > 0 && `${v.officeRewritten} Office file(s) re-stamped by SharePoint (expected)`,
+        v.officeRewritten > 0 && (v.contentVerified != null
+          ? `${v.contentVerified} re-stamped by SharePoint, content checked and identical${v.contentUnchecked ? ` · ${v.contentUnchecked} re-stamped but not content-checked` : ''}`
+          : `${v.officeRewritten} Office file(s) re-stamped by SharePoint (content not checked)`),
         job.verifiedAt && `verified ${job.verifiedAt}`,
       ].filter(Boolean).join(' · '),
       action: (

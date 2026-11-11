@@ -13,6 +13,8 @@ const COLORS = {
 };
 const LOGO_PATH = require('path').join(__dirname, 'assets', 'knowall-logo.png');
 const BRAND_NAME = 'Knowall IT';
+const FONT_REGULAR = require('path').join(__dirname, 'assets', 'fonts', 'LiberationSans-Regular.ttf');
+const FONT_BOLD = require('path').join(__dirname, 'assets', 'fonts', 'LiberationSans-Bold.ttf');
 
 function formatBytes(n) {
   if (!n && n !== 0) return '-';
@@ -52,6 +54,18 @@ class Report {
     this.left = doc.page.margins.left;
     this.width = doc.page.width - doc.page.margins.left - doc.page.margins.right;
     this.bottom = () => doc.page.height - doc.page.margins.bottom;
+    // PDFKit's built-in Helvetica only covers Western European characters,
+    // so names like "ąčęėįšųūž" printed as garbage. Liberation Sans (SIL OFL,
+    // Arial-metric) is embedded under the same names, so every existing
+    // font('Helvetica'/'Helvetica-Bold') call uses it.
+    try {
+      doc.registerFont('Helvetica', FONT_REGULAR);
+      doc.registerFont('Helvetica-Bold', FONT_BOLD);
+      // PDFKit already loaded the built-in Helvetica as the default font and
+      // caches fonts by name, so drop that cache entry or it keeps winning.
+      if (doc._fontFamilies) { delete doc._fontFamilies.Helvetica; delete doc._fontFamilies['Helvetica-Bold']; }
+      doc.font('Helvetica');
+    } catch { /* fonts missing: fall back to the built-in Helvetica */ }
   }
   ensure(height) {
     if (this.doc.y + height > this.bottom()) this.doc.addPage();

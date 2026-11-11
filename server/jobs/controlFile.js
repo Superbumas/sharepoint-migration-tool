@@ -48,4 +48,18 @@ function removeTreeCache(jobId) {
   }
 }
 
-module.exports = { controlFilePath, writeControlFile, removeControlFile, treeCachePath, removeTreeCache };
+// Content-check cache (engine -ContentCachePath): one file per source+target
+// location, so results survive re-created jobs and Verify runs. Entries are
+// keyed by path + both file hashes, so a stale entry can never vouch for a
+// changed file.
+const CONTENT_CACHE_DIR = path.join(__dirname, '..', '..', 'data', 'content-check');
+function contentCachePath(job) {
+  fs.mkdirSync(CONTENT_CACHE_DIR, { recursive: true });
+  const key = [job.source_provider, job.source_site_url, job.source_library, job.source_path,
+    job.target_provider, job.target_site_url, job.target_library, job.target_path,
+    job.target_onedrive_upn, job.target_onedrive_path].map((v) => String(v ?? '')).join('|');
+  const hash = require('crypto').createHash('sha1').update(key.toLowerCase()).digest('hex').slice(0, 20);
+  return path.join(CONTENT_CACHE_DIR, `${hash}.json`);
+}
+
+module.exports = { controlFilePath, writeControlFile, removeControlFile, treeCachePath, removeTreeCache, contentCachePath };

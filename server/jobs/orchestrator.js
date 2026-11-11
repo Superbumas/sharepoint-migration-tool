@@ -5,7 +5,7 @@ const { v4: uuid } = require('uuid');
 const { getDb } = require('../db');
 const config = require('../config');
 const { attachNdjsonParser } = require('./ndjson');
-const { controlFilePath, writeControlFile, removeControlFile, treeCachePath, removeTreeCache } = require('./controlFile');
+const { controlFilePath, writeControlFile, removeControlFile, treeCachePath, removeTreeCache, contentCachePath } = require('./controlFile');
 const { mapJob } = require('../util/mapJob');
 const clog = require('../util/consoleLog');
 const { decrypt } = require('../util/secretCrypto');
@@ -493,6 +493,7 @@ function runJob(jobId, actor, tenantId) {
     '-NonInteractive',
     '-File', config.engineScriptPath,
     '-JobId', jobId,
+    '-ContentCachePath', contentCachePath(job),
     '-SourceProvider', job.source_provider || 'sharepoint',
     '-SourceSiteUrl', job.source_site_url || '',
     '-SourceLibrary', job.source_library || '',
@@ -701,6 +702,7 @@ function consoleEngineEvent(job, event) {
         : p.phase === 'cleaning' ? `cleaning source — ${(p.deleted ?? 0).toLocaleString()} recycled, ${(p.kept ?? 0).toLocaleString()} kept of ${(p.total ?? 0).toLocaleString()}`
         : p.phase === 'clearing_folders' ? `recycling emptied folders — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
         : p.phase === 'stamping_folders' ? `restoring folder dates and owners — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
+        : p.phase === 'content_check' ? `checking content of files SharePoint rewrote — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
         : p.phase === 'purging' ? `purging recycle bin — ${(p.purged ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
         : p.phase === 'preflight' ? (p.step === 'permissions' ? `pre-flight: checking permissions — ${(p.scanned ?? 0).toLocaleString()} items` : 'pre-flight: checking paths and sizes')
         : p.phase;
@@ -744,7 +746,11 @@ function consoleEngineEvent(job, event) {
       clog.stop('job', `${name}: paused`);
       break;
     case 'job_completed':
-      clog.ok('job', `${name}: completed — ${(job.items_done ?? 0).toLocaleString()} files, ${fmtBytes(job.bytes_done)}`);
+      {
+        const copied = job.items_done ?? 0;
+        const skipped = job.items_skipped ?? 0;
+        clog.ok('job', `${name}: completed — ${copied.toLocaleString()} copied${skipped ? `, ${skipped.toLocaleString()} already there` : ''} (${fmtBytes(job.bytes_done)} total)`);
+      }
       break;
     case 'job_failed':
       clog.error('job', `${name}: FAILED — ${event.error || 'unknown engine error'}`);
@@ -756,7 +762,13 @@ function consoleEngineEvent(job, event) {
       const v = event.verification || {};
       const problems = (v.Missing?.length ?? v.missing ?? 0) + (v.SizeMismatch?.length ?? v.sizeMismatch ?? 0) + (v.HashMismatch?.length ?? v.hashMismatch ?? 0);
       if (problems > 0) clog.warn('verify', `${name}: ${problems} problem(s) found`);
-      else clog.ok('verify', `${name}: all files verified identical`);
+      else {
+        const identical = v.identical ?? v.Identical;
+        const rewritten = v.officeRewritten ?? v.OfficeRewritten ?? 0;
+        clog.ok('verify', identical != null
+          ? `${name}: verification passed — ${Number(identical).toLocaleString()} identical${rewritten ? `, ${Number(v.contentVerified ?? 0).toLocaleString()} re-stamped by SharePoint and content-checked${v.contentUnchecked ? `, ${Number(v.contentUnchecked).toLocaleString()} not content-checked` : ''}` : ''}, 0 problems`
+          : `${name}: verification passed — 0 problems`);
+      }
       break;
     }
     case 'preflight_report': {
@@ -1181,6 +1193,7 @@ function verifyJob(jobId, actor, tenantId) {
     '-NonInteractive',
     '-File', config.engineScriptPath,
     '-JobId', jobId,
+    '-ContentCachePath', contentCachePath(job),
     '-SourceProvider', job.source_provider || 'sharepoint',
     '-SourceSiteUrl', job.source_site_url || '',
     '-SourceLibrary', job.source_library || '',
@@ -1377,6 +1390,7 @@ function cleanupSourceJob(jobId, actor, tenantId) {
     '-NonInteractive',
     '-File', config.engineScriptPath,
     '-JobId', jobId,
+    '-ContentCachePath', contentCachePath(job),
     '-SourceSiteUrl', job.source_site_url || '',
     '-SourceLibrary', job.source_library || '',
     '-SourcePath', job.source_path,
@@ -1464,6 +1478,7 @@ function purgeRecycleBinJob(jobId, actor, tenantId) {
     '-NonInteractive',
     '-File', config.engineScriptPath,
     '-JobId', jobId,
+    '-ContentCachePath', contentCachePath(job),
     '-SourceSiteUrl', job.source_site_url || '',
     '-SourceLibrary', job.source_library || '',
     '-SourcePath', job.source_path,

@@ -59,14 +59,22 @@ function folderName(job) {
 // The verification verdict with expected Office/Outlook rewrites taken out.
 // state: 'verified' | 'exceptions' | 'unverified'.
 function effectiveVerification(verification) {
-  if (!verification) return { state: 'unverified', problems: [], problemCount: 0, expectedRewrites: 0, confirmed: 0 };
+  if (!verification) return { state: 'unverified', problems: [], problemCount: 0, expectedRewrites: 0, confirmed: 0, contentChecked: false, contentVerified: 0, contentUnchecked: 0, contentUncheckedList: [] };
   const listed = Array.isArray(verification.problems) ? verification.problems : [];
   const reclassified = listed.filter((p) => p.reason !== 'missing' && isOfficeFile(p.path));
   const problems = listed.filter((p) => !(p.reason !== 'missing' && isOfficeFile(p.path)));
   const rawCount = (verification.missing ?? 0) + (verification.sizeMismatch ?? 0) + (verification.hashMismatch ?? 0);
   const problemCount = Math.max(problems.length, rawCount - reclassified.length);
   const expectedRewrites = (verification.officeRewritten ?? 0) + reclassified.length;
+  // Content check (engine ContentCheck.psm1): rewritten files compared part
+  // by part. Absent on verifications recorded before it existed - those
+  // rewrites were never content-checked and are reported as such.
+  const contentChecked = verification.contentVerified != null;
+  const contentVerified = contentChecked ? verification.contentVerified : 0;
+  const contentUnchecked = contentChecked ? (verification.contentUnchecked ?? 0) : expectedRewrites;
   return {
+    contentChecked, contentVerified, contentUnchecked,
+    contentUncheckedList: Array.isArray(verification.contentUncheckedList) ? verification.contentUncheckedList : [],
     state: problemCount === 0 ? 'verified' : 'exceptions',
     problems,
     problemCount,
@@ -92,10 +100,12 @@ const PROBLEM_LABEL = {
 // path), classified as at-destination or not.
 function jobOutcome(db, job) {
   const rel = relativizer(job);
-  const items = db.prepare(
+  const allItems = db.prepare(
     `SELECT source_path, target_path, status, size_bytes, attempt_count, duration_ms, error_message, item_type, last_run_seq, completed_at
      FROM job_items WHERE job_id = ? ORDER BY source_path`
-  ).all(job.id).filter((i) => i.item_type !== 'folder');
+  ).all(job.id);
+  const folderItems = allItems.filter((i) => i.item_type === 'folder');
+  const items = allItems.filter((i) => i.item_type !== 'folder');
   const verification = safeParse(job.verification_json);
   const ver = effectiveVerification(verification);
   const problemPaths = new Set(ver.problems.map((p) => p.path.toLowerCase()));
@@ -131,6 +141,12 @@ function jobOutcome(db, job) {
   for (const f of migrated) {
     const parts = f.path.split('/');
     for (let k = 1; k < parts.length; k++) folders.add(parts.slice(0, k).join('/').toLowerCase());
+  }
+  // Folder rows count too, so an empty folder (no file under it) is included.
+  for (const d of folderItems) {
+    if (d.status !== 'success' && d.status !== 'skipped') continue;
+    const r = rel(d.source_path).replace(/\/+$/, '');
+    if (r) folders.add(r.toLowerCase());
   }
 
   return { job, items, migrated, notMigrated, bytes, folderCount: folders.size, verification, ver };
@@ -241,6 +257,8 @@ function buildClientData(db, jobs) {
       subfolders: folders.reduce((s, f) => s + f.folderCount, 0),
       notMigrated: folders.reduce((s, f) => s + f.notMigrated.length, 0),
       verifiedFolders: folders.filter((f) => f.ver.state === 'verified').length,
+      contentVerified: folders.reduce((s, f) => s + (f.ver.contentVerified || 0), 0),
+      contentUnchecked: folders.reduce((s, f) => s + (f.ver.contentUnchecked || 0), 0),
       unverifiedFolders: folders.filter((f) => f.ver.state === 'unverified').length,
       expectedRewrites: folders.reduce((s, f) => s + f.ver.expectedRewrites, 0),
       from: starts.length ? new Date(Math.min(...starts)) : null,

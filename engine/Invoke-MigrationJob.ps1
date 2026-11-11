@@ -104,6 +104,10 @@ param(
     # a stale scan can only miss files added after it was taken (a later
     # fresh run picks those up), never corrupt anything.
     [string]$TreeCachePath,
+    # Content-check results (ContentCheck.psm1), keyed per file by path and
+    # both hashes. Named by source+target location on the server side, so
+    # it carries over between runs, re-created jobs and Verify clicks.
+    [string]$ContentCachePath,
     [Parameter(Mandatory)][string]$ClientId,
     [Parameter(Mandatory)][string]$TenantId,
     # Exactly one credential style identifies the app-only identity
@@ -156,9 +160,23 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+# The server reads engine events as UTF-8 NDJSON. On Windows, pwsh otherwise
+# writes stdout in the console code page, which folded or mangled non-ASCII
+# file names in the audit log, reports and exports ("Žalgiris café" stored as
+# "Zalgiris caf?"). The file names on SharePoint were never affected.
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+# Source "last modified" comes from the file (TimeLastModified) while the
+# date the engine stamps on the target comes from the list item (Modified);
+# SharePoint can keep those a second or so apart, which made the stamped
+# copy look older than its source and re-copied the file on every run.
+# Anything within 5 seconds counts as the same moment (literal AddSeconds(5)
+# in each skip check - the lanes run in separate runspaces).
 Import-Module "$PSScriptRoot/lib/Events.psm1" -Force
 Import-Module "$PSScriptRoot/lib/Retry.psm1" -Force
 Import-Module "$PSScriptRoot/lib/Verification.psm1" -Force
+Import-Module "$PSScriptRoot/lib/ContentCheck.psm1" -Force
 Import-Module "$PSScriptRoot/lib/SharePointTree.psm1" -Force
 Import-Module "$PSScriptRoot/lib/BlobTarget.psm1" -Force
 Import-Module "$PSScriptRoot/lib/OneDriveTarget.psm1" -Force
@@ -308,9 +326,9 @@ function Invoke-VerificationPhase {
                 }
             } else {
                 $srcDriveId = Get-GraphDriveId -Connection $SourceConn -SiteUrl $SourceSite -Library $SourceLib
-                Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib
+                Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib -IncludeDownloadUrl
             }
-            $tgtMap = Get-GraphFileMap -Connection $OneDriveCtx.Connection -DriveId $OneDriveCtx.DriveId -RootPath $OneDriveCtx.PathRoot
+            $tgtMap = Get-GraphFileMap -Connection $OneDriveCtx.Connection -DriveId $OneDriveCtx.DriveId -RootPath $OneDriveCtx.PathRoot -IncludeDownloadUrl
             Compare-MigratedFileMaps -SourceMap $srcMap -TargetMap $tgtMap
         } elseif ($isFsSource) {
             # Local QuickXorHash of every source file vs the hash SharePoint
@@ -321,7 +339,7 @@ function Invoke-VerificationPhase {
                 Write-PhaseProgress -Phase 'hashing_source' -Data @{ files = $count }
             }
             $tgtDriveId = Get-GraphDriveId -Connection $TargetConn -SiteUrl $TargetSite -Library $TargetLib
-            $tgtMap = Get-GraphFileMap -Connection $TargetConn -DriveId $tgtDriveId -RootPath $TargetPathInLib
+            $tgtMap = Get-GraphFileMap -Connection $TargetConn -DriveId $tgtDriveId -RootPath $TargetPathInLib -IncludeDownloadUrl
             Compare-MigratedFileMaps -SourceMap $srcMap -TargetMap $tgtMap
         } elseif ($isBlob) {
             $srcDriveId = Get-GraphDriveId -Connection $SourceConn -SiteUrl $SourceSite -Library $SourceLib
@@ -329,10 +347,75 @@ function Invoke-VerificationPhase {
             $tgtMap = Get-BlobKeyMap -BlobEndpoint $BlobCtx.BlobEndpoint -Container $BlobCtx.Container -Sas $BlobCtx.Sas -Prefix $BlobCtx.Prefix
             Compare-BlobMigratedTree -SourceMap $srcMap -TargetMap $tgtMap
         } else {
-            Compare-PnPMigratedTrees `
-                -SourceConnection $SourceConn -TargetConnection $TargetConn `
-                -SourceSiteUrl $SourceSite -SourceLibrary $SourceLib -SourcePathInLibrary $SourcePathInLib `
-                -TargetSiteUrl $TargetSite -TargetLibrary $TargetLib -TargetPathInLibrary $TargetPathInLib
+            # Same as Compare-PnPMigratedTrees, with the maps kept (and
+            # download links included) for the rewritten-file content check.
+            $srcDriveId = Get-GraphDriveId -Connection $SourceConn -SiteUrl $SourceSite -Library $SourceLib
+            $tgtDriveId = Get-GraphDriveId -Connection $TargetConn -SiteUrl $TargetSite -Library $TargetLib
+            $srcMap = Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib -IncludeDownloadUrl
+            $tgtMap = Get-GraphFileMap -Connection $TargetConn -DriveId $tgtDriveId -RootPath $TargetPathInLib -IncludeDownloadUrl
+            Compare-MigratedFileMaps -SourceMap $srcMap -TargetMap $tgtMap
+        }
+
+        # --- Content check of files SharePoint rewrote -------------------
+        # Size/hash cannot vouch for these, so both copies are downloaded and
+        # compared minus SharePoint's own property parts (ContentCheck.psm1).
+        # A real difference becomes a hash mismatch (and so a repair re-copy);
+        # anything that cannot be compared is counted as unchecked, never as
+        # verified. Results are cached per (path, source hash, target hash)
+        # so a re-run only checks files that changed.
+        $contentVerified = [System.Collections.Generic.List[string]]::new()
+        $contentUnchecked = [System.Collections.Generic.List[object]]::new()
+        $contentDifferent = [System.Collections.Generic.List[object]]::new()
+        if ($result.OfficeRewritten.Count -gt 0 -and $srcMap -and $tgtMap -and -not $isBlob) {
+            $ccCachePath = if ($ContentCachePath) { $ContentCachePath } else { $null }
+            $ccCache = @{}
+            if ($ccCachePath -and (Test-Path $ccCachePath)) {
+                try { (Get-Content $ccCachePath -Raw | ConvertFrom-Json -AsHashtable).GetEnumerator() | ForEach-Object { $ccCache[$_.Key] = $_.Value } } catch {}
+            }
+            $todo = [System.Collections.Generic.List[object]]::new()
+            foreach ($rel in $result.OfficeRewritten) {
+                $s = $srcMap[$rel]; $t = $tgtMap[$rel]
+                $key = "$rel|$($s.Hash)|$($s.Size)|$($t.Hash)|$($t.Size)"
+                if ($ccCache.ContainsKey($key) -and $s.Hash -and $t.Hash) {
+                    $c = $ccCache[$key]
+                    if ($c.Status -eq 'equivalent') { $contentVerified.Add($rel) }
+                    elseif ($c.Status -eq 'different') { $contentDifferent.Add(@{ path = $rel; detail = $c.Detail }) }
+                    else { $contentUnchecked.Add(@{ path = $rel; detail = $c.Detail }) }
+                    continue
+                }
+                $srcFile = if ($isFsSource) { Join-Path $SourcePathInLib ($rel -replace '/', [System.IO.Path]::DirectorySeparatorChar) } else { $null }
+                $todo.Add(@{ Rel = $rel; Key = $key; Ext = [System.IO.Path]::GetExtension($rel); Size = [long]$s.Size; SourceUrl = $s.DownloadUrl; SourceFile = $srcFile; TargetUrl = $t.DownloadUrl })
+            }
+            if ($todo.Count -gt 0) {
+                Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Content check: comparing $($todo.Count) file(s) SharePoint rewrote (Office documents, web pages) part by part against their originals$(if ($ccCache.Count) { " ($($result.OfficeRewritten.Count - $todo.Count) unchanged since the last check)" })..." }
+                $ccStart = Get-Date
+                $ccTotal = $todo.Count
+                $checked = Invoke-RewrittenContentCheck -Items $todo.ToArray() -OnProgress {
+                    param($n)
+                    Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal }
+                }
+                foreach ($c in $checked) {
+                    $ccCache[$c.Key] = @{ Status = $c.Status; Detail = $c.Detail }
+                    if ($c.Status -eq 'equivalent') { $contentVerified.Add($c.Rel) }
+                    elseif ($c.Status -eq 'different') { $contentDifferent.Add(@{ path = $c.Rel; detail = $c.Detail }) }
+                    else { $contentUnchecked.Add(@{ path = $c.Rel; detail = $c.Detail }) }
+                }
+                Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Content check done in $([int]((Get-Date) - $ccStart).TotalSeconds)s: $($contentVerified.Count) identical in content, $($contentDifferent.Count) different, $($contentUnchecked.Count) could not be checked." }
+                if ($ccCachePath) {
+                    try { $ccCache | ConvertTo-Json -Depth 4 -Compress | Set-Content -Path $ccCachePath -Encoding utf8 } catch {}
+                }
+            }
+            foreach ($d in $contentDifferent) {
+                $result.HashMismatch.Add($d.path)
+                Write-EngineEvent -Type 'log' -Data @{ level = 'error'; message = "Content check: '$($d.path)' differs from the original - $($d.detail)" }
+            }
+            foreach ($u in ($contentUnchecked | Select-Object -First 50)) {
+                Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Content check: '$($u.path)' could not be checked - $($u.detail)" }
+            }
+            # OfficeRewritten keeps only what was proven equivalent.
+            $differentSet = [System.Collections.Generic.HashSet[string]]::new([string[]]@($contentDifferent | ForEach-Object { $_.path }))
+            $kept = @($result.OfficeRewritten | Where-Object { -not $differentSet.Contains($_) })
+            $result.OfficeRewritten.Clear(); foreach ($k in $kept) { $result.OfficeRewritten.Add($k) }
         }
 
         $maxListed = 50
@@ -344,9 +427,6 @@ function Invoke-VerificationPhase {
         }
         foreach ($p in ($result.HashMismatch | Select-Object -First $maxListed)) {
             Write-EngineEvent -Type 'verify_mismatch' -Data @{ level = 'error'; reason = 'hash'; sourcePath = $p; message = "VERIFY CONTENT HASH MISMATCH: $p" }
-        }
-        foreach ($p in ($result.OfficeRewritten | Select-Object -First $maxListed)) {
-            Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Verify note: '$p' differs only because SharePoint re-stamps document properties (Office, Outlook, saved web pages) on copy (content parts verified unaffected by this mechanism); open the copy to confirm if in doubt." }
         }
 
         $problems = $result.Missing.Count + $result.SizeMismatch.Count + $result.HashMismatch.Count
@@ -369,6 +449,9 @@ function Invoke-VerificationPhase {
             sizeMismatch      = $result.SizeMismatch.Count
             hashMismatch      = $result.HashMismatch.Count
             officeRewritten   = $result.OfficeRewritten.Count
+            contentVerified   = $contentVerified.Count
+            contentUnchecked  = $contentUnchecked.Count
+            contentUncheckedList = @($contentUnchecked | Select-Object -First 200)
             hashUnavailable   = $result.HashUnavailable
             ok                = ($problems -eq 0)
             problems          = @($problemList)
@@ -376,7 +459,7 @@ function Invoke-VerificationPhase {
         }
         Write-EngineEvent -Type 'verification_summary' -Data @{ verification = $summary }
         $verdict = if ($problems -eq 0) { 'PASSED' } else { "FOUND $problems PROBLEM(S)" }
-        Write-EngineEvent -Type 'log' -Data @{ level = ($problems -eq 0 ? 'info' : 'error'); message = "Verification ${verdict}: $($result.Identical) of $($result.SourceFiles) files verified identical (hash), $($result.OfficeRewritten.Count) Office file(s) re-stamped by SharePoint (expected), $($result.Missing.Count) missing, $($result.SizeMismatch.Count) size / $($result.HashMismatch.Count) hash mismatches." }
+        Write-EngineEvent -Type 'log' -Data @{ level = ($problems -eq 0 ? 'info' : 'error'); message = "Verification ${verdict}: $($result.Identical) of $($result.SourceFiles) files verified identical (hash), $($contentVerified.Count) re-stamped by SharePoint and verified identical in content, $($contentUnchecked.Count) re-stamped but not content-checked, $($result.Missing.Count) missing, $($result.SizeMismatch.Count) size / $($result.HashMismatch.Count) content mismatches." }
         return @{ Summary = $summary; Result = $result }
     } catch {
         Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Verification could not run (copies are unaffected): $($_.Exception.Message)" }
@@ -1184,7 +1267,26 @@ try {
                     if ($srcItem['Editor'] -and $srcItem['Editor'].Email) { $people['Editor'] = $srcItem['Editor'].Email }
                 }
                 if (-not $laneTargetList -or ($values.Count + $people.Count) -eq 0) { return $false }
-                $tgtItem = Get-PnPFile -Url $TargetFileServerRel -AsListItem -Connection $laneTargetConn -ErrorAction Stop
+                $tgtItem = $null
+                try {
+                    $tgtItem = Get-PnPFile -Url $TargetFileServerRel -AsListItem -Connection $laneTargetConn -ErrorAction Stop
+                } catch {
+                    # Get-PnPFile URL-decodes its -Url, so a name containing
+                    # a literal %XX (e.g. "report %20 final.txt") is looked up
+                    # under the wrong name. Find the item by its exact path.
+                    $esc = [System.Security.SecurityElement]::Escape($TargetFileServerRel)
+                    $caml = "<View Scope='RecursiveAll'><Query><Where><Eq><FieldRef Name='FileRef'/><Value Type='Text'>$esc</Value></Eq></Where></Query><RowLimit>1</RowLimit></View>"
+                    $tgtItem = Get-PnPListItem -List $laneTargetList -Query $caml -Connection $laneTargetConn -ErrorAction Stop | Select-Object -First 1
+                    if (-not $tgtItem) { throw }
+                }
+                # Get-PnPFile can also return $null instead of throwing for
+                # such a name - same exact-path lookup then.
+                if (-not $tgtItem -or -not $tgtItem.Id) {
+                    $esc = [System.Security.SecurityElement]::Escape($TargetFileServerRel)
+                    $caml = "<View Scope='RecursiveAll'><Query><Where><Eq><FieldRef Name='FileRef'/><Value Type='Text'>$esc</Value></Eq></Where></Query><RowLimit>1</RowLimit></View>"
+                    $tgtItem = Get-PnPListItem -List $laneTargetList -Query $caml -Connection $laneTargetConn -ErrorAction Stop | Select-Object -First 1
+                    if (-not $tgtItem) { throw "target item not found: $TargetFileServerRel" }
+                }
                 try {
                     Set-PnPListItem -List $laneTargetList -Identity $tgtItem.Id -Values ($values + $people) -Connection $laneTargetConn -ErrorAction Stop | Out-Null
                     return $true
@@ -1234,7 +1336,7 @@ try {
                 $existing = $TargetFileMap[$relKey]
                 $alreadyDone = $existing -and
                     (([long]$existing.Size -eq [long]$item.Size) -or ($sizeMayDiffer -and $item.Modified -and $existing.Modified)) -and
-                    (-not $item.Modified -or -not $existing.Modified -or $existing.Modified -ge [datetime]$item.Modified)
+                    (-not $item.Modified -or -not $existing.Modified -or ([datetime]$existing.Modified).AddSeconds(5) -ge [datetime]$item.Modified)
             } else {
                 $alreadyDone = Test-PnPTargetFileMatches -Connection $laneTargetConn -TargetServerRelativeUrl $targetFileServerRel -ExpectedSize $item.Size -SourceModified $item.Modified -AllowSizeDifference:$sizeMayDiffer
             }
@@ -1374,7 +1476,7 @@ try {
                 $existing = $TargetFileMap[$relKey]
                 $alreadyDone = $existing -and
                     ([long]$existing.Size -eq [long]$item.Size) -and
-                    (-not $item.Modified -or -not $existing.Modified -or $existing.Modified -ge [datetime]$item.Modified)
+                    (-not $item.Modified -or -not $existing.Modified -or ([datetime]$existing.Modified).AddSeconds(5) -ge [datetime]$item.Modified)
             } else {
                 $alreadyDone = Test-BlobTargetMatches -BlobEndpoint $BlobEndpoint -Container $Container -Sas $Sas `
                     -BlobKey $blobKey -ExpectedSize $item.Size -SourceModified $item.Modified
@@ -1564,7 +1666,7 @@ try {
                 $existing = $TargetFileMap[$relKey]
                 $alreadyDone = $existing -and
                     ([long]$existing.Size -eq [long]$item.Size) -and
-                    (-not $item.Modified -or -not $existing.Modified -or $existing.Modified -ge [datetime]$item.Modified)
+                    (-not $item.Modified -or -not $existing.Modified -or ([datetime]$existing.Modified).AddSeconds(5) -ge [datetime]$item.Modified)
             } else {
                 $alreadyDone = Test-OneDriveTargetMatches -Connection $laneOneDriveConn -DriveId $TargetDriveId `
                     -RelPath $targetRelPath -ExpectedSize $item.Size -SourceModified $item.Modified
@@ -1721,7 +1823,7 @@ try {
                 $existing = $TargetFileMap[$relKey]
                 $alreadyDone = $existing -and
                     ([long]$existing.Size -eq [long]$item.Size) -and
-                    (-not $item.Modified -or -not $existing.Modified -or $existing.Modified -ge [datetime]$item.Modified)
+                    (-not $item.Modified -or -not $existing.Modified -or ([datetime]$existing.Modified).AddSeconds(5) -ge [datetime]$item.Modified)
             } else {
                 $alreadyDone = Test-PnPTargetFileMatches -Connection $laneTargetConn -TargetServerRelativeUrl $targetFileServerRel -ExpectedSize $item.Size -SourceModified $item.Modified
             }
@@ -1774,7 +1876,14 @@ try {
                         if ($item.Created) { $values['Created'] = [datetime]$item.Created }
                         if ($item.Modified) { $values['Modified'] = [datetime]$item.Modified }
                         if ($laneTargetList -and $values.Count -gt 0) {
-                            $tgtItem = Get-PnPFile -Url $targetFileServerRel -AsListItem -Connection $laneTargetConn -ErrorAction Stop
+                            $tgtItem = try { Get-PnPFile -Url $targetFileServerRel -AsListItem -Connection $laneTargetConn -ErrorAction Stop } catch {
+                                # Literal %XX in a name defeats Get-PnPFile's URL decoding - look the item up by exact path.
+                                Get-PnPListItem -List $laneTargetList -Query "<View Scope='RecursiveAll'><Query><Where><Eq><FieldRef Name='FileRef'/><Value Type='Text'>$([System.Security.SecurityElement]::Escape($targetFileServerRel))</Value></Eq></Where></Query><RowLimit>1</RowLimit></View>" -Connection $laneTargetConn -ErrorAction Stop | Select-Object -First 1
+                            }
+                            if (-not $tgtItem -or -not $tgtItem.Id) {
+                                $tgtItem = Get-PnPListItem -List $laneTargetList -Query "<View Scope='RecursiveAll'><Query><Where><Eq><FieldRef Name='FileRef'/><Value Type='Text'>$([System.Security.SecurityElement]::Escape($targetFileServerRel))</Value></Eq></Where></Query><RowLimit>1</RowLimit></View>" -Connection $laneTargetConn -ErrorAction Stop | Select-Object -First 1
+                            }
+                            if (-not $tgtItem) { throw "target item not found: $targetFileServerRel" }
                             Set-PnPListItem -List $laneTargetList -Identity $tgtItem.Id -Values $values -Connection $laneTargetConn -ErrorAction Stop | Out-Null
                         }
                     } catch {
@@ -1812,7 +1921,14 @@ try {
                             if ($item.Created) { $values['Created'] = [datetime]$item.Created }
                             if ($item.Modified) { $values['Modified'] = [datetime]$item.Modified }
                             if ($laneTargetList -and $values.Count -gt 0) {
-                                $tgtItem = Get-PnPFile -Url $targetFileServerRel -AsListItem -Connection $laneTargetConn -ErrorAction Stop
+                                $tgtItem = try { Get-PnPFile -Url $targetFileServerRel -AsListItem -Connection $laneTargetConn -ErrorAction Stop } catch {
+                                    # Literal %XX in a name defeats Get-PnPFile's URL decoding - look the item up by exact path.
+                                    Get-PnPListItem -List $laneTargetList -Query "<View Scope='RecursiveAll'><Query><Where><Eq><FieldRef Name='FileRef'/><Value Type='Text'>$([System.Security.SecurityElement]::Escape($targetFileServerRel))</Value></Eq></Where></Query><RowLimit>1</RowLimit></View>" -Connection $laneTargetConn -ErrorAction Stop | Select-Object -First 1
+                                }
+                                if (-not $tgtItem -or -not $tgtItem.Id) {
+                                    $tgtItem = Get-PnPListItem -List $laneTargetList -Query "<View Scope='RecursiveAll'><Query><Where><Eq><FieldRef Name='FileRef'/><Value Type='Text'>$([System.Security.SecurityElement]::Escape($targetFileServerRel))</Value></Eq></Where></Query><RowLimit>1</RowLimit></View>" -Connection $laneTargetConn -ErrorAction Stop | Select-Object -First 1
+                                }
+                                if (-not $tgtItem) { throw "target item not found: $targetFileServerRel" }
                                 Set-PnPListItem -List $laneTargetList -Identity $tgtItem.Id -Values $values -Connection $laneTargetConn -ErrorAction Stop | Out-Null
                             }
                         } catch {}
@@ -2063,6 +2179,7 @@ try {
         # on, a round only runs while the problem count strictly decreases, so
         # files nothing can fix stop the loop instead of spinning.
         $prevProblemCount = [int]::MaxValue
+        $repairTargetList = $null
         for ($repairRound = 1; $repairRound -le 3 -and $verifyOut -and -not $verifyOut.Summary.ok; $repairRound++) {
             $problemPaths = @($verifyOut.Result.Missing) + @($verifyOut.Result.SizeMismatch) + @($verifyOut.Result.HashMismatch)
             if ($repairRound -gt 2 -and $problemPaths.Count -ge $prevProblemCount) {
@@ -2184,6 +2301,31 @@ try {
                                     Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
                                 }
                             }
+                        }
+                    }
+                    # A re-copy lands with the app as author and "now" as its
+                    # dates - put the original metadata back, like the copy
+                    # lanes do (SharePoint -> SharePoint only; the metadata
+                    # comes from the prefetched source walk).
+                    if (-not $isFsSource -and -not $isBlobTarget -and -not $isOneDriveTarget -and $sourceMetaMap -and $sourceMetaMap[$rel]) {
+                        try {
+                            if (-not $repairTargetList) { $repairTargetList = Get-PnPList -Identity (($targetRoot -split '/')[0]) -Connection $targetConn -ErrorAction Stop }
+                            $m = $sourceMetaMap[$rel]
+                            $vals = @{}
+                            if ($m.Created) { $vals['Created'] = $m.Created }
+                            if ($m.Modified) { $vals['Modified'] = $m.Modified }
+                            $ppl = @{}
+                            if ($m.AuthorEmail) { $ppl['Author'] = $m.AuthorEmail }
+                            if ($m.EditorEmail) { $ppl['Editor'] = $m.EditorEmail }
+                            $tgtFileRel = "$targetSiteServerRelative/$targetRoot/$rel".Replace('//', '/')
+                            $esc = [System.Security.SecurityElement]::Escape($tgtFileRel)
+                            $li = Get-PnPListItem -List $repairTargetList -Query "<View Scope='RecursiveAll'><Query><Where><Eq><FieldRef Name='FileRef'/><Value Type='Text'>$esc</Value></Eq></Where></Query><RowLimit>1</RowLimit></View>" -Connection $targetConn -ErrorAction Stop | Select-Object -First 1
+                            if ($li -and ($vals.Count + $ppl.Count) -gt 0) {
+                                try { Set-PnPListItem -List $repairTargetList -Identity $li.Id -Values ($vals + $ppl) -Connection $targetConn -ErrorAction Stop | Out-Null }
+                                catch { if ($vals.Count) { Set-PnPListItem -List $repairTargetList -Identity $li.Id -Values $vals -Connection $targetConn -ErrorAction Stop | Out-Null } }
+                            }
+                        } catch {
+                            Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Re-copied '$rel' but could not restore its original dates/people: $($_.Exception.Message)" }
                         }
                     }
                     $attempted[$rel] = @{ SrcRel = $srcRel; Size = [long]$file.Size }

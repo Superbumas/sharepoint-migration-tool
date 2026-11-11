@@ -29,7 +29,7 @@ function Test-PnPTargetFileMatches {
         if ($SourceModified) {
             $targetModified = $null
             try { $targetModified = $existing.TimeLastModified } catch {}
-            if ($targetModified -and $targetModified -lt [datetime]$SourceModified) { return $false }
+            if ($targetModified -and $targetModified -lt ([datetime]$SourceModified).AddSeconds(-5)) { return $false }  # 5s: file vs list-item timestamps can differ by ~1s
         }
         return $true
     } catch {
@@ -91,20 +91,27 @@ function Get-GraphFileMap {
         # Forwarded to Invoke-WithRetry - see its own doc comment. Optional:
         # a caller that doesn't care about visibility into individual page
         # retries can simply omit it.
-        [scriptblock]$OnRetry
+        [scriptblock]$OnRetry,
+        # Adds each file's pre-authenticated download link (valid ~1 hour) -
+        # used by the content check of files SharePoint rewrites.
+        [switch]$IncludeDownloadUrl
     )
     $root = $RootPath.Trim('/')
     $select = 'name,size,file,folder'
     if ($IncludeDetails) { $select += ',createdDateTime,lastModifiedDateTime,createdBy,lastModifiedBy' }
+    # Graph drops @microsoft.graph.downloadUrl from children listings
+    # whenever $select is used (verified live), so the download-link variant
+    # asks for full items.
+    $query = if ($IncludeDownloadUrl) { "`$top=999" } else { "`$select=$select&`$top=999" }
     $map = @{}
     $stack = [System.Collections.Generic.Stack[string]]::new()
     $stack.Push($root)
     while ($stack.Count -gt 0) {
         $current = $stack.Pop()
         $url = if ($current) {
-            "v1.0/drives/$DriveId/root:/$(ConvertTo-GraphEscapedPath $current):/children?`$select=$select&`$top=999"
+            "v1.0/drives/$DriveId/root:/$(ConvertTo-GraphEscapedPath $current):/children?$query"
         } else {
-            "v1.0/drives/$DriveId/root/children?`$select=$select&`$top=999"
+            "v1.0/drives/$DriveId/root/children?$query"
         }
         do {
             # A single bad page (throttling, a truncated/corrupted response -
@@ -124,6 +131,7 @@ function Get-GraphFileMap {
                 } else {
                     $rel = if ($root) { $childPath.Substring($root.Length).TrimStart('/') } else { $childPath }
                     $entry = @{ Size = [long]$item.size; Hash = $item.file.hashes.quickXorHash }
+                    if ($IncludeDownloadUrl) { $entry.DownloadUrl = $item.'@microsoft.graph.downloadUrl' }
                     if ($IncludeDetails) {
                         $entry.Created = if ($item.createdDateTime) { [datetime]$item.createdDateTime } else { $null }
                         $entry.Modified = if ($item.lastModifiedDateTime) { [datetime]$item.lastModifiedDateTime } else { $null }
