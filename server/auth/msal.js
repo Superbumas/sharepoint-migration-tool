@@ -61,8 +61,8 @@ function persistMsalCache(session, client) {
 // working scopes there fails with interaction_required).
 async function getGraphToken(req, scopes) {
   if (!req.session.account) return null;
-  const client = getMsalClient(req.session);
   try {
+    const client = getMsalClient(req.session);
     const result = await client.acquireTokenSilent({
       account: req.session.account,
       scopes: (scopes || config.delegatedScopes).filter((s) => !['openid', 'profile', 'email', 'offline_access'].includes(s)),

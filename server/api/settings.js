@@ -24,7 +24,11 @@ router.get('/settings', (req, res) => {
   // six hours into a run.
   const connectionString = resolveBlobConnectionString(getTenantId(req));
   res.json({
-    tenantName: config.tenantName,
+    // The CURRENT project's tenant, not the server's home TENANT_NAME - the
+    // page showed the home tenant (or a dash) even inside a client project.
+    tenantName: getDb().prepare('SELECT display_name FROM tenants WHERE id = ?').get(getTenantId(req))?.display_name
+      || (getTenantId(req) === config.tenantId ? config.tenantName : null)
+      || getTenantId(req),
     defaultJobConcurrency: config.defaultJobConcurrency,
     globalMaxConcurrency: config.globalMaxConcurrency,
     oneDriveUploadChunkSizeMB: config.oneDriveUploadChunkSizeMB,

@@ -8,6 +8,17 @@ async function request(method, path, body, isForm) {
   }
   const res = await fetch(path, opts);
   if (res.status === 401) {
+    let code = 'not_authenticated';
+    try { code = (await res.json()).error || code; } catch {}
+    if (code === 'reauth_required') {
+      // Signed in to the app, but the Microsoft token for this project is
+      // missing/expired - the header shows a Reconnect banner for it.
+      window.dispatchEvent(new Event('auth:reauth-required'));
+      const err = new Error('Your Microsoft sign-in for this project needs refreshing - use "Reconnect" at the top of the page.');
+      err.status = 401;
+      err.code = code;
+      throw err;
+    }
     const err = new Error('not_authenticated');
     err.status = 401;
     throw err;

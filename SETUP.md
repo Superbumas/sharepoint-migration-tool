@@ -36,6 +36,14 @@ There are also two kinds of **sign-in**, with different consent footprints:
   client tenant's GA uses - it works for them even when the domain allowlist is on,
   as long as the project exists and is bound to (or being bound to) their tenant.
 
+In practice you only see **one** Microsoft sign-in: when an identity sign-in lands in a
+project that's already connected, the server continues straight into that project's
+sign-in with the account pre-selected, which Microsoft completes without asking again.
+The browser also remembers the last project you signed into (30 days, cleared on
+sign-out), so the next "Sign in with Microsoft" goes straight back to it. Sessions
+are stored in the database, so restarting the server no longer signs anyone out.
+"Use a different account" on the sign-in page skips both shortcuts.
+
 The rule that follows: **the setup script is run once, signed into your own company
 tenant - never a client's.** Tenants are onboarded just by signing in (Part 2).
 Running the setup script signed into a client's tenant no longer breaks anything

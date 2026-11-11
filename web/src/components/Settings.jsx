@@ -216,7 +216,7 @@ export default function Settings() {
   }
 
   function refresh() {
-    api.get('/api/settings').then(setSettings);
+    api.get('/api/settings').then(setSettings).catch((err) => setSettings((prev) => prev || { loadError: err.message }));
   }
   useEffect(refresh, []);
 
@@ -253,6 +253,7 @@ export default function Settings() {
   }
 
   if (!settings) return <div className="text-slate-500">Loading settings…</div>;
+  if (settings.loadError) return <div role="alert" className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-md p-3">Couldn't load settings: {settings.loadError}</div>;
 
   const rows = [
     ['Tenant', settings.tenantName || '—'],
@@ -320,12 +321,14 @@ export default function Settings() {
           These throttling/concurrency defaults are configured via environment variables (.env) - they govern the
           shared tenant throttle budget across every running job and are not meant to be changed casually at runtime.
         </p>
-        <table className="w-full text-sm">
+        {/* Fixed layout + break-anywhere on the value: a long tenant domain
+            pushed the page sideways on a phone. */}
+        <table className="w-full text-sm table-fixed">
           <tbody className="divide-y divide-slate-100">
             {rows.map(([label, value]) => (
               <tr key={label}>
-                <td className="py-2 text-slate-500">{label}</td>
-                <td className="py-2 text-slate-800 font-medium text-right">{value}</td>
+                <td className="py-2 pr-3 text-slate-500 w-1/2">{label}</td>
+                <td className="py-2 text-slate-800 font-medium text-right tabular-nums [overflow-wrap:anywhere]">{value}</td>
               </tr>
             ))}
           </tbody>

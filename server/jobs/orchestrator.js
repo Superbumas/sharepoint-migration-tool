@@ -331,8 +331,24 @@ function getJob(jobId, tenantId) {
   return getDb().prepare('SELECT * FROM jobs WHERE id = ?').get(jobId);
 }
 
+// A mapping with a job that hasn't finished yet must not get a second one:
+// two engines copying the same source into the same target race each other
+// (duplicate uploads, "file is currently being uploaded" failures).
+function activeJobForMapping(mappingId) {
+  return getDb().prepare(
+    `SELECT id, name, status FROM jobs WHERE mapping_id = ? AND deleted_at IS NULL
+       AND status IN ('queued', 'approved', 'running', 'paused') ORDER BY created_at DESC LIMIT 1`
+  ).get(mappingId) || null;
+}
+
 function createJobFromMapping(mapping, actor, overrides = {}) {
   const db = getDb();
+  const active = activeJobForMapping(mapping.id);
+  if (active) {
+    const err = httpError(409, `This mapping already has an unfinished job ("${active.name}", ${active.status}). Open that job instead of creating another.`);
+    err.jobId = active.id;
+    throw err;
+  }
   const id = uuid();
   // source_path/target_path can legitimately be '' (the library root, e.g. a
   // freshly created site with no subfolders yet) - fall back to the library
@@ -1523,6 +1539,7 @@ function httpError(status, message) {
 }
 
 module.exports = {
+  activeJobForMapping,
   init,
   // Exported for tests: drives the exact counter/reconciliation logic the
   // engine's NDJSON stream drives in production.
