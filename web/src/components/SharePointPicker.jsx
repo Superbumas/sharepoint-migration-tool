@@ -46,7 +46,7 @@ function segmentsFromParentPath(path) {
 // what makes Get-PnPFolderItem/Resolve-PnPFolder/Copy-PnPFile hit the folder
 // that actually exists, instead of silently enumerating nothing and then
 // failing to create a rogue top-level folder with the display name.
-function libraryRelativePathFromDrive(site, drive) {
+export function libraryRelativePathFromDrive(site, drive) {
   try {
     const sitePath = new URL(site.webUrl).pathname.replace(/\/+$/, '');
     const drivePath = new URL(drive.webUrl).pathname.replace(/\/+$/, '');
@@ -59,8 +59,10 @@ function libraryRelativePathFromDrive(site, drive) {
 
 // One instance is used for the source picker and, separately, for the target
 // picker. `multi` (source only) enables ticking several folders/files at once
-// - the parent receives { multi: true, items: [...] } and creates one mapping
-// per item.
+// - the parent receives { multi: true, items: [...] } as soon as anything is
+// ticked (no separate confirm click) and creates one mapping per item.
+// Bumping `clearSignal` clears the ticks and the selection but keeps the
+// picker where it is, so the next batch can be ticked from the same library.
 //
 // `fixedSite` locks the picker to one site (no site search, no "change" link)
 // and `preferredDriveId` opens that library straight away - used by
@@ -68,7 +70,7 @@ function libraryRelativePathFromDrive(site, drive) {
 // drops the outer card so it can sit inside another picker's card.
 // `allowCreateFolder` (target side) adds a "New folder" button that creates a
 // folder in the current location and opens it, ready to be used.
-export default function SharePointPicker({ label, onSelect, multi = false, fixedSite = null, preferredDriveId = null, embedded = false, allowCreateFolder = false }) {
+export default function SharePointPicker({ label, onSelect, multi = false, fixedSite = null, preferredDriveId = null, embedded = false, allowCreateFolder = false, clearSignal = 0 }) {
   const { user } = useAuth();
   const [siteQuery, setSiteQuery] = useState('');
   const [sites, setSites] = useState([]);
@@ -114,6 +116,20 @@ export default function SharePointPicker({ label, onSelect, multi = false, fixed
     loadFolder();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drive, pathStack]);
+
+  // Ticks belong to one library (their paths are relative to it), so leaving
+  // the library drops them.
+  useEffect(() => {
+    if (multi && ticked.size > 0) applyTicked(new Map());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drive]);
+
+  useEffect(() => {
+    if (!clearSignal) return;
+    setSelected(null);
+    setTicked(new Map());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clearSignal]);
 
   // Answers "do I need to click Grant for this site?" by reading the site's
   // actual permission grants and looking for this project's engine identity
@@ -247,19 +263,33 @@ export default function SharePointPicker({ label, onSelect, multi = false, fixed
     onSelect(selection);
   }
 
-  function toggleTick(item) {
-    setTicked((prev) => {
-      const next = new Map(prev);
-      if (next.has(item.id)) next.delete(item.id);
-      else next.set(item.id, { type: item.folder ? 'folder' : 'file', path: itemRelativePath(item), name: item.name });
-      return next;
-    });
-  }
-
-  function confirmTicked() {
-    const selection = { ...baseSelection(), multi: true, items: [...ticked.values()] };
+  // Ticking is the selection: the parent hears about every change, so there
+  // is no "use these" step to forget before saving.
+  function applyTicked(next) {
+    setTicked(next);
+    const selection = next.size > 0 && site && drive
+      ? { ...baseSelection(), multi: true, items: [...next.values()] }
+      : null;
     setSelected(selection);
     onSelect(selection);
+  }
+
+  function toggleTick(item) {
+    const next = new Map(ticked);
+    if (next.has(item.id)) next.delete(item.id);
+    else next.set(item.id, { type: item.folder ? 'folder' : 'file', path: itemRelativePath(item), name: item.name });
+    applyTicked(next);
+  }
+
+  // Ticks or unticks everything listed in the current folder.
+  function toggleAllListed() {
+    const next = new Map(ticked);
+    const allTicked = items.length > 0 && items.every((it) => next.has(it.id));
+    for (const it of items) {
+      if (allTicked) next.delete(it.id);
+      else next.set(it.id, { type: it.folder ? 'folder' : 'file', path: itemRelativePath(it), name: it.name });
+    }
+    applyTicked(next);
   }
 
   const maxStorage = Math.max(1, ...sites.map((s) => s.storageUsed || 0));
@@ -456,6 +486,12 @@ export default function SharePointPicker({ label, onSelect, multi = false, fixed
             </div>
           )}
 
+          {multi && items.length > 1 && (
+            <button onClick={toggleAllListed} className="text-xs text-blue-600 hover:underline">
+              {items.every((it) => ticked.has(it.id)) ? 'Untick all listed' : `Tick all ${items.length} listed`}
+            </button>
+          )}
+
           <ul className="max-h-64 overflow-y-auto text-sm pr-0.5">
             {items.map((item) => (
               <li key={item.id} className={`group flex items-center gap-2 px-2 py-1.5 rounded hover:bg-slate-50 ${ticked.has(item.id) ? 'bg-blue-50/60' : ''}`}>
@@ -464,6 +500,7 @@ export default function SharePointPicker({ label, onSelect, multi = false, fixed
                     type="checkbox"
                     checked={ticked.has(item.id)}
                     onChange={() => toggleTick(item)}
+                    aria-label={`Tick ${item.name}`}
                     className="shrink-0 accent-blue-600"
                   />
                 )}
@@ -491,12 +528,7 @@ export default function SharePointPicker({ label, onSelect, multi = false, fixed
           {multi && ticked.size > 0 && (
             <div className="flex items-center justify-between bg-blue-600 text-white rounded-md px-3 py-2">
               <span className="text-xs font-medium">{ticked.size} item(s) ticked across this library</span>
-              <div className="space-x-2">
-                <button onClick={() => setTicked(new Map())} className="text-xs opacity-80 hover:opacity-100 underline">clear</button>
-                <button onClick={confirmTicked} className="text-xs font-semibold bg-white text-blue-700 rounded px-2.5 py-1 hover:bg-blue-50">
-                  Use {ticked.size} selected
-                </button>
-              </div>
+              <button onClick={() => applyTicked(new Map())} className="text-xs opacity-80 hover:opacity-100 underline">clear</button>
             </div>
           )}
         </div>

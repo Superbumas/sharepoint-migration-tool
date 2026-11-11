@@ -1,51 +1,24 @@
-import React, { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api';
 import SharePointPicker from './SharePointPicker';
 import BlobTargetPicker from './BlobTargetPicker';
 import OneDriveTargetPicker from './OneDriveTargetPicker';
 import OneDriveSourcePicker from './OneDriveSourcePicker';
 import FileSharePicker from './FileSharePicker';
+import BulkAddSites from './mappings/BulkAddSites';
+import MappingsGrid from './mappings/MappingsGrid';
 
-// Human label for a mapping's SharePoint site: the picker-provided display
-// name when there is one, else the last URL segment ("/sites/Hub" -> "Hub").
-// Crosswalk-imported rows only have the URL, so the fallback matters.
-function siteLabel(siteName, siteUrl) {
-  if (siteName) return siteName;
-  if (!siteUrl) return '';
-  try {
-    return decodeURIComponent(new URL(siteUrl).pathname.split('/').filter(Boolean).pop() || siteUrl);
-  } catch {
-    return siteUrl;
-  }
-}
+const ADD_MODES = [
+  { id: 'hand', label: 'Pick by hand' },
+  { id: 'sites', label: 'Many sites at once' },
+  { id: 'sheet', label: 'From a spreadsheet' },
+];
 
-// Status badge for a mapping's most recent job. Completed jobs distinguish
-// verified-clean from completed-with-issues so "done" actually means done.
-function MappingStatus({ job }) {
-  if (!job) return <span className="inline-block whitespace-nowrap text-xs rounded-full px-2 py-0.5 bg-slate-100 text-slate-500">not migrated</span>;
-  const label = (text, cls) => (
-    <Link to={`/jobs/${job.id}`} className={`inline-block whitespace-nowrap text-xs rounded-full px-2 py-0.5 hover:opacity-80 ${cls}`} title={job.completedAt ? `Last run finished ${job.completedAt}` : 'Open latest job'}>
-      {text}
-    </Link>
-  );
-  switch (job.status) {
-    case 'completed':
-      if (job.itemsFailed > 0 || job.verificationOk === false) {
-        return label(`⚠ completed, ${job.itemsFailed || 'verify'} issue(s)`, 'bg-amber-100 text-amber-800');
-      }
-      return label(job.verificationOk ? '✓ migrated & verified' : '✓ migrated', 'bg-green-100 text-green-800');
-    case 'running':
-      return label(`▶ running ${job.itemsDone ?? 0}/${job.totalItems ?? '?'}`, 'bg-blue-100 text-blue-800');
-    case 'failed':
-      return label('✗ failed', 'bg-red-100 text-red-700');
-    case 'paused':
-      return label('⏸ paused', 'bg-amber-100 text-amber-800');
-    case 'cancelled':
-      return label('cancelled', 'bg-slate-200 text-slate-600');
-    default:
-      return label(job.status, 'bg-slate-100 text-slate-600');
-  }
+// The project (a named group of mappings) new mappings go into. Remembered
+// between visits: a big migration is built over several sittings.
+const PROJECT_KEY = 'mappings.currentProject';
+function rememberedProject() {
+  try { return localStorage.getItem(PROJECT_KEY) || ''; } catch { return ''; }
 }
 
 export default function MappingsPage() {
@@ -59,14 +32,27 @@ export default function MappingsPage() {
   const [notes, setNotes] = useState('');
   const [message, setMessage] = useState(null);
   const [importResult, setImportResult] = useState(null);
-  const [selectedIds, setSelectedIds] = useState(new Set());
-  const navigate = useNavigate();
+  const [addMode, setAddMode] = useState('hand');
+  // Tabs are mounted the first time they are opened and then kept (hidden),
+  // so switching tabs doesn't throw away where a picker had got to.
+  const [openedModes, setOpenedModes] = useState(new Set(['hand']));
+  const [project, setProject] = useState(rememberedProject);
+  const [sourceClear, setSourceClear] = useState(0);
 
   function refresh() {
-    api.get('/api/mappings').then((r) => setMappings(r.items))
+    return api.get('/api/mappings').then((r) => setMappings(r.items))
       .catch((err) => setMessage({ type: 'error', text: `Couldn't load mappings: ${err.message}` }));
   }
-  useEffect(refresh, []);
+  useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    try { localStorage.setItem(PROJECT_KEY, project); } catch { /* private window: just not remembered */ }
+  }, [project]);
+
+  const groupNames = useMemo(
+    () => [...new Set(mappings.map((m) => m.group).filter(Boolean))].sort((a, b) => a.localeCompare(b)),
+    [mappings]
+  );
+  const projectName = project.replace(/\s+/g, ' ').trim();
   useEffect(() => {
     api.get('/api/settings').then((r) => {
       setBlobArchivingEnabled(!!r.blobArchivingEnabled);
@@ -114,20 +100,24 @@ export default function MappingsPage() {
         ? { sourceProvider: 'filesystem' }
         : { sourceSiteUrl: source.siteUrl, sourceSiteName: source.siteName, sourceLibrary: source.library };
 
-      const allGrants = [];
-      for (const item of sourceItems) {
-        const saved = await api.post('/api/mappings', {
+      // One request for the whole batch, so engine access is checked once
+      // per site and not once per ticked folder.
+      const saved = await api.post('/api/mappings/bulk', {
+        items: sourceItems.map((item) => ({
           ...item,
           ...sourceFields,
           ...targetFields,
-          action: 'Migrate', notes,
-        });
-        allGrants.push(...(saved.engineAccess || []));
-      }
+          action: 'Migrate', notes, group: projectName || undefined,
+        })),
+      });
+      if (saved.items.length === 0) throw new Error(saved.failed[0]?.message || 'Nothing was saved.');
+      const allGrants = saved.engineAccess || [];
 
       const failed = allGrants.filter((g) => !g.ok);
       const madeNew = allGrants.filter((g) => g.ok && g.action !== 'already-granted');
-      let text = sourceItems.length > 1 ? `${sourceItems.length} mappings saved.` : 'Mapping saved.';
+      let text = saved.items.length > 1 ? `${saved.items.length} mappings saved.` : 'Mapping saved.';
+      if (saved.failed.length > 0) text += ` ${saved.failed.length} could not be saved: ${saved.failed[0].message}`;
+      text += ' The target is kept, so you can tick the next source straight away.';
       if (failed.length > 0) {
         const failedSites = [...new Set(failed.map((g) => g.siteUrl))];
         text += ` ⚠ Could not auto-grant engine access on ${failedSites.join(', ')} (${failed[0].error}) - grant manually in the site picker.`;
@@ -136,36 +126,15 @@ export default function MappingsPage() {
       } else if (allGrants.length > 0) {
         text += ' Engine already had access to all sites.';
       }
-      setMessage({ type: failed.length > 0 ? 'error' : 'success', text });
-      setSource(null); setTarget(null); setNotes('');
+      setMessage({ type: failed.length > 0 || saved.failed.length > 0 ? 'error' : 'success', text });
+      // Only the source is cleared: consolidations send source after source
+      // to the same place, and re-picking the target each time was most of
+      // the clicking. The pickers stay where they are.
+      setSource(null); setNotes('');
+      setSourceClear((n) => n + 1);
       refresh();
     } catch (err) {
       setMessage({ type: 'error', text: err.message });
-    }
-  }
-
-  // These used to have no error handling: a failed request (expired
-  // sign-in, server error, bad spreadsheet) was an unhandled rejection and
-  // the button just did nothing. Errors now show in the page's message box.
-  async function createJob(mappingId) {
-    setMessage(null);
-    try {
-      const job = await api.post(`/api/mappings/${mappingId}/jobs`);
-      navigate(`/jobs/${job.id}`);
-    } catch (err) {
-      setMessage({ type: 'error', text: `Couldn't create the job: ${err.message}` });
-    }
-  }
-
-  async function bulkCreateJobs() {
-    if (selectedIds.size === 0) return;
-    setMessage(null);
-    try {
-      await api.post('/api/jobs/bulk-create', { mappingIds: [...selectedIds] });
-      setSelectedIds(new Set());
-      navigate('/jobs');
-    } catch (err) {
-      setMessage({ type: 'error', text: `Couldn't create the jobs: ${err.message}` });
     }
   }
 
@@ -184,178 +153,143 @@ export default function MappingsPage() {
     }
   }
 
-  function toggleSelected(id) {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }
-
   return (
     <div className="space-y-6">
       <h1 className="text-xl font-semibold text-slate-800">Mappings</h1>
 
-      <details className="bg-white border border-slate-200 rounded-lg px-4 py-2.5 group">
-        <summary className="text-sm text-slate-600 cursor-pointer select-none list-none flex items-center gap-2">
-          <span className="text-slate-400 transition-transform group-open:rotate-90" aria-hidden>▸</span>
-          <span className="font-medium">Bulk import from crosswalk spreadsheet</span>
-          <a href="/api/mappings/crosswalk-template" onClick={(e) => e.stopPropagation()} className="text-xs text-blue-600 hover:underline ml-auto">template</a>
-        </summary>
-        <form onSubmit={uploadCrosswalk} className="flex items-center gap-2 mt-3">
-          <input type="file" name="crosswalkFile" accept=".xlsx,.xls" aria-label="Crosswalk spreadsheet" className="text-sm min-w-0" />
-          <button type="submit" className="btn-primary">Import</button>
-        </form>
-        {importResult?.error && (
-          <div role="alert" className="text-xs bg-red-50 border border-red-200 text-red-700 rounded-md p-2 mt-2">Import failed: {importResult.error}</div>
-        )}
-        {importResult && !importResult.error && (
-          <div className="text-xs bg-slate-50 border border-slate-200 rounded-md p-2 mt-2">
-            Imported {importResult.importedCount} of {importResult.totalRows} rows from sheet "{importResult.sheetUsed}"
-            {importResult.skippedCount > 0 && <span className="text-amber-600"> - {importResult.skippedCount} skipped</span>}.
-          </div>
-        )}
-      </details>
-
-      <div className="bg-white border border-slate-200 rounded-lg p-4 space-y-4">
-        <h2 className="text-sm font-semibold text-slate-700">Or pick source and target by hand</h2>
-        <div className="flex items-center gap-2 text-xs">
-          <span className="text-slate-500">Source:</span>
-          <button
-            onClick={() => switchSourceKind('sharepoint')}
-            className={`rounded-full px-2 py-0.5 ${sourceKind === 'sharepoint' ? 'bg-blue-100 text-blue-800 font-medium' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
-          >
-            SharePoint site
-          </button>
-          <button
-            onClick={() => switchSourceKind('filesystem')}
-            className={`rounded-full px-2 py-0.5 ${sourceKind === 'filesystem' ? 'bg-violet-100 text-violet-800 font-medium' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
-          >
-            File share (DFS)
-          </button>
-          <button
-            onClick={() => switchSourceKind('onedrive')}
-            className={`rounded-full px-2 py-0.5 ${sourceKind === 'onedrive' ? 'bg-blue-100 text-blue-800 font-medium' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
-          >
-            A user's OneDrive
-          </button>
-        </div>
-        {((blobArchivingEnabled && sourceKind !== 'filesystem') || onedriveTargetEnabled) && (
-          <div className="flex items-center gap-2 text-xs">
-            <span className="text-slate-500">Target destination:</span>
-            <button
-              onClick={() => switchTargetKind('sharepoint')}
-              className={`rounded-full px-2 py-0.5 ${targetKind === 'sharepoint' ? 'bg-blue-100 text-blue-800 font-medium' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
-            >
-              SharePoint site
-            </button>
-            {blobArchivingEnabled && sourceKind !== 'filesystem' && (
+      <div className="bg-white border border-slate-200 rounded-lg">
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 px-4 pt-3 border-b border-slate-200">
+          <div className="flex gap-1" role="tablist" aria-label="How to add mappings">
+            {ADD_MODES.map((m) => (
               <button
-                onClick={() => switchTargetKind('azure_blob')}
-                className={`rounded-full px-2 py-0.5 ${targetKind === 'azure_blob' ? 'bg-blue-100 text-blue-800 font-medium' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+                key={m.id}
+                role="tab"
+                aria-selected={addMode === m.id}
+                onClick={() => { setAddMode(m.id); setOpenedModes((prev) => new Set(prev).add(m.id)); }}
+                className={`text-sm px-3 py-2 -mb-px border-b-2 ${addMode === m.id ? 'border-blue-600 text-blue-700 font-semibold' : 'border-transparent text-slate-500 hover:text-slate-800'}`}
               >
-                Azure Blob container (archive)
+                {m.label}
               </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-2 ml-auto pb-2">
+            <label htmlFor="add-project" className="text-xs text-slate-500">Add to project</label>
+            <input
+              id="add-project"
+              list="add-project-names"
+              value={project}
+              onChange={(e) => setProject(e.target.value)}
+              placeholder="None (type a name to group them)"
+              autoComplete="off"
+              className="w-64 max-w-full border border-slate-300 rounded-md px-2 py-1 text-sm"
+            />
+            <datalist id="add-project-names">{groupNames.map((g) => <option key={g} value={g} />)}</datalist>
+          </div>
+        </div>
+
+        <div className="p-4 space-y-4">
+          {openedModes.has('sites') && (
+            <div className={addMode === 'sites' ? '' : 'hidden'}>
+              <BulkAddSites existingMappings={mappings} group={projectName} onSaved={refresh} />
+            </div>
+          )}
+
+          {addMode === 'sheet' && (
+            <div>
+              <p className="text-sm text-slate-600">
+                Fill in the <a href="/api/mappings/crosswalk-template" className="text-blue-600 hover:underline">crosswalk template</a> and upload it. One row is one mapping, and a Project column groups them.
+              </p>
+            <form onSubmit={uploadCrosswalk} className="flex items-center gap-2 mt-3">
+              <input type="file" name="crosswalkFile" accept=".xlsx,.xls" aria-label="Crosswalk spreadsheet" className="text-sm min-w-0" />
+              <button type="submit" className="btn-primary">Import</button>
+            </form>
+            {importResult?.error && (
+              <div role="alert" className="text-xs bg-red-50 border border-red-200 text-red-700 rounded-md p-2 mt-2">Import failed: {importResult.error}</div>
             )}
-            {onedriveTargetEnabled && (
+            {importResult && !importResult.error && (
+              <div className="text-xs bg-slate-50 border border-slate-200 rounded-md p-2 mt-2">
+                Imported {importResult.importedCount} of {importResult.totalRows} rows from sheet "{importResult.sheetUsed}"
+                {importResult.skippedCount > 0 && <span className="text-amber-600"> - {importResult.skippedCount} skipped</span>}.
+              </div>
+            )}
+            </div>
+          )}
+
+          <div className={addMode === 'hand' ? 'space-y-4' : 'hidden'}>
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-slate-500">Source:</span>
               <button
-                onClick={() => switchTargetKind('onedrive')}
-                className={`rounded-full px-2 py-0.5 ${targetKind === 'onedrive' ? 'bg-blue-100 text-blue-800 font-medium' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+                onClick={() => switchSourceKind('sharepoint')}
+                className={`rounded-full px-2 py-0.5 ${sourceKind === 'sharepoint' ? 'bg-blue-100 text-blue-800 font-medium' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+              >
+                SharePoint site
+              </button>
+              <button
+                onClick={() => switchSourceKind('filesystem')}
+                className={`rounded-full px-2 py-0.5 ${sourceKind === 'filesystem' ? 'bg-violet-100 text-violet-800 font-medium' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+              >
+                File share (DFS)
+              </button>
+              <button
+                onClick={() => switchSourceKind('onedrive')}
+                className={`rounded-full px-2 py-0.5 ${sourceKind === 'onedrive' ? 'bg-blue-100 text-blue-800 font-medium' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
               >
                 A user's OneDrive
               </button>
+            </div>
+            {((blobArchivingEnabled && sourceKind !== 'filesystem') || onedriveTargetEnabled) && (
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-slate-500">Target destination:</span>
+                <button
+                  onClick={() => switchTargetKind('sharepoint')}
+                  className={`rounded-full px-2 py-0.5 ${targetKind === 'sharepoint' ? 'bg-blue-100 text-blue-800 font-medium' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+                >
+                  SharePoint site
+                </button>
+                {blobArchivingEnabled && sourceKind !== 'filesystem' && (
+                  <button
+                    onClick={() => switchTargetKind('azure_blob')}
+                    className={`rounded-full px-2 py-0.5 ${targetKind === 'azure_blob' ? 'bg-blue-100 text-blue-800 font-medium' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+                  >
+                    Azure Blob container (archive)
+                  </button>
+                )}
+                {onedriveTargetEnabled && (
+                  <button
+                    onClick={() => switchTargetKind('onedrive')}
+                    className={`rounded-full px-2 py-0.5 ${targetKind === 'onedrive' ? 'bg-blue-100 text-blue-800 font-medium' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+                  >
+                    A user's OneDrive
+                  </button>
+                )}
+              </div>
+            )}
+            <div className="grid md:grid-cols-2 gap-4 [&>*]:min-w-0">
+              {sourceKind === 'filesystem'
+                ? <FileSharePicker label="Source (tick one or more folders on a file share)" onSelect={setSource} multi />
+                : sourceKind === 'onedrive'
+                ? <OneDriveSourcePicker label="Source (a user's OneDrive - tick one or more folders/files)" onSelect={setSource} multi clearSignal={sourceClear} />
+                : <SharePointPicker label="Source (tick one or more folders/files)" onSelect={setSource} multi clearSignal={sourceClear} />}
+              {targetKind === 'azure_blob'
+                ? <BlobTargetPicker onSelect={setTarget} />
+                : targetKind === 'onedrive'
+                ? <OneDriveTargetPicker onSelect={setTarget} />
+                : <SharePointPicker label="Target folder" onSelect={setTarget} allowCreateFolder />}
+            </div>
+            <div className="flex items-center gap-3">
+              <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes (optional)…" aria-label="Mapping notes" autoComplete="off" className="flex-1 min-w-0 border border-slate-300 rounded-md px-2 py-1 text-sm" />
+              <button onClick={saveMapping} className="btn-primary">{source?.multi && source.items.length > 1 ? `Save ${source.items.length} mappings` : 'Save mapping'}</button>
+            </div>
+            {message && (
+              <div role={message.type === 'error' ? 'alert' : 'status'} className={`text-sm rounded-md p-2 ${message.type === 'error' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-green-50 text-green-700 border border-green-200'}`}>
+                {message.text}
+              </div>
             )}
           </div>
-        )}
-        <div className="grid md:grid-cols-2 gap-4 [&>*]:min-w-0">
-          {sourceKind === 'filesystem'
-            ? <FileSharePicker label="Source (tick one or more folders on a file share)" onSelect={setSource} multi />
-            : sourceKind === 'onedrive'
-            ? <OneDriveSourcePicker label="Source (a user's OneDrive - tick one or more folders/files)" onSelect={setSource} multi />
-            : <SharePointPicker label="Source (tick one or more folders/files)" onSelect={setSource} multi />}
-          {targetKind === 'azure_blob'
-            ? <BlobTargetPicker onSelect={setTarget} />
-            : targetKind === 'onedrive'
-            ? <OneDriveTargetPicker onSelect={setTarget} />
-            : <SharePointPicker label="Target folder" onSelect={setTarget} allowCreateFolder />}
         </div>
-        <div className="flex items-center gap-3">
-          <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes (optional)…" aria-label="Mapping notes" autoComplete="off" className="flex-1 min-w-0 border border-slate-300 rounded-md px-2 py-1 text-sm" />
-          <button onClick={saveMapping} className="btn-primary">Save mapping</button>
-        </div>
-        {message && (
-          <div role={message.type === 'error' ? 'alert' : 'status'} className={`text-sm rounded-md p-2 ${message.type === 'error' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-green-50 text-green-700 border border-green-200'}`}>
-            {message.text}
-          </div>
-        )}
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-2 border-b border-slate-100">
-          <h2 className="text-sm font-semibold text-slate-700">All mappings ({mappings.length})</h2>
-          <button onClick={bulkCreateJobs} disabled={selectedIds.size === 0} className="btn-secondary">
-            Create jobs for {selectedIds.size} selected
-          </button>
-        </div>
-        <div className="relative overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-600 text-xs font-semibold uppercase tracking-wide">
-            <tr>
-              <th className="px-4 py-2"><span className="sr-only">Select</span></th>
-              <th className="text-left px-4 py-2">Source</th>
-              <th className="text-left px-4 py-2">Target</th>
-              <th className="text-left px-4 py-2">Status</th>
-              <th className="hidden lg:table-cell text-left px-4 py-2">Origin</th>
-              <th className="text-right px-4 py-2"><span className="sr-only">Actions</span></th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {mappings.map((m) => (
-              <tr key={m.id} className="hover:bg-slate-50">
-                <td className="px-4 py-2"><input type="checkbox" checked={selectedIds.has(m.id)} onChange={() => toggleSelected(m.id)} aria-label="Select mapping" className="accent-blue-600" /></td>
-                <td className="px-4 py-2 text-slate-700">
-                  {m.sourceProvider === 'filesystem'
-                    ? <span className="inline-flex items-center gap-1"><span className="text-xs rounded bg-violet-100 text-violet-700 px-1.5 py-0.5 font-medium">share</span>{m.sourcePath}</span>
-                    : (
-                      <span title={m.sourceSiteUrl || undefined}>
-                        {siteLabel(m.sourceSiteName, m.sourceSiteUrl) && (
-                          <span className="text-slate-400">{siteLabel(m.sourceSiteName, m.sourceSiteUrl)} <span className="text-slate-300">›</span> </span>
-                        )}
-                        {m.sourceLibrary}/{m.sourcePath}
-                      </span>
-                    )}
-                </td>
-                <td className="px-4 py-2 text-slate-700">
-                  <span className="text-slate-300 mr-1.5">→</span>
-                  {m.targetProvider === 'azure_blob'
-                    ? <span className="inline-flex items-center gap-1"><span className="text-xs rounded bg-sky-100 text-sky-700 px-1.5 py-0.5 font-medium">blob</span>{m.targetContainer}/{m.targetBlobPrefix || ''}</span>
-                    : (
-                      <span title={m.targetSiteUrl || undefined}>
-                        {siteLabel(m.targetSiteName, m.targetSiteUrl) && (
-                          <span className="text-slate-500 font-medium">{siteLabel(m.targetSiteName, m.targetSiteUrl)} <span className="text-slate-300 font-normal">›</span> </span>
-                        )}
-                        {m.targetLibrary}/{m.targetPath}
-                      </span>
-                    )}
-                </td>
-                <td className="px-4 py-2"><MappingStatus job={m.latestJob} /></td>
-                <td className="hidden lg:table-cell px-4 py-2 text-slate-400 text-xs">{m.origin}{m.confidence ? ` (${m.confidence})` : ''}</td>
-                <td className="px-4 py-2 text-right">
-                  {m.latestJob && ['queued', 'approved', 'running', 'paused'].includes(m.latestJob.status) ? (
-                    <Link to={`/jobs/${m.latestJob.id}`} className="text-xs font-medium rounded-md px-2.5 py-1 bg-slate-100 text-slate-700 hover:bg-slate-200 transition-colors whitespace-nowrap">Open job</Link>
-                  ) : (
-                    <button onClick={() => createJob(m.id)} className="text-xs font-medium rounded-md px-2.5 py-1 bg-blue-600 text-white hover:bg-blue-700 transition-colors whitespace-nowrap">{m.latestJob ? 'Run again' : 'Create job'}</button>
-                  )}
-                </td>
-              </tr>
-            ))}
-            {mappings.length === 0 && (
-              <tr><td colSpan={6} className="px-4 py-8 text-center text-slate-400">No mappings yet.</td></tr>
-            )}
-          </tbody>
-        </table>
-        </div>
-      </div>
+      <MappingsGrid mappings={mappings} groupNames={groupNames} refresh={refresh} />
     </div>
   );
 }

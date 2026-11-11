@@ -111,7 +111,7 @@ router.post('/mappings/:mappingId/jobs', (req, res, next) => {
 
 router.post('/jobs/bulk-create', (req, res, next) => {
   try {
-    const { mappingIds } = req.body || {};
+    const { mappingIds, approve } = req.body || {};
     if (!Array.isArray(mappingIds) || !mappingIds.length) {
       return res.status(400).json({ error: 'mappingIds array is required' });
     }
@@ -126,7 +126,11 @@ router.post('/jobs/bulk-create', (req, res, next) => {
         .get(mid, tenantId, ...owner.params);
       if (!mapping) continue;
       if (orchestrator.activeJobForMapping(mapping.id)) { skipped.push(mapping.id); continue; }
-      created.push(mapJob(orchestrator.createJobFromMapping(mapping, actor)));
+      let job = orchestrator.createJobFromMapping(mapping, actor);
+      // approve: true is "create and approve" in one step for a batch - the
+      // same two audit events as doing each job by hand.
+      if (approve === true) job = orchestrator.approveJob(job.id, actor, tenantId);
+      created.push(mapJob(job));
     }
     res.status(201).json({ items: created, skippedActive: skipped.length });
   } catch (err) { next(err); }
