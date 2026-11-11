@@ -835,7 +835,9 @@ export default function JobDetail() {
         </div>
       </div>
 
-      <div className="grid md:grid-cols-2 gap-4 [&>*]:min-w-0">
+      {/* Slow transfers describe the copy run, so they are hidden while a
+          Verify / clean-up / purge runs; Largest files still apply. */}
+      <div className={`grid ${backgroundOp ? '' : 'md:grid-cols-2'} gap-4 [&>*]:min-w-0`}>
         <div className="bg-white border border-slate-200 rounded-lg p-4">
           <h2 className="text-sm font-semibold text-slate-700 mb-2">Largest files</h2>
           <ul className="text-xs text-slate-600 space-y-1">
@@ -845,7 +847,7 @@ export default function JobDetail() {
             {kpis && kpis.largestFiles.length === 0 && <li className="text-slate-400">None yet</li>}
           </ul>
         </div>
-        <div className="bg-white border border-slate-200 rounded-lg p-4">
+        {!backgroundOp && <div className="bg-white border border-slate-200 rounded-lg p-4">
           <h2 className="text-sm font-semibold text-slate-700 mb-2">Slow transfers (&gt; {Math.round((kpis?.slowThresholdMs || 0) / 1000)}s)</h2>
           <ul className="text-xs text-slate-600 space-y-1">
             {kpis?.slowItems.map((f, i) => (
@@ -853,7 +855,7 @@ export default function JobDetail() {
             ))}
             {kpis && kpis.slowItems.length === 0 && <li className="text-slate-400">None</li>}
           </ul>
-        </div>
+        </div>}
       </div>
     </div>
   );
