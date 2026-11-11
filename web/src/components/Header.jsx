@@ -94,10 +94,10 @@ export function Sidebar() {
   if (!user) return null;
   const project = user.project;
   return (
-    <aside className="w-56 shrink-0 bg-sidebar text-sidebar-text flex flex-col sticky top-14 h-[calc(100vh-3.5rem)] overflow-y-auto">
+    <aside id="sidebar" className="sidebar w-56 shrink-0 bg-sidebar text-sidebar-text flex flex-col sticky top-14 h-[calc(100vh-3.5rem)] overflow-y-auto">
       {project && (
         <div className="px-4 py-3 border-b border-sidebar-line" title={`Signed into project "${project.name}"${project.tenantName ? ` (tenant ${project.tenantName})` : ''}`}>
-          <div className="text-[11px] font-semibold uppercase tracking-wide text-sidebar-text/60 mb-1">Project</div>
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-sidebar-text/80 mb-1">Project</div>
           <div className="flex items-center gap-2 text-sm font-medium text-white min-w-0">
             <span className="relative flex h-1.5 w-1.5 shrink-0">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
@@ -134,7 +134,7 @@ export function Sidebar() {
   );
 }
 
-export default function Header({ onToggleSidebar }) {
+export default function Header({ onToggleSidebar, sidebarOpen }) {
   const { user } = useAuth();
 
   return (
@@ -144,8 +144,10 @@ export default function Header({ onToggleSidebar }) {
           <button
             type="button"
             onClick={onToggleSidebar}
-            title="Show or hide the menu"
-            aria-label="Show or hide the menu"
+            title={sidebarOpen ? 'Hide the menu' : 'Show the menu'}
+            aria-label={sidebarOpen ? 'Hide the menu' : 'Show the menu'}
+            aria-expanded={sidebarOpen}
+            aria-controls="sidebar"
             className="w-8 h-8 shrink-0 rounded-md flex items-center justify-center text-slate-700 hover:bg-slate-200/70 transition-colors"
           >
             <Icon name="menu" size={20} />

@@ -16,6 +16,7 @@ export default function Logo({ height = 26, className = '' }) {
     <span
       role="img"
       aria-label="Knowall"
+      translate="no"
       className={`inline-block shrink-0 text-slate-800 ${className}`}
       style={{ height, width: Math.round((height * WIDTH) / HEIGHT) }}
       dangerouslySetInnerHTML={{ __html: markup }}
