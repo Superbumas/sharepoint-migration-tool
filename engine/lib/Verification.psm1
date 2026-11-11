@@ -16,12 +16,16 @@ function Test-PnPTargetFileMatches {
         [Parameter(Mandatory)]$Connection,
         [Parameter(Mandatory)][string]$TargetServerRelativeUrl,
         [Parameter(Mandatory)][long]$ExpectedSize,
-        $SourceModified = $null
+        $SourceModified = $null,
+        # Office files: SharePoint re-stamps them on copy, so size can't match.
+        [switch]$AllowSizeDifference
     )
     try {
         $existing = Get-PnPFile -Url $TargetServerRelativeUrl -AsFileObject -Connection $Connection -ErrorAction Stop
         if ($null -eq $existing) { return $false }
-        if ([long]$existing.Length -ne $ExpectedSize) { return $false }
+        # A size difference is only tolerated when the dates can still prove
+        # the copy is current.
+        if ([long]$existing.Length -ne $ExpectedSize -and -not ($AllowSizeDifference -and $SourceModified)) { return $false }
         if ($SourceModified) {
             $targetModified = $null
             try { $targetModified = $existing.TimeLastModified } catch {}
