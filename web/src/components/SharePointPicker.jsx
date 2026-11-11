@@ -61,12 +61,18 @@ function libraryRelativePathFromDrive(site, drive) {
 // picker. `multi` (source only) enables ticking several folders/files at once
 // - the parent receives { multi: true, items: [...] } and creates one mapping
 // per item.
-export default function SharePointPicker({ label, onSelect, multi = false }) {
+//
+// `fixedSite` locks the picker to one site (no site search, no "change" link)
+// and `preferredDriveId` opens that library straight away - used by
+// OneDriveSourcePicker, where the site is a person's OneDrive. `embedded`
+// drops the outer card so it can sit inside another picker's card.
+export default function SharePointPicker({ label, onSelect, multi = false, fixedSite = null, preferredDriveId = null, embedded = false }) {
   const { user } = useAuth();
   const [siteQuery, setSiteQuery] = useState('');
   const [sites, setSites] = useState([]);
   const [noAccessSite, setNoAccessSite] = useState(null); // a site the admin center lists but this user can't open
-  const [site, setSite] = useState(null);
+  const [site, setSite] = useState(fixedSite);
+  const [browseError, setBrowseError] = useState(null);
   const [drives, setDrives] = useState([]);
   const [drive, setDrive] = useState(null);
   const [pathStack, setPathStack] = useState([]); // [{id, name}]
@@ -81,11 +87,18 @@ export default function SharePointPicker({ label, onSelect, multi = false }) {
   const [engineAccess, setEngineAccess] = useState(null);
 
   // Auto-detect sites immediately - no need to search first.
-  useEffect(() => { loadSites(''); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (!fixedSite) loadSites(''); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!site) return;
-    api.get(`/api/sharepoint/sites/${site.id}/drives`).then((r) => setDrives(r.items));
+    setBrowseError(null);
+    api.get(`/api/sharepoint/sites/${site.id}/drives`)
+      .then((r) => {
+        setDrives(r.items);
+        const preferred = preferredDriveId && r.items.find((d) => d.id === preferredDriveId);
+        if (preferred) { setDrive(preferred); setPathStack([]); }
+      })
+      .catch((err) => setBrowseError(err.message));
     checkEngineAccess();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [site]);
@@ -140,7 +153,10 @@ export default function SharePointPicker({ label, onSelect, multi = false }) {
     const req = pathStack.length === 0
       ? api.get(`/api/sharepoint/drives/${drive.id}/root-children`)
       : api.get(`/api/sharepoint/drives/${drive.id}/items/${pathStack[pathStack.length - 1].id}/children`);
-    req.then((r) => setItems(r.items)).finally(() => setLoading(false));
+    setBrowseError(null);
+    req.then((r) => setItems(r.items))
+      .catch((err) => { setItems([]); setBrowseError(err.message); })
+      .finally(() => setLoading(false));
   }
 
   function runSearch() {
@@ -214,8 +230,8 @@ export default function SharePointPicker({ label, onSelect, multi = false }) {
   const maxStorage = Math.max(1, ...sites.map((s) => s.storageUsed || 0));
 
   return (
-    <div className="border border-slate-200 rounded-lg bg-white p-4 space-y-3">
-      <div className="flex items-center justify-between">
+    <div className={embedded ? 'space-y-3' : 'border border-slate-200 rounded-lg bg-white p-4 space-y-3'}>
+      <div className={`flex items-center justify-between ${!label && !(multi && ticked.size > 0) ? 'hidden' : ''}`}>
         <h3 className="text-sm font-semibold text-slate-700">{label}</h3>
         {multi && ticked.size > 0 && (
           <span className="text-xs font-medium text-blue-700 bg-blue-50 rounded-full px-2 py-0.5">{ticked.size} ticked</span>
@@ -291,7 +307,9 @@ export default function SharePointPicker({ label, onSelect, multi = false }) {
         <div className="space-y-2">
           <div className="text-xs text-slate-500">
             Site: <span className="font-medium text-slate-700">{site.displayName || site.name}</span>{' '}
-            <button onClick={() => { setSite(null); setDrives([]); setGrantStatus(null); setEngineAccess(null); }} className="text-blue-600 hover:underline">change</button>
+            {!fixedSite && (
+              <button onClick={() => { setSite(null); setDrives([]); setGrantStatus(null); setEngineAccess(null); }} className="text-blue-600 hover:underline">change</button>
+            )}
           </div>
           {engineAccess === 'checking' && (
             <div className="inline-flex items-center gap-1.5 text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-md px-2 py-1">
@@ -419,6 +437,19 @@ export default function SharePointPicker({ label, onSelect, multi = false }) {
       )}
 
       {loading && site && <div className="text-xs text-slate-400">Loading…</div>}
+
+      {browseError && (
+        <div role="alert" className="text-xs bg-red-50 border border-red-200 text-red-700 rounded-md px-2 py-1.5 space-y-1">
+          <div>Couldn't open this {fixedSite ? 'OneDrive' : 'site'}: {browseError}</div>
+          {fixedSite && (
+            <div>
+              Tenant admins can't see other people's OneDrives by default. In the Microsoft 365 admin center open Users, then
+              Active users, pick the person, open the OneDrive tab and choose "Create link to files" - that makes you a site admin of
+              their OneDrive. Then pick them again here.
+            </div>
+          )}
+        </div>
+      )}
 
       {selected && (
         <div className="text-xs bg-green-50 border border-green-200 text-green-800 rounded-md px-2 py-1.5">
