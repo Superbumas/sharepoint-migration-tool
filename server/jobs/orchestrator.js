@@ -168,6 +168,11 @@ let io = null;
 function init(socketIoServer) {
   io = socketIoServer;
   reconcileOrphanedJobs();
+  // Jobs that were waiting in the run queue when the server stopped carry on
+  // once it is back, after a short pause so startup can finish first.
+  setTimeout(() => {
+    try { pumpAllRunQueues(); } catch (err) { clog.warn('queue', `Run queue could not resume at startup: ${err.message}`); }
+  }, 5000).unref();
 }
 
 // Map any raw DB row on `event.job` to the same camelCase/nested shape the
@@ -353,14 +358,21 @@ function createJobFromMapping(mapping, actor, overrides = {}) {
   // source_path/target_path can legitimately be '' (the library root, e.g. a
   // freshly created site with no subfolders yet) - fall back to the library
   // name so the job name doesn't read as "-> Documents" with a blank side.
+  // The source site leads the name: a consolidation creates dozens of jobs
+  // whose folder is "General" and whose target library is the same, and they
+  // were indistinguishable in the queue.
+  let sourceSite = mapping.source_site_name || '';
+  if (!sourceSite && mapping.source_site_url) {
+    try { sourceSite = decodeURIComponent(new URL(mapping.source_site_url).pathname.split('/').filter(Boolean).pop() || ''); } catch {}
+  }
   const sourceLabel = mapping.source_provider === 'filesystem'
     ? mapping.source_path
-    : (mapping.source_path || mapping.source_library || '(root)');
+    : `${sourceSite ? `${sourceSite} › ` : ''}${mapping.source_path || mapping.source_library || '(root)'}`;
   const targetLabel = mapping.target_provider === 'azure_blob'
     ? `azure-blob://${mapping.target_container}/${mapping.target_blob_prefix || ''}`
     : mapping.target_provider === 'onedrive'
     ? `onedrive://${mapping.target_onedrive_upn}/${mapping.target_onedrive_path || ''}`
-    : (mapping.target_library || mapping.target_path || '(root)');
+    : ([mapping.target_library, mapping.target_path].filter(Boolean).join('/') || '(root)');
   const name = overrides.name || `${sourceLabel} -> ${targetLabel}`;
   db.prepare(
     `INSERT INTO jobs (
@@ -549,7 +561,7 @@ function runJob(jobId, actor, tenantId) {
   // counters and completion recomputes count exactly this run's outcomes
   // instead of accumulating across runs (see 014_run_scoped_counters.sql).
   db.prepare(
-    `UPDATE jobs SET status = 'running', pid = ?, run_seq = run_seq + 1, started_at = COALESCE(started_at, datetime('now')), pause_requested = 0, cancel_requested = 0, phase_json = NULL,
+    `UPDATE jobs SET status = 'running', pid = ?, run_seq = run_seq + 1, started_at = COALESCE(started_at, datetime('now')), pause_requested = 0, cancel_requested = 0, phase_json = NULL, run_queued_at = NULL, run_queued_by_json = NULL,
      verification_json = NULL, verified_at = NULL WHERE id = ?`
   ).run(child.pid, jobId);
 
@@ -659,6 +671,91 @@ function finalizeJobProcess(jobId, code) {
   if (updated) {
     emitJob(jobId, { type: 'job_updated', job: updated });
     emitDashboard({ type: 'job_updated', job: updated }, updated.tenant_id);
+    // A slot just came free - start the next job waiting in the run queue.
+    pumpRunQueue(updated.tenant_id);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Run queue. "Run" starts one job now. Queueing a run instead marks an
+// approved job as waiting; pumpRunQueue starts waiting jobs oldest-first
+// while fewer than config.runQueueMaxJobs are running for that tenant, and is
+// called again every time an engine process ends. Nothing here changes what a
+// run does - a queued job is started through the same runJob() as a click.
+// ---------------------------------------------------------------------------
+function queueRun(jobId, actor, tenantId) {
+  const job = getJob(jobId, tenantId);
+  if (!job) throw httpError(404, 'Job not found');
+  if (job.status !== 'approved') {
+    throw httpError(409, `Cannot queue a job in status "${job.status}" to run - it must be approved first.`);
+  }
+  if (!job.run_queued_at) {
+    getDb().prepare(`UPDATE jobs SET run_queued_at = datetime('now'), run_queued_by_json = ? WHERE id = ?`)
+      .run(JSON.stringify({ id: actor.id || null, name: actor.name, email: actor.email, upn: actor.upn }), jobId);
+    insertLog(jobId, { event_type: 'job_run_queued', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
+  }
+  const updated = getJob(jobId);
+  emitJob(jobId, { type: 'job_updated', job: updated });
+  emitDashboard({ type: 'job_updated', job: updated }, updated.tenant_id);
+  return updated;
+}
+
+function unqueueRun(jobId, actor, tenantId) {
+  const job = getJob(jobId, tenantId);
+  if (!job) throw httpError(404, 'Job not found');
+  if (job.run_queued_at) {
+    getDb().prepare('UPDATE jobs SET run_queued_at = NULL, run_queued_by_json = NULL WHERE id = ?').run(jobId);
+    insertLog(jobId, { event_type: 'job_run_unqueued', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
+  }
+  const updated = getJob(jobId);
+  emitJob(jobId, { type: 'job_updated', job: updated });
+  emitDashboard({ type: 'job_updated', job: updated }, updated.tenant_id);
+  return updated;
+}
+
+function pumpRunQueue(tenantId) {
+  const db = getDb();
+  const countRunning = db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE tenant_id = ? AND status = 'running'`);
+  const nextWaiting = db.prepare(
+    `SELECT * FROM jobs WHERE tenant_id = ? AND status = 'approved' AND run_queued_at IS NOT NULL AND deleted_at IS NULL
+     ORDER BY run_queued_at, created_at, rowid LIMIT 1`
+  );
+  let started = 0;
+  // Bounded by the number of waiting jobs: each pass takes one out of the
+  // queue whether or not it starts.
+  for (;;) {
+    if (countRunning.get(tenantId).n >= config.runQueueMaxJobs) break;
+    const job = nextWaiting.get(tenantId);
+    if (!job) break;
+    let actor = null;
+    try { actor = JSON.parse(job.run_queued_by_json || 'null'); } catch {}
+    actor = actor || { id: null, name: 'run queue', email: null, upn: null };
+    db.prepare('UPDATE jobs SET run_queued_at = NULL, run_queued_by_json = NULL WHERE id = ?').run(job.id);
+    try {
+      runJob(job.id, actor, tenantId);
+      started += 1;
+    } catch (err) {
+      // One job that can't start (e.g. blob archiving not configured) must
+      // not stall the jobs behind it: note why on the job and move on.
+      const message = `Could not start from the run queue: ${err.message}`;
+      db.prepare('UPDATE jobs SET error_message = ? WHERE id = ?').run(message, job.id);
+      insertLog(job.id, { event_type: 'log', error_message: message, actor_name: 'system' });
+      clog.warn('queue', `${job.name}: ${message}`);
+      const updated = getJob(job.id);
+      emitJob(job.id, { type: 'job_updated', job: updated });
+      emitDashboard({ type: 'job_updated', job: updated }, updated.tenant_id);
+    }
+  }
+  return started;
+}
+
+function pumpAllRunQueues() {
+  const tenants = getDb().prepare(
+    `SELECT DISTINCT tenant_id FROM jobs WHERE status = 'approved' AND run_queued_at IS NOT NULL AND deleted_at IS NULL`
+  ).all();
+  for (const t of tenants) {
+    const started = pumpRunQueue(t.tenant_id);
+    if (started > 0) clog.ok('queue', `Resumed the run queue: started ${started} waiting job(s).`);
   }
 }
 
@@ -1611,7 +1708,7 @@ function cancelJob(jobId, actor, tenantId) {
     }
   } else {
     // Not yet running (queued/approved) or already paused - just mark it cancelled directly.
-    getDb().prepare(`UPDATE jobs SET status = 'cancelled', completed_at = datetime('now') WHERE id = ?`).run(jobId);
+    getDb().prepare(`UPDATE jobs SET status = 'cancelled', completed_at = datetime('now'), run_queued_at = NULL, run_queued_by_json = NULL WHERE id = ?`).run(jobId);
     insertLog(jobId, { event_type: 'job_cancelled', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
   }
 
@@ -1693,6 +1790,9 @@ module.exports = {
   createJobFromMapping,
   approveJob,
   runJob,
+  queueRun,
+  unqueueRun,
+  pumpRunQueue,
   pauseJob,
   cancelJob,
   verifyJob,

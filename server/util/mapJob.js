@@ -31,6 +31,11 @@ function mapJob(row) {
     concurrency: row.concurrency,
     totals: { items: row.total_items, bytes: row.total_bytes },
     progress: { itemsDone: row.items_done, bytesDone: row.bytes_done, itemsFailed: row.items_failed, itemsSkipped: row.items_skipped, retriesTotal: row.retries_total },
+    // Waiting in the run queue (see orchestrator.queueRun) - only meaningful
+    // while the job is 'approved'.
+    runQueuedAt: row.status === 'approved' ? (row.run_queued_at || null) : null,
+    // The mapping's project (group), present on list queries that join it.
+    project: row.group_name || null,
     pauseRequested: !!row.pause_requested,
     cancelRequested: !!row.cancel_requested,
     phase: safeParse(row.phase_json),

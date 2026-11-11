@@ -31,6 +31,7 @@ router.get('/settings', (req, res) => {
       || getTenantId(req),
     defaultJobConcurrency: config.defaultJobConcurrency,
     globalMaxConcurrency: config.globalMaxConcurrency,
+    runQueueMaxJobs: config.runQueueMaxJobs,
     oneDriveUploadChunkSizeMB: config.oneDriveUploadChunkSizeMB,
     fsSourceHashConcurrency: config.fsSourceHashConcurrency,
     retryRateBackoffThreshold: config.retryRateBackoffThreshold,

@@ -100,6 +100,10 @@ export default function JobQueue() {
   // The job a request is in flight for: its buttons are disabled so a
   // double-click can't fire Run twice (the second came back as a 409 error).
   const [busyId, setBusyId] = useState(null);
+  const [project, setProject] = useState(''); // '' = every project
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [notice, setNotice] = useState(null);
+  const [runAtOnce, setRunAtOnce] = useState(3);
   const debounceRef = useRef(null);
 
   function refresh() {
@@ -113,8 +117,53 @@ export default function JobQueue() {
       debounceRef.current = setTimeout(() => { debounceRef.current = null; refresh(); }, 800);
     };
     socket.on('dashboard:event', handler);
+    api.get('/api/settings').then((r) => { if (r.runQueueMaxJobs) setRunAtOnce(r.runQueueMaxJobs); }).catch(() => {});
     return () => socket.off('dashboard:event', handler);
   }, []);
+
+  // Projects come from the jobs' mappings. The filter only shows once at
+  // least one job belongs to a project.
+  const NO_PROJECT = '\u0000none';
+  const projectNames = [...new Set(jobs.map((j) => j.project).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const shown = !project ? jobs
+    : jobs.filter((j) => (project === NO_PROJECT ? !j.project : j.project === project));
+  const waitingInQueue = shown.filter((j) => j.status === 'approved' && j.runQueuedAt);
+  const startable = shown.filter((j) => j.status === 'queued' || (j.status === 'approved' && !j.runQueuedAt));
+  const scopeLabel = !project ? '' : project === NO_PROJECT ? ' with no project' : ` in "${project}"`;
+
+  // Approve (where needed) and queue every startable job in view. The server
+  // runs a few at a time and starts the next as each finishes.
+  async function runAll() {
+    const n = startable.length;
+    if (!confirm(`Approve and run ${n} job${n === 1 ? '' : 's'}${scopeLabel}? They run ${runAtOnce} at a time, and the rest start on their own as each one finishes.`)) return;
+    setError(null);
+    setNotice(null);
+    setBulkBusy(true);
+    try {
+      const r = await api.post('/api/jobs/bulk-run', { jobIds: startable.map((j) => j.id) });
+      setNotice(`${r.queued} job${r.queued === 1 ? '' : 's'} sent to the run queue. ${r.runAtOnce} run at a time.`);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBulkBusy(false);
+      refresh();
+    }
+  }
+
+  async function clearRunQueue() {
+    setError(null);
+    setNotice(null);
+    setBulkBusy(true);
+    try {
+      const r = await api.post('/api/jobs/bulk-unqueue-run', { jobIds: waitingInQueue.map((j) => j.id) });
+      setNotice(`${r.removed} job${r.removed === 1 ? '' : 's'} taken out of the run queue. Jobs already running carry on.`);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBulkBusy(false);
+      refresh();
+    }
+  }
 
   async function act(job, action) {
     setError(null);
@@ -161,6 +210,39 @@ export default function JobQueue() {
       {showReport && <ClientReportPanel jobs={jobs} onClose={() => setShowReport(false)} />}
 
       {error && <div role="alert" className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-md p-3">{error}</div>}
+      {notice && <div role="status" className="bg-green-50 border border-green-200 text-green-700 text-sm rounded-md p-3">{notice}</div>}
+
+      {(projectNames.length > 0 || startable.length > 0 || waitingInQueue.length > 0) && (
+        <div className="bg-white border border-slate-200 rounded-lg px-4 py-2.5 flex flex-wrap items-center gap-3">
+          {projectNames.length > 0 && (
+            <label className="flex items-center gap-2 text-sm text-slate-600">
+              Project
+              <select value={project} onChange={(e) => setProject(e.target.value)} className="border border-slate-300 rounded-md px-2 py-1 text-sm bg-white">
+                <option value="">All projects ({jobs.length})</option>
+                {projectNames.map((p) => <option key={p} value={p}>{p} ({jobs.filter((j) => j.project === p).length})</option>)}
+                {jobs.some((j) => !j.project) && <option value={NO_PROJECT}>No project ({jobs.filter((j) => !j.project).length})</option>}
+              </select>
+            </label>
+          )}
+          <span className="text-xs text-slate-500 tabular-nums">
+            {shown.filter((j) => j.status === 'running').length} running
+            {waitingInQueue.length > 0 && <> · {waitingInQueue.length} waiting to run</>}
+            {' '}· {shown.filter((j) => j.status === 'completed').length} of {shown.length} completed
+          </span>
+          <div className="flex flex-wrap items-center gap-2 ml-auto">
+            {waitingInQueue.length > 0 && (
+              <button type="button" onClick={clearRunQueue} disabled={bulkBusy} className="btn-secondary" title="Jobs already running carry on; the waiting ones go back to approved">
+                Stop the run queue ({waitingInQueue.length} waiting)
+              </button>
+            )}
+            {startable.length > 0 && (
+              <button type="button" onClick={runAll} disabled={bulkBusy} className="btn-primary" title={`Runs ${runAtOnce} at a time; the rest wait their turn`}>
+                Approve and run all {startable.length}{scopeLabel}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="bg-white border border-slate-200 rounded-lg overflow-x-auto">
         <table className="w-full text-sm">
@@ -174,21 +256,21 @@ export default function JobQueue() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {jobs.map((job) => (
+            {shown.map((job) => (
               <tr key={job.id} className="hover:bg-slate-50">
                 <td className="px-4 py-3">
                   <Link to={`/jobs/${job.id}`} className="font-medium text-slate-800 hover:text-blue-600 break-words">{jobTitle(job.name)}</Link>
-                  <div className="text-xs text-slate-400">{job.action}</div>
+                  <div className="text-xs text-slate-400">{job.project ? `${job.project} · ` : ''}{job.action}</div>
                   {/* Phone: status and progress fold into the name cell so the
                       action buttons stay on screen instead of off to the right. */}
                   <div className="md:hidden mt-1.5 flex flex-wrap items-center gap-2 text-xs text-slate-500 tabular-nums">
-                    <StatusPill status={job.status} label={job.pauseRequested && job.status === 'running' ? 'pausing…' : undefined} />
+                    <StatusPill status={job.status} label={job.pauseRequested && job.status === 'running' ? 'pausing…' : job.runQueuedAt ? 'waiting to run' : undefined} />
                     <span>{(job.progress.itemsDone + job.progress.itemsSkipped).toLocaleString()} / {job.totals.items ? job.totals.items.toLocaleString() : '?'}</span>
                     {job.progress.itemsFailed > 0 && <span className="text-red-500">{job.progress.itemsFailed} failed</span>}
                   </div>
                 </td>
                 <td className="hidden md:table-cell px-4 py-3">
-                  <StatusPill status={job.status} label={job.pauseRequested && job.status === 'running' ? 'pausing…' : undefined} />
+                  <StatusPill status={job.status} label={job.pauseRequested && job.status === 'running' ? 'pausing…' : job.runQueuedAt ? 'waiting to run' : undefined} />
                 </td>
                 <td className="hidden md:table-cell px-4 py-3 w-48 min-w-[10rem]">
                   <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
@@ -223,7 +305,8 @@ export default function JobQueue() {
                   <div className="flex flex-wrap justify-end gap-1.5">
                   {job.status === 'queued' && <ActionBtn tone="success" disabled={busyId === job.id} onClick={() => act(job, 'approve-run')}>Approve &amp; run</ActionBtn>}
                   {job.status === 'queued' && <ActionBtn disabled={busyId === job.id} onClick={() => act(job, 'approve')}>Approve only</ActionBtn>}
-                  {job.status === 'approved' && <ActionBtn tone="success" disabled={busyId === job.id} onClick={() => act(job, 'run')}>Run</ActionBtn>}
+                  {job.status === 'approved' && <ActionBtn tone="success" disabled={busyId === job.id} onClick={() => act(job, 'run')}>{job.runQueuedAt ? 'Run now' : 'Run'}</ActionBtn>}
+                  {job.status === 'approved' && job.runQueuedAt && <ActionBtn disabled={busyId === job.id} onClick={() => act(job, 'unqueue-run')}>Take out of queue</ActionBtn>}
                   {job.status === 'running' && <ActionBtn tone="warn" disabled={busyId === job.id} onClick={() => act(job, 'pause')}>Pause</ActionBtn>}
                   {job.status === 'paused' && <ActionBtn tone="success" disabled={busyId === job.id} onClick={() => act(job, 'resume')}>Resume</ActionBtn>}
                   {['running', 'paused', 'approved', 'queued'].includes(job.status) && (
@@ -235,8 +318,8 @@ export default function JobQueue() {
                 </td>
               </tr>
             ))}
-            {jobs.length === 0 && (
-              <tr><td colSpan={5} className="px-4 py-8 text-center text-slate-400">No jobs yet - create a mapping first.</td></tr>
+            {shown.length === 0 && (
+              <tr><td colSpan={5} className="px-4 py-8 text-center text-slate-400">{jobs.length === 0 ? 'No jobs yet - create a mapping first.' : 'No jobs in this project.'}</td></tr>
             )}
           </tbody>
         </table>
