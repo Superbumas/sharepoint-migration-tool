@@ -799,6 +799,7 @@ function consoleEngineEvent(job, event) {
         : p.phase === 'cleaning' ? `cleaning source — ${(p.deleted ?? 0).toLocaleString()} recycled, ${(p.kept ?? 0).toLocaleString()} kept of ${(p.total ?? 0).toLocaleString()}`
         : p.phase === 'clearing_folders' ? `recycling emptied folders — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
         : p.phase === 'stamping_folders' ? `restoring folder dates and owners — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
+        : p.phase === 'repairing' ? `repairing failed files — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}${p.current ? ` · ${String(p.current).split('/').pop()}` : ''}`
         : p.phase === 'content_check' ? `checking content of files SharePoint rewrote — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}${p.bytesTotal ? ` (${Math.round((p.bytesDone || 0) / 1048576).toLocaleString()} of ${Math.round(p.bytesTotal / 1048576).toLocaleString()} MB)` : ''}${p.current ? ` · now: ${String(p.current).split('/').pop()} (${Math.max(1, Math.round((p.currentBytes || 0) / 1048576)).toLocaleString()} MB)` : ''}`
         : p.phase === 'purging' ? `purging recycle bin — ${(p.purged ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
         : p.phase === 'preflight' ? (p.step === 'permissions' ? `pre-flight: checking permissions — ${(p.scanned ?? 0).toLocaleString()} items` : 'pre-flight: checking paths and sizes')
@@ -1268,10 +1269,30 @@ function maybeAdaptConcurrency(jobId, job, state) {
 // decommissioning the source site.
 const activeOps = require('./activeOps');
 const verifyRuns = new Map(); // jobId -> child process
-function verifyJob(jobId, actor, tenantId) {
+// opts.repair: "Repair N files" - the engine re-copies only the files the
+// last verification flagged (handed over as that summary, -RepairFromPath),
+// re-checks only those and emits the merged verification summary.
+function verifyJob(jobId, actor, tenantId, opts = {}) {
   const job = getJob(jobId, tenantId);
   if (!job) throw httpError(404, 'Job not found');
   if (job.status !== 'completed') throw httpError(409, `Only completed jobs can be verified (this one is "${job.status}").`);
+  let repairFromPath = null;
+  if (opts.repair) {
+    let prev = null;
+    try { prev = JSON.parse(job.verification_json || 'null'); } catch {}
+    if (!prev || prev.ok || !Array.isArray(prev.problems) || prev.problems.length === 0) {
+      throw httpError(409, 'There are no failed files to repair - click Verify first.');
+    }
+    if (prev.problemsTruncated) {
+      throw httpError(409, 'Too many failed files to list individually - use "Full re-run" for this job.');
+    }
+    if ((job.source_provider || 'sharepoint') !== 'sharepoint' || (job.target_provider || 'sharepoint') !== 'sharepoint') {
+      throw httpError(409, 'Repairing individual files is available for SharePoint/OneDrive to SharePoint jobs - use "Full re-run" for this job.');
+    }
+    repairFromPath = controlFilePath(`${jobId}.repair`);
+    fs.mkdirSync(path.dirname(repairFromPath), { recursive: true });
+    fs.writeFileSync(repairFromPath, JSON.stringify(prev), 'utf8');
+  }
   if (verifyRuns.has(jobId)) throw httpError(409, 'A verification is already running for this job.');
   if (cleanupRuns.has(jobId)) throw httpError(409, 'A source cleanup/purge is currently running for this job - wait for it to finish.');
   const blobConnectionString = job.target_provider === 'azure_blob'
@@ -1301,7 +1322,7 @@ function verifyJob(jobId, actor, tenantId) {
     '-ControlFilePath', controlFilePath(jobId),
     '-ClientId', engineIdentity.clientId,
     '-TenantId', job.tenant_id || config.tenantId,
-    '-VerifyOnly',
+    ...(repairFromPath ? ['-RepairOnly', '-RepairFromPath', repairFromPath] : ['-VerifyOnly']),
     '-OneDriveChunkSizeMB', String(config.oneDriveUploadChunkSizeMB),
     '-FsHashConcurrency', String(config.fsSourceHashConcurrency),
   ];
@@ -1334,12 +1355,12 @@ function verifyJob(jobId, actor, tenantId) {
   getDb().prepare('UPDATE jobs SET verification_json = NULL, verified_at = NULL, phase_json = NULL WHERE id = ?').run(jobId);
   const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'], env: buildEngineSpawnEnv(job, engineIdentity, blobConnectionString) });
   verifyRuns.set(jobId, child);
-  activeOps.set(jobId, 'verify');
+  activeOps.set(jobId, repairFromPath ? 'repair' : 'verify');
   // Without an 'error' listener a failed spawn (pwsh not installed / not on
   // PATH) is an unhandled EventEmitter error and takes the whole server down.
   // 'close' still fires afterwards and does the cleanup.
   child.on('error', (err) => insertLog(jobId, { event_type: 'log', level: 'error', error_message: `Failed to start verification engine process: ${err.message}` }));
-  insertLog(jobId, { event_type: 'verify_started', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
+  insertLog(jobId, { event_type: repairFromPath ? 'repair_started' : 'verify_started', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn });
 
   attachNdjsonParser(
     child.stdout,
@@ -1353,6 +1374,7 @@ function verifyJob(jobId, actor, tenantId) {
   child.on('close', () => {
     verifyRuns.delete(jobId);
     activeOps.clear(jobId);
+    if (repairFromPath) { try { fs.unlinkSync(repairFromPath); } catch {} }
     // A verify-only run emits phase heartbeats (hashing_source etc.) but no
     // lifecycle events - without this, the last heartbeat sticks as a frozen
     // "Hashing source files - N files" banner on the completed job forever.
@@ -1796,6 +1818,7 @@ module.exports = {
   pauseJob,
   cancelJob,
   verifyJob,
+  repairFilesJob: (jobId, actor, tenantId) => verifyJob(jobId, actor, tenantId, { repair: true }),
   preflightJob,
   cleanupSourceJob,
   purgeRecycleBinJob,

@@ -280,6 +280,13 @@ router.post('/jobs/:id/verify', (req, res, next) => {
   catch (err) { next(err); }
 });
 
+// "Repair N files": re-copy and re-check only the files the last verification flagged.
+router.post('/jobs/:id/repair-files', (req, res, next) => {
+  if (!requireVisibleJob(req, res)) return;
+  try { res.json(mapJob(orchestrator.repairFilesJob(req.params.id, getActor(req), getTenantId(req)))); }
+  catch (err) { next(err); }
+});
+
 router.post('/jobs/:id/preflight', (req, res, next) => {
   if (!requireVisibleJob(req, res)) return;
   try { res.json(mapJob(orchestrator.preflightJob(req.params.id, getActor(req), getTenantId(req)))); }
