@@ -558,6 +558,11 @@ export default function JobDetail() {
       action: <button type="button" onClick={() => act('cleanup-source')} className="btn-danger shrink-0">Delete source files…</button>,
     });
   }
+  // A Verify / clean-up / purge in progress starts from a clean page: the
+  // previous verification, pre-flight, clean-up and archive boxes are hidden
+  // until its own result replaces them (they stay in the database, reports
+  // and "Show earlier runs"). Only the "Verifying now" notice remains.
+  if (backgroundOp) notices.splice(0, notices.length, ...notices.filter((n) => n.key === 'verifying'));
   if (job.errorMessage) notices.push({ key: 'jobError', tone: 'error', title: job.errorMessage });
   if (error) notices.push({ key: 'actError', tone: 'error', title: error });
 
