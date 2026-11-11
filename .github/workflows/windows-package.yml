@@ -1,0 +1,47 @@
+name: Windows package
+
+# Builds the portable Windows zip (bundled Node runtime + prebuilt modules).
+# Run it by hand from the Actions tab, or push a v* tag to also attach the
+# zip to a GitHub release. PRs touching the packaging build it as a check.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'packaging/**'
+      - '.github/workflows/windows-package.yml'
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Build package
+        shell: pwsh
+        run: ./packaging/windows/Build-WindowsPackage.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SharePointMigrationTool-win-x64
+          path: dist-package/*.zip
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $zip = Get-ChildItem dist-package/*.zip | Select-Object -First 1
+          gh release view $env:GITHUB_REF_NAME 2>$null
+          if ($LASTEXITCODE -ne 0) { gh release create $env:GITHUB_REF_NAME --generate-notes }
+          gh release upload $env:GITHUB_REF_NAME $zip.FullName --clobber
