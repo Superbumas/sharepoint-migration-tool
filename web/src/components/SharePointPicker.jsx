@@ -66,13 +66,18 @@ function libraryRelativePathFromDrive(site, drive) {
 // and `preferredDriveId` opens that library straight away - used by
 // OneDriveSourcePicker, where the site is a person's OneDrive. `embedded`
 // drops the outer card so it can sit inside another picker's card.
-export default function SharePointPicker({ label, onSelect, multi = false, fixedSite = null, preferredDriveId = null, embedded = false }) {
+// `allowCreateFolder` (target side) adds a "New folder" button that creates a
+// folder in the current location and opens it, ready to be used.
+export default function SharePointPicker({ label, onSelect, multi = false, fixedSite = null, preferredDriveId = null, embedded = false, allowCreateFolder = false }) {
   const { user } = useAuth();
   const [siteQuery, setSiteQuery] = useState('');
   const [sites, setSites] = useState([]);
   const [noAccessSite, setNoAccessSite] = useState(null); // a site the admin center lists but this user can't open
   const [site, setSite] = useState(fixedSite);
   const [browseError, setBrowseError] = useState(null);
+  const [newFolderName, setNewFolderName] = useState(null); // null = closed, string = form open
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [createFolderError, setCreateFolderError] = useState(null);
   const [drives, setDrives] = useState([]);
   const [drive, setDrive] = useState(null);
   const [pathStack, setPathStack] = useState([]); // [{id, name}]
@@ -157,6 +162,28 @@ export default function SharePointPicker({ label, onSelect, multi = false, fixed
     req.then((r) => setItems(r.items))
       .catch((err) => { setItems([]); setBrowseError(err.message); })
       .finally(() => setLoading(false));
+  }
+
+  function closeNewFolder() {
+    setNewFolderName(null);
+    setCreateFolderError(null);
+  }
+
+  async function createFolder() {
+    const name = (newFolderName || '').trim();
+    if (!name) return;
+    setCreatingFolder(true);
+    setCreateFolderError(null);
+    try {
+      const created = await api.post(`/api/sharepoint/drives/${drive.id}/folders`, { parentPath: currentRelativePath(), name });
+      closeNewFolder();
+      // Open the new (empty) folder so "Use current folder" points at it.
+      setPathStack([...pathStack, { id: created.id, name: created.name }]);
+    } catch (err) {
+      setCreateFolderError(err.message);
+    } finally {
+      setCreatingFolder(false);
+    }
   }
 
   function runSearch() {
@@ -385,9 +412,39 @@ export default function SharePointPicker({ label, onSelect, multi = false, fixed
           </div>
 
           {!isSearchResults && (
-            <button onClick={() => chooseSingle('folder', null)} className="w-full text-left text-xs font-medium text-blue-700 bg-blue-50 rounded-md px-2 py-1.5 hover:bg-blue-100">
-              ⤷ Use current folder ({currentRelativePath() || 'library root'})
-            </button>
+            <div className="flex gap-2">
+              <button onClick={() => chooseSingle('folder', null)} className="flex-1 min-w-0 truncate text-left text-xs font-medium text-blue-700 bg-blue-50 rounded-md px-2 py-1.5 hover:bg-blue-100">
+                ⤷ Use current folder ({currentRelativePath() || 'library root'})
+              </button>
+              {allowCreateFolder && newFolderName === null && (
+                <button onClick={() => setNewFolderName('')} className="shrink-0 text-xs font-medium text-slate-700 bg-slate-100 rounded-md px-2 py-1.5 hover:bg-slate-200">
+                  + New folder
+                </button>
+              )}
+            </div>
+          )}
+
+          {allowCreateFolder && !isSearchResults && newFolderName !== null && (
+            <div className="space-y-1">
+              <div className="flex gap-2">
+                <input
+                  autoFocus
+                  value={newFolderName}
+                  onChange={(e) => setNewFolderName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') createFolder(); if (e.key === 'Escape') closeNewFolder(); }}
+                  placeholder={`New folder in ${currentRelativePath() || drive.name}…`}
+                  aria-label="New folder name"
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="flex-1 min-w-0 border border-slate-300 rounded-md px-2 py-1 text-sm"
+                />
+                <button onClick={createFolder} disabled={creatingFolder || !newFolderName.trim()} className="btn-primary disabled:opacity-40">
+                  {creatingFolder ? 'Creating…' : 'Create'}
+                </button>
+                <button onClick={closeNewFolder} className="text-xs text-slate-500 hover:underline">cancel</button>
+              </div>
+              {createFolderError && <div role="alert" className="text-xs text-red-600">{createFolderError}</div>}
+            </div>
           )}
 
           <ul className="max-h-64 overflow-y-auto text-sm pr-0.5">

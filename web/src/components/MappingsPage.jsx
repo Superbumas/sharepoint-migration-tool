@@ -256,7 +256,7 @@ export default function MappingsPage() {
             ? <BlobTargetPicker onSelect={setTarget} />
             : targetKind === 'onedrive'
             ? <OneDriveTargetPicker onSelect={setTarget} />
-            : <SharePointPicker label="Target folder" onSelect={setTarget} />}
+            : <SharePointPicker label="Target folder" onSelect={setTarget} allowCreateFolder />}
         </div>
         <div className="flex items-center gap-3">
           <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes (optional)…" aria-label="Mapping notes" autoComplete="off" className="flex-1 min-w-0 border border-slate-300 rounded-md px-2 py-1 text-sm" />
