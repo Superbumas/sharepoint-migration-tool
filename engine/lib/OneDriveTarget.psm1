@@ -22,6 +22,15 @@
 # inside a module first REMOVES the already-loaded Retry module out from
 # under every runspace that imported it.
 Import-Module "$PSScriptRoot/Retry.psm1"
+Import-Module "$PSScriptRoot/UserAgent.psm1"
+# Decorate every Invoke-WebRequest/Invoke-RestMethod in this module with the
+# migration User-Agent (see UserAgent.psm1). Module-scoped on purpose: a
+# global $PSDefaultParameterValues does NOT reach commands run from inside a
+# module's functions - verified, they kept PowerShell's default agent.
+$PSDefaultParameterValues = @{
+    'Invoke-WebRequest:UserAgent' = (Get-MigrationUserAgent)
+    'Invoke-RestMethod:UserAgent' = (Get-MigrationUserAgent)
+}
 
 # Every non-empty file is uploaded via a resumable upload session (see
 # Send-GraphDriveFile for why the simpler small-file content PUT is avoided).
