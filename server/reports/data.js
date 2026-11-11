@@ -59,14 +59,22 @@ function folderName(job) {
 // The verification verdict with expected Office/Outlook rewrites taken out.
 // state: 'verified' | 'exceptions' | 'unverified'.
 function effectiveVerification(verification) {
-  if (!verification) return { state: 'unverified', problems: [], problemCount: 0, expectedRewrites: 0, confirmed: 0 };
+  if (!verification) return { state: 'unverified', problems: [], problemCount: 0, expectedRewrites: 0, confirmed: 0, contentChecked: false, contentVerified: 0, contentUnchecked: 0, contentUncheckedList: [] };
   const listed = Array.isArray(verification.problems) ? verification.problems : [];
   const reclassified = listed.filter((p) => p.reason !== 'missing' && isOfficeFile(p.path));
   const problems = listed.filter((p) => !(p.reason !== 'missing' && isOfficeFile(p.path)));
   const rawCount = (verification.missing ?? 0) + (verification.sizeMismatch ?? 0) + (verification.hashMismatch ?? 0);
   const problemCount = Math.max(problems.length, rawCount - reclassified.length);
   const expectedRewrites = (verification.officeRewritten ?? 0) + reclassified.length;
+  // Content check (engine ContentCheck.psm1): rewritten files compared part
+  // by part. Absent on verifications recorded before it existed - those
+  // rewrites were never content-checked and are reported as such.
+  const contentChecked = verification.contentVerified != null;
+  const contentVerified = contentChecked ? verification.contentVerified : 0;
+  const contentUnchecked = contentChecked ? (verification.contentUnchecked ?? 0) : expectedRewrites;
   return {
+    contentChecked, contentVerified, contentUnchecked,
+    contentUncheckedList: Array.isArray(verification.contentUncheckedList) ? verification.contentUncheckedList : [],
     state: problemCount === 0 ? 'verified' : 'exceptions',
     problems,
     problemCount,
@@ -241,6 +249,8 @@ function buildClientData(db, jobs) {
       subfolders: folders.reduce((s, f) => s + f.folderCount, 0),
       notMigrated: folders.reduce((s, f) => s + f.notMigrated.length, 0),
       verifiedFolders: folders.filter((f) => f.ver.state === 'verified').length,
+      contentVerified: folders.reduce((s, f) => s + (f.ver.contentVerified || 0), 0),
+      contentUnchecked: folders.reduce((s, f) => s + (f.ver.contentUnchecked || 0), 0),
       unverifiedFolders: folders.filter((f) => f.ver.state === 'unverified').length,
       expectedRewrites: folders.reduce((s, f) => s + f.ver.expectedRewrites, 0),
       from: starts.length ? new Date(Math.min(...starts)) : null,

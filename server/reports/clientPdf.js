@@ -118,11 +118,19 @@ function renderClientPdf(out, data, { title, client, preparedBy, inventory }) {
   if (anySp && totals.expectedRewrites > 0) {
     r.paragraph(
       `${plural(totals.expectedRewrites, 'file')} (Office documents, Outlook messages and saved web pages) `
-      + `${totals.expectedRewrites === 1 ? 'shows' : 'show'} a small size difference. `
-      + 'This is expected: Microsoft 365 updates the properties stored inside these files (author, title, sender and so on) '
-      + 'when they are saved to SharePoint. Their content is unchanged.',
+      + `${totals.expectedRewrites === 1 ? 'differs' : 'differ'} slightly in size from the original, because Microsoft 365 records `
+      + 'document properties (author, title, sender and so on) inside these files when they are saved to SharePoint. '
+      + (totals.contentVerified > 0
+        ? `${plural(totals.contentVerified, 'file')} of these ${totals.contentVerified === 1 ? 'was' : 'were'} opened and compared part by part with the original, and the content is identical.`
+        : ''),
       { color: COLORS.muted, size: 8.5 }
     );
+    if (totals.contentUnchecked > 0) {
+      r.paragraph(
+        `${plural(totals.contentUnchecked, 'file')} of this kind could not be compared in detail and ${totals.contentUnchecked === 1 ? 'was' : 'were'} checked for presence and name only.`,
+        { color: COLORS.muted, size: 8.5 }
+      );
+    }
   }
 
   // --- Files to review -----------------------------------------------------

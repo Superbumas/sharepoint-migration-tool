@@ -71,6 +71,8 @@ function phaseLabel(phase) {
       return `Cleaning source — ${n(phase.deleted)} recycled · ${n(phase.kept)} kept of ${n(phase.total)}`;
     case 'stamping_folders':
       return `Restoring folder dates and owners — ${n(phase.done)} of ${n(phase.total)}`;
+    case 'content_check':
+      return `Checking content of files SharePoint rewrote — ${n(phase.done)} of ${n(phase.total)}`;
     case 'purging':
       return `Purging recycle bin — ${n(phase.purged)} of ${n(phase.total)} permanently deleted`;
     case 'clearing_folders':
@@ -371,7 +373,9 @@ export default function JobDetail() {
       title: v.ok ? `Verified: ${v.identical} of ${v.sourceFiles} files byte-identical` : `Verification found ${problemCount} problem(s)`,
       detail: [
         !v.ok && `${v.missing} missing · ${v.sizeMismatch} size / ${v.hashMismatch} hash mismatches`,
-        v.officeRewritten > 0 && `${v.officeRewritten} Office file(s) re-stamped by SharePoint (expected)`,
+        v.officeRewritten > 0 && (v.contentVerified != null
+          ? `${v.contentVerified} re-stamped by SharePoint, content checked and identical${v.contentUnchecked ? ` · ${v.contentUnchecked} re-stamped but not content-checked` : ''}`
+          : `${v.officeRewritten} Office file(s) re-stamped by SharePoint (content not checked)`),
         job.verifiedAt && `verified ${job.verifiedAt}`,
       ].filter(Boolean).join(' · '),
       action: (

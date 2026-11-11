@@ -136,7 +136,11 @@ router.get('/jobs/:id/report.pdf', (req, res, next) => {
         ['Result', ver.state === 'verified' ? 'PASSED - every file accounted for' : `${ver.problemCount} PROBLEM(S) FOUND`, ver.state === 'verified' ? COLORS.green : COLORS.red],
         ['Files compared', `${ver.sourceFiles.toLocaleString()} source vs ${ver.targetFiles.toLocaleString()} target`],
         ['Hash-identical', ver.identical.toLocaleString()],
-        ['Office/Outlook re-stamped', `${ver.expectedRewrites.toLocaleString()} (SharePoint rewrites document properties on ingestion - content intact, expected)`],
+        ['Re-stamped by SharePoint', `${ver.expectedRewrites.toLocaleString()} (Office documents, Outlook messages, web pages - SharePoint rewrites their properties on ingestion)`],
+        ['Content check', ver.contentChecked
+          ? `${ver.contentVerified.toLocaleString()} compared part by part and identical in content${ver.contentUnchecked ? `; ${ver.contentUnchecked.toLocaleString()} could not be checked` : ''}`
+          : 'Not run - verified before content checking existed; re-run Verify to check them',
+          ver.contentChecked && !ver.contentUnchecked ? COLORS.green : COLORS.amber],
         ...(ver.reclassified > 0 ? [['Reclassified', `${ver.reclassified} .msg/Office file(s) the original check flagged as size/hash mismatches are counted as expected rewrites here (verified before .msg was recognised)`, COLORS.muted]] : []),
         ['Missing / size / hash', `${verification.missing ?? 0} / ${verification.sizeMismatch ?? 0} / ${verification.hashMismatch ?? 0} (as recorded by the engine)`],
         ['Verified at', fmtDate(job.verified_at)],
