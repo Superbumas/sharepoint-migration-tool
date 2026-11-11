@@ -438,10 +438,14 @@ function Remove-SharePointHtmlProperties([byte[]]$Bytes) {
 # A result that only says this attempt failed (download error, throttling,
 # missing link) must never be cached: the next Verify has to try the file
 # again rather than replay the failure.
+# Only a proven "equivalent" is reused from the cache. A "different" or
+# "could not be checked" result is always checked again: they are few and
+# cheap, and a later fix to the checker (a SharePoint quirk it now knows,
+# a format it can now read) must be able to clear them without anyone
+# deleting the cache by hand.
 function Test-TransientContentResult($Result) {
-    if (-not $Result -or $Result.Status -ne 'unchecked') { return $false }
-    $d = "$($Result.Detail)"
-    return $d -like 'download failed*' -or $d -like 'no download link*'
+    if (-not $Result) { return $false }
+    return $Result.Status -ne 'equivalent'
 }
 
 # --- Entry point -----------------------------------------------------------
