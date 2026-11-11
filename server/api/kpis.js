@@ -67,7 +67,10 @@ function buildJobKpis(db, job) {
   const etaSeconds = throughput.filesPerMin > 0 ? Math.round((remainingItems / throughput.filesPerMin) * 60) : null;
 
   const processed = job.items_done + job.items_failed + job.items_skipped;
-  const successRate = processed > 0 ? round2((job.items_done / processed) * 100) : null;
+  // A file skipped because the target already holds an identical copy is a
+  // success too - counting only fresh copies made every re-run look like a
+  // ~2% success rate.
+  const successRate = processed > 0 ? round2(((job.items_done + job.items_skipped) / processed) * 100) : null;
   const errorRate = processed > 0 ? round2((job.items_failed / processed) * 100) : null;
 
   const longestRunning = db.prepare(
@@ -177,7 +180,7 @@ router.get('/kpis/global', (req, res) => {
   res.json({
     statusCounts,
     throughput,
-    successRatePct: processed > 0 ? round2((totals.itemsDone / processed) * 100) : null,
+    successRatePct: processed > 0 ? round2(((totals.itemsDone + totals.itemsSkipped) / processed) * 100) : null,
     errorRatePct: processed > 0 ? round2((totals.itemsFailed / processed) * 100) : null,
     errorBreakdown: currentErrorBreakdown,
     retryDistribution: retryDistribution(db, null, getTenantId(req), owner),

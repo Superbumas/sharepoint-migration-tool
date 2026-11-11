@@ -207,7 +207,7 @@ export default function JobQueue() {
                     {job.status === 'running' && job.phase ? (
                       <span className="text-blue-500 animate-pulse">
                         {job.phase.phase === 'enumerating' ? `scanning — ${(job.phase.files ?? 0).toLocaleString()} files found`
-                          : job.phase.phase === 'preparing_folders' ? `creating folders ${(job.phase.done ?? 0).toLocaleString()}/${(job.phase.total ?? 0).toLocaleString()}`
+                          : job.phase.phase === 'preparing_folders' ? `checking folders ${(job.phase.done ?? 0).toLocaleString()}/${(job.phase.total ?? 0).toLocaleString()}`
                           : 'indexing…'}
                       </span>
                     ) : (

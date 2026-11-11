@@ -60,7 +60,7 @@ function phaseLabel(phase) {
     case 'enumerating':
       return `Scanning source tree — ${n(phase.folders)} folders · ${n(phase.files)} files found${phase.pending ? ` · ${n(phase.pending)} folders queued` : ''}`;
     case 'preparing_folders':
-      return `Creating target folders — ${n(phase.done)} of ${n(phase.total)}`;
+      return `Checking target folders — ${n(phase.done)} of ${n(phase.total)}`;
     case 'indexing_source':
       return `Indexing source metadata — ${n(phase.files)} files`;
     case 'indexing_target':
@@ -69,6 +69,8 @@ function phaseLabel(phase) {
       return `Hashing source files for verification — ${n(phase.files)} files`;
     case 'cleaning':
       return `Cleaning source — ${n(phase.deleted)} recycled · ${n(phase.kept)} kept of ${n(phase.total)}`;
+    case 'stamping_folders':
+      return `Restoring folder dates and owners — ${n(phase.done)} of ${n(phase.total)}`;
     case 'purging':
       return `Purging recycle bin — ${n(phase.purged)} of ${n(phase.total)} permanently deleted`;
     case 'clearing_folders':
@@ -125,13 +127,24 @@ export default function JobDetail() {
   // finish between ticks). Live-only: never persisted, cleared on completion.
   const [uploads, setUploads] = useState({});
   const [logFilter, setLogFilter] = useState('all');
+  // On by default every time the page opens; only the user switches it off.
   const [follow, setFollow] = useState(true);
+  // A re-run starts a fresh console: lines from earlier runs stay in the
+  // database (reports and exports read them from there) but are hidden here
+  // unless asked for.
+  const [showEarlierRuns, setShowEarlierRuns] = useState(false);
   const [showProblems, setShowProblems] = useState(false);
   const kpiDebounce = useRef(null);
   const logRef = useRef(null);
   // Pin the log view to the newest line, but stop pinning while the user has
   // scrolled up to read history; re-pin as soon as they return to the bottom.
   const stickToBottom = useRef(true);
+  // Time of the user's last deliberate scroll (wheel, drag, keys, touch).
+  // Only those may switch "Follow newest" off - scroll events the page causes
+  // itself (new lines, trimming old ones, the lane strip resizing the box)
+  // must never unpin it.
+  const userScrollAt = useRef(0);
+  const markUserScroll = () => { userScrollAt.current = Date.now(); };
 
   useEffect(() => {
     const el = logRef.current;
@@ -142,8 +155,18 @@ export default function JobDetail() {
     const el = logRef.current;
     if (!el) return;
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-    stickToBottom.current = atBottom;
-    if (atBottom !== follow) setFollow(atBottom);
+    if (atBottom) {
+      stickToBottom.current = true;
+      if (!follow) setFollow(true);
+      return;
+    }
+    if (Date.now() - userScrollAt.current > 1000) {
+      // Not the user: snap back if we are following.
+      if (stickToBottom.current) el.scrollTop = el.scrollHeight;
+      return;
+    }
+    stickToBottom.current = false;
+    if (follow) setFollow(false);
   }
   function toggleFollow() {
     const next = !follow;
@@ -180,6 +203,7 @@ export default function JobDetail() {
       // phase_progress/checkpoint heartbeats never become rows at all.
       if (msg.type === 'log_row' && msg.row) {
         setLog((prev) => [...prev.slice(-299), msg.row]);
+        if (msg.row.event_type === 'job_restarted') setShowEarlierRuns(false);
       }
       if (msg.type === 'engine_event' && msg.event) {
         const ev = msg.event;
@@ -301,15 +325,39 @@ export default function JobDetail() {
   // out of view. Show the strip once the first transfer starts.
   const preCopyPhase = job.phase && ['enumerating', 'preparing_folders', 'indexing'].includes(job.phase.phase);
   const showLaneRows = laneEntries.length > 0 || (!preCopyPhase && done > 0);
-  const visibleLog = log.filter((l) => {
+  let runStart = 0;
+  for (let i = log.length - 1; i > 0; i--) {
+    if (log[i].event_type === 'job_restarted') { runStart = i; break; }
+  }
+  const earlierCount = runStart;
+  const runLog = showEarlierRuns ? log : log.slice(runStart);
+  // Verification problems that a repair round then fixed are history, not
+  // failures: once the job verifies clean every one of them is resolved, and
+  // before that a mismatch is resolved by a later successful re-copy of the
+  // same file (mismatch paths are library-relative, copy paths are full).
+  const isVerifyProblem = (l) => l.event_type === 'verify_mismatch'
+    || (l.event_type === 'log' && l.level === 'error' && /^Verification FOUND/i.test(l.error_message || ''));
+  const verifiedClean = job.status !== 'running' && !!(job.verification && job.verification.ok);
+  const resolvedRows = new Set();
+  runLog.forEach((l, i) => {
+    if (!isVerifyProblem(l)) return;
+    if (verifiedClean) { resolvedRows.add(l); return; }
+    if (l.event_type !== 'verify_mismatch' || !l.source_path) return;
+    const tail = '/' + String(l.source_path).replace(/^\/+/, '');
+    for (let j = i + 1; j < runLog.length; j++) {
+      const r = runLog[j];
+      if (r.event_type === 'item_success' && r.source_path && String(r.source_path).endsWith(tail)) { resolvedRows.add(l); break; }
+    }
+  });
+  const visibleLog = runLog.filter((l) => {
     if (logFilter === 'all') return true;
-    if (logFilter === 'failures') return l.event_type === 'item_failed' || l.event_type === 'verify_mismatch' || l.event_type === 'job_failed' || (l.event_type === 'log' && l.level === 'error');
+    if (logFilter === 'failures') return !resolvedRows.has(l) && (l.event_type === 'item_failed' || l.event_type === 'verify_mismatch' || l.event_type === 'job_failed' || (l.event_type === 'log' && l.level === 'error'));
     if (logFilter === 'warnings') return l.event_type === 'item_retry' || l.event_type === 'source_kept' || l.event_type === 'job_interrupted' || (l.event_type === 'log' && l.level === 'warn');
     if (logFilter === 'job') return String(l.event_type || '').startsWith('job_') || ['verification_summary', 'verify_started', 'cleanup_started', 'cleanup_summary', 'purge_started', 'purge_summary'].includes(l.event_type);
     return true;
   });
-  const failureCount = log.filter((l) => l.event_type === 'item_failed' || l.event_type === 'verify_mismatch' || (l.event_type === 'log' && l.level === 'error')).length;
-  const warningCount = log.filter((l) => l.event_type === 'item_retry' || (l.event_type === 'log' && l.level === 'warn')).length;
+  const failureCount = runLog.filter((l) => !resolvedRows.has(l) && (l.event_type === 'item_failed' || l.event_type === 'verify_mismatch' || (l.event_type === 'log' && l.level === 'error'))).length;
+  const warningCount = runLog.filter((l) => l.event_type === 'item_retry' || (l.event_type === 'log' && l.level === 'warn')).length;
   const v = job.verification;
   const problemCount = v && !v.ok ? v.missing + v.sizeMismatch + v.hashMismatch : 0;
 
@@ -532,6 +580,11 @@ export default function JobDetail() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-3 text-xs">
+            {earlierCount > 0 && (
+              <button type="button" onClick={() => setShowEarlierRuns((v) => !v)} className="text-slate-500 hover:text-slate-700 hover:underline" title="Earlier runs stay in the reports and exports either way">
+                {showEarlierRuns ? 'Hide earlier runs' : `Show earlier runs (${earlierCount.toLocaleString()} lines)`}
+              </button>
+            )}
             <button type="button" role="switch" aria-checked={follow} onClick={toggleFollow} className="inline-flex items-center gap-1.5 text-slate-600" title="Keep the newest line in view">
               <span aria-hidden className={`relative inline-block w-7 h-4 rounded-full transition-colors ${follow ? 'bg-blue-600' : 'bg-slate-300'}`}>
                 <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${follow ? 'right-0.5' : 'left-0.5'}`} />
@@ -557,11 +610,11 @@ export default function JobDetail() {
           <div className="grid grid-cols-[64px_96px_minmax(0,1fr)_72px_56px] gap-2 px-3 py-1.5 text-[11px] text-slate-500 border-b border-slate-700/70 shrink-0">
             <span>time</span><span>event</span><span>path</span><span className="text-right">size</span><span className="text-right">took</span>
           </div>
-          <div ref={logRef} onScroll={onLogScroll} className="flex-1 min-h-0 overflow-y-auto text-slate-100 px-3 py-1.5">
+          <div ref={logRef} onScroll={onLogScroll} onWheel={markUserScroll} onPointerDown={markUserScroll} onTouchMove={markUserScroll} onKeyDown={markUserScroll} tabIndex={0} className="flex-1 min-h-0 overflow-y-auto text-slate-100 px-3 py-1.5">
             {visibleLog.map((l, i) => {
               const s = styleFor(l);
               return (
-                <div key={i} className={`grid grid-cols-[64px_96px_minmax(0,1fr)_72px_56px] gap-2 items-baseline rounded px-1 -mx-1 ${s.rowClass} ${s.rowBg || ''}`}>
+                <div key={i} className={`grid grid-cols-[64px_96px_minmax(0,1fr)_72px_56px] gap-2 items-baseline rounded px-1 -mx-1 ${resolvedRows.has(l) ? 'text-slate-500 opacity-60' : `${s.rowClass} ${s.rowBg || ''}`}`} title={resolvedRows.has(l) ? 'Fixed later in this run by a repair re-copy' : undefined}>
                   <span className="text-slate-600 tabular-nums">{formatTime(l.ts)}</span>
                   <span className={`rounded px-1 text-center truncate ${s.badgeClass}`}>{s.badge}</span>
                   <span className="min-w-0 truncate" title={[l.source_path, l.error_message].filter(Boolean).join(' — ')}>
@@ -575,7 +628,7 @@ export default function JobDetail() {
                 </div>
               );
             })}
-            {visibleLog.length === 0 && <div className="text-slate-500">{log.length === 0 ? 'No log entries yet.' : 'Nothing matches this filter.'}</div>}
+            {visibleLog.length === 0 && <div className="text-slate-500">{runLog.length === 0 ? 'No log entries yet.' : 'Nothing matches this filter.'}</div>}
           </div>
           {/* In-flight transfers as fixed lane slots. Byte-accurate for
               uploads/downloads; SharePoint-to-SharePoint is a server-side copy
