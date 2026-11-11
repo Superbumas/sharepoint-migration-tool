@@ -6,7 +6,11 @@ const GRAPH_ROOT = 'https://graph.microsoft.com/v1.0';
 async function graphRequest(req, method, urlPath, { params, body, headers } = {}) {
   const token = await getGraphToken(req);
   if (!token) {
-    const err = new Error('No valid Graph token for signed-in user');
+    // 'reauth_required' (not the generic not_authenticated): the app session
+    // is fine, only the Microsoft token for this project is missing or
+    // expired. The UI shows a one-click "Reconnect" for it instead of an
+    // opaque error inside whichever picker made the call.
+    const err = new Error('reauth_required');
     err.status = 401;
     throw err;
   }

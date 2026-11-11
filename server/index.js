@@ -9,6 +9,7 @@ const config = require('./config');
 require('./util/userAgent');
 const { getDb } = require('./db');
 const authRoutes = require('./auth/routes');
+const { SqliteSessionStore } = require('./auth/sessionStore');
 const sharepointRoutes = require('./api/sharepoint');
 const mappingsRoutes = require('./api/mappings');
 const jobsRoutes = require('./api/jobs');
@@ -35,10 +36,15 @@ app.use(express.json({ limit: '5mb' }));
 // handshake below (io.engine.use) - without this, a raw socket.io
 // connection never touches req.session at all (see the connection handler
 // further down for what that used to allow).
+// Persistent store: a restart (update, reboot, nodemon reload) used to sign
+// everyone out. `rolling` slides the 8h expiry on every request, so someone
+// actively working is never logged out mid-day - only after 8h idle.
 const sessionMiddleware = session({
   secret: config.sessionSecret,
+  store: new SqliteSessionStore({ secret: config.sessionSecret }),
   resave: false,
   saveUninitialized: false,
+  rolling: true,
   cookie: { httpOnly: true, sameSite: 'lax', secure: false, maxAge: 8 * 60 * 60 * 1000 },
 });
 app.use(sessionMiddleware);

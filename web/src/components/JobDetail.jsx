@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
-import { formatBytes } from '../lib/format';
+import { formatBytes, jobTitle } from '../lib/format';
 import { socket } from '../lib/socket';
 import StatusPill from './StatusPill';
 
@@ -124,6 +124,8 @@ export default function JobDetail() {
   const [kpis, setKpis] = useState(null);
   const [log, setLog] = useState([]);
   const [error, setError] = useState(null);
+  // Request in flight: header buttons disabled so a double-click can't run twice.
+  const [busy, setBusy] = useState(false);
   // lane -> { sourcePath, bytesDone, bytesTotal, rate, ts } for uploads in
   // flight right now (item_progress heartbeats - big files only, small ones
   // finish between ticks). Live-only: never persisted, cleared on completion.
@@ -172,7 +174,7 @@ export default function JobDetail() {
   useEffect(() => {
     refreshJob();
     refreshKpis();
-    api.get(`/api/jobs/${id}/log?limit=100`).then((r) => setLog(r.items));
+    api.get(`/api/jobs/${id}/log?limit=100`).then((r) => setLog(r.items)).catch((err) => setError(`Couldn't load the log: ${err.message}`));
 
     // Room membership lives on the server side of ONE connection - after a
     // reconnect (network blip, server restart) the new socket is in no job
@@ -236,7 +238,14 @@ export default function JobDetail() {
 
   async function act(action) {
     setError(null);
+    setBusy(true);
     try {
+      if (action === 'approve-run') {
+        await api.post(`/api/jobs/${id}/approve`);
+        await api.post(`/api/jobs/${id}/run`);
+        refreshJob();
+        return;
+      }
       if (action === 'cleanup-source') {
         const answer = prompt(
           'DELETE SOURCE FILES?\n\nEvery source file whose migrated copy re-verifies RIGHT NOW will be moved to the source site\'s RECYCLE BIN (recoverable for ~93 days). Files that do not verify are kept and reported. Emptied folders are recycled too.\n\nType DELETE to proceed.'
@@ -267,6 +276,9 @@ export default function JobDetail() {
       refreshJob();
     } catch (err) {
       setError(err.message);
+      refreshJob();
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -288,8 +300,27 @@ export default function JobDetail() {
   const laneCount = Math.max(1, Math.min(8, job.concurrency || Object.keys(uploads).length || 1));
   // Lanes are fixed slots: a file starting or finishing swaps a slot's content
   // instead of adding/removing rows, so the log above never moves.
+  // Each transfer sits in its engine lane's own slot (lane numbers are
+  // 0-based), so a file stays on the same row from start to finish instead of
+  // shuffling up whenever a lane above it frees up.
   const laneEntries = Object.entries(uploads).sort(([a], [b]) => String(a).localeCompare(String(b), undefined, { numeric: true }));
-  const lanes = Array.from({ length: laneCount }, (_, i) => laneEntries[i] ? laneEntries[i][1] : null);
+  const lanes = Array.from({ length: laneCount }, () => null);
+  const unslotted = [];
+  for (const [key, u] of laneEntries) {
+    const n = Number(key);
+    if (Number.isInteger(n) && n >= 0 && n < laneCount && !lanes[n]) lanes[n] = u;
+    else unslotted.push(u);
+  }
+  for (const u of unslotted) {
+    const free = lanes.indexOf(null);
+    if (free === -1) break;
+    lanes[free] = u;
+  }
+  // Before the copy phase (scanning, creating folders, indexing) every lane is
+  // idle by definition - a stack of 8 "idle" rows there only pushed the log
+  // out of view. Show the strip once the first transfer starts.
+  const preCopyPhase = job.phase && ['enumerating', 'preparing_folders', 'indexing'].includes(job.phase.phase);
+  const showLaneRows = laneEntries.length > 0 || (!preCopyPhase && done > 0);
   const visibleLog = log.filter((l) => {
     if (logFilter === 'all') return true;
     if (logFilter === 'failures') return l.event_type === 'item_failed' || l.event_type === 'verify_mismatch' || l.event_type === 'job_failed' || (l.event_type === 'log' && l.level === 'error');
@@ -403,7 +434,7 @@ export default function JobDetail() {
         <div className="max-h-48 overflow-y-auto border-t border-slate-100 bg-slate-50/60 pl-11 pr-4 py-1">
           {v.problems.map((p) => (
             <div key={`${p.reason}:${p.path}`} className="grid grid-cols-[72px_minmax(0,1fr)] gap-3 items-baseline text-xs py-1">
-              <span className="rounded bg-red-100 text-red-700 px-1.5 py-0.5 uppercase text-[10px] font-medium text-center">{p.reason}</span>
+              <span className="rounded bg-red-100 text-red-700 px-1.5 py-0.5 uppercase text-[11px] font-medium text-center">{p.reason}</span>
               <span className="font-mono truncate text-slate-700" title={p.path}>{p.path}</span>
             </div>
           ))}
@@ -459,23 +490,24 @@ export default function JobDetail() {
         <Link to="/jobs" className="text-xs text-slate-500 hover:underline">&larr; Back to queue</Link>
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 mt-1">
           <div className="flex items-center gap-3 min-w-0">
-            <h1 className="text-xl font-semibold text-slate-800 break-words sm:truncate">{job.name}</h1>
+            <h1 className="text-xl font-semibold text-slate-800 break-words sm:truncate">{jobTitle(job.name)}</h1>
             <StatusPill status={job.status} />
           </div>
           <div className="flex flex-wrap gap-2 shrink-0">
-            {job.status === 'queued' && <button type="button" onClick={() => act('approve')} className="btn-primary">Approve</button>}
-            {job.status === 'approved' && <button type="button" onClick={() => act('run')} className="btn-primary">Run</button>}
-            {job.status === 'running' && <button type="button" onClick={() => act('pause')} className="btn-secondary">Pause</button>}
-            {job.status === 'paused' && <button type="button" onClick={() => act('resume')} className="btn-primary">Resume</button>}
-            {['running', 'paused', 'approved', 'queued'].includes(job.status) && <button type="button" onClick={() => act('cancel')} className="btn-danger">Cancel</button>}
-            {['failed', 'cancelled'].includes(job.status) && <button type="button" onClick={() => act('restart')} className="btn-primary">Restart</button>}
+            {job.status === 'queued' && <button type="button" disabled={busy} onClick={() => act('approve-run')} className="btn-primary">Approve &amp; run</button>}
+            {job.status === 'queued' && <button type="button" disabled={busy} onClick={() => act('approve')} className="btn-secondary">Approve only</button>}
+            {job.status === 'approved' && <button type="button" disabled={busy} onClick={() => act('run')} className="btn-primary">Run</button>}
+            {job.status === 'running' && <button type="button" disabled={busy} onClick={() => act('pause')} className="btn-secondary">Pause</button>}
+            {job.status === 'paused' && <button type="button" disabled={busy} onClick={() => act('resume')} className="btn-primary">Resume</button>}
+            {['running', 'paused', 'approved', 'queued'].includes(job.status) && <button type="button" disabled={busy} onClick={() => act('cancel')} className="btn-danger">Cancel</button>}
+            {['failed', 'cancelled'].includes(job.status) && <button type="button" disabled={busy} onClick={() => act('restart')} className="btn-primary">Restart</button>}
             {['queued', 'approved', 'paused', 'failed', 'cancelled'].includes(job.status) && (
-              <button type="button" onClick={() => act('preflight')} disabled={preflightBusy} className="btn-secondary" title="Scan the source and check target path lengths, file sizes and item permissions - nothing is copied">
+              <button type="button" onClick={() => act('preflight')} disabled={busy || preflightBusy} className="btn-secondary" title="Scan the source and check target path lengths, file sizes and item permissions - nothing is copied">
                 {preflightBusy ? 'Checking…' : 'Pre-flight check'}
               </button>
             )}
-            {job.status === 'completed' && <button type="button" onClick={() => act('verify')} className="btn-secondary">Verify</button>}
-            {['completed', 'failed', 'cancelled'].includes(job.status) && <button type="button" onClick={() => act('delete')} className="btn-secondary">Delete</button>}
+            {job.status === 'completed' && <button type="button" disabled={busy} onClick={() => act('verify')} className="btn-secondary">Verify</button>}
+            {['completed', 'failed', 'cancelled'].includes(job.status) && <button type="button" disabled={busy} onClick={() => act('delete')} className="btn-secondary">Delete</button>}
           </div>
         </div>
         <div className="text-sm text-slate-500 mt-1 break-words">
@@ -622,7 +654,7 @@ export default function JobDetail() {
         {/* Scrolls sideways on narrow screens rather than squeezing the path
             column to nothing. */}
         <div className="overflow-x-auto rounded-md">
-        <div className="h-[28rem] min-w-[40rem] flex flex-col bg-slate-900 rounded-md overflow-hidden font-mono text-xs leading-5">
+        <div className={`${job.status === 'running' && showLaneRows ? 'h-[36rem]' : 'h-[28rem]'} min-w-[40rem] flex flex-col bg-slate-900 rounded-md overflow-hidden font-mono text-xs leading-5`}>
           <div className="grid grid-cols-[64px_96px_minmax(0,1fr)_72px_56px] gap-2 px-3 py-1.5 text-[11px] text-slate-500 border-b border-slate-700/70 shrink-0">
             <span>time</span><span>event</span><span>path</span><span className="text-right">size</span><span className="text-right">took</span>
           </div>
@@ -651,19 +683,19 @@ export default function JobDetail() {
               with no measurable bytes, so it shows an indeterminate pulse with
               elapsed time instead. Idle slots stay in place. */}
           {job.status === 'running' && (
-            <div className="shrink-0 border-t border-slate-700/70 bg-slate-800/60 px-3 py-2 space-y-1.5">
-              <div className="flex items-center justify-between text-[11px] text-slate-500">
+            <div className="shrink-0 border-t border-slate-700/70 bg-slate-800/60 px-3 py-1.5">
+              <div className="flex items-center justify-between text-[11px] text-slate-500 h-5">
                 <span>Transferring now · {laneCount} lane{laneCount === 1 ? '' : 's'}</span>
-                <span className="tabular-nums">{laneEntries.length} active</span>
+                <span className="tabular-nums">
+                  {showLaneRows ? `${laneEntries.length} of ${laneCount} busy` : preCopyPhase ? 'lanes start after the scan and folder setup' : 'waiting for the first file'}
+                </span>
               </div>
-              {lanes.map((u, i) => {
+              {showLaneRows && lanes.map((u, i) => {
                 if (!u) {
                   return (
-                    <div key={i} className="grid grid-cols-[20px_minmax(0,1fr)_260px_100px] gap-3 items-center h-6">
-                      <span className="text-slate-600 tabular-nums">{i + 1}</span>
-                      <span className="text-slate-600">idle</span>
-                      <span className="h-1 rounded-full bg-slate-800" />
-                      <span />
+                    <div key={i} className="grid grid-cols-[1.25rem_minmax(0,1fr)] gap-3 items-center h-5 text-slate-600">
+                      <span className="tabular-nums">{i + 1}</span>
+                      <span>idle</span>
                     </div>
                   );
                 }
@@ -673,18 +705,18 @@ export default function JobDetail() {
                 const etaSec = !isCopy && u.rate > 1 && u.bytesTotal > u.bytesDone ? (u.bytesTotal - u.bytesDone) / u.rate : null;
                 const elapsedSec = u.firstSeen ? Math.max(0, Math.round((u.ts - u.firstSeen) / 1000)) : 0;
                 const phaseLabelText = u.phase === 'downloading' ? 'downloading' : isCopy ? 'server-side copy' : 'uploading';
-                const fmtSec = (s) => (s >= 90 ? `${Math.round(s / 60)} min` : `${Math.round(s)}s`);
+                const fmtSec = (sec) => (sec >= 90 ? `${Math.round(sec / 60)} min` : `${Math.round(sec)}s`);
                 return (
-                  <div key={i} className="grid grid-cols-[20px_minmax(0,1fr)_260px_100px] gap-3 items-center h-6">
-                    <span className="text-slate-600 tabular-nums">{i + 1}</span>
-                    <span className="min-w-0 truncate text-slate-300" title={u.sourcePath}>
+                  <div key={i} className="grid grid-cols-[1.25rem_minmax(0,1fr)_minmax(5rem,14rem)_7.5rem] gap-3 items-center h-5">
+                    <span className="text-slate-500 tabular-nums">{i + 1}</span>
+                    <span className="min-w-0 truncate text-slate-200" title={u.sourcePath}>
                       {name} <span className="text-slate-500">· {phaseLabelText}
                         {isCopy && elapsedSec >= 5 && <> · {fmtSec(elapsedSec)}</>}
                         {!isCopy && u.rate > 1 && <> · {formatBytes(u.rate)}/s</>}
                         {etaSec != null && <> · ~{fmtSec(etaSec)}</>}
                       </span>
                     </span>
-                    <span className="h-1 rounded-full bg-slate-700 overflow-hidden">
+                    <span className="h-1.5 rounded-full bg-slate-700 overflow-hidden">
                       {isCopy ? (
                         <span className="block h-full w-full bg-indigo-400/70 animate-pulse" />
                       ) : (
@@ -710,6 +742,7 @@ export default function JobDetail() {
             {kpis?.largestFiles.map((f, i) => (
               <li key={i} className="flex justify-between gap-2"><span className="truncate min-w-0" title={f.source_path}>{f.source_path}</span><span className="text-slate-400 shrink-0">{formatBytes(f.size_bytes)}</span></li>
             ))}
+            {kpis && kpis.largestFiles.length === 0 && <li className="text-slate-400">None yet</li>}
           </ul>
         </div>
         <div className="bg-white border border-slate-200 rounded-lg p-4">

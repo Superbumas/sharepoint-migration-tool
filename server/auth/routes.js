@@ -88,8 +88,52 @@ function nonTeamProjectSignInAllowed(pendingProjectId, account) {
   return !project.tenant_id || project.tenant_id === account.tenantId;
 }
 
+// "Remember where I was" cookie: the project last signed into, plus the
+// account used (as a login hint). A bare "Sign in with Microsoft" after the
+// session expired goes straight back into that project with its full
+// working scopes - one Microsoft sign-in, not an identity sign-in followed
+// by a second one to open the project. Holds no secret; cleared on sign-out.
+const LAST_PROJECT_COOKIE = 'smt_last_project';
+const LAST_PROJECT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+function readLastProject(req) {
+  const raw = (req.headers.cookie || '').split(/;\s*/).find((c) => c.startsWith(`${LAST_PROJECT_COOKIE}=`));
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(Buffer.from(decodeURIComponent(raw.slice(LAST_PROJECT_COOKIE.length + 1)), 'base64url').toString('utf8'));
+    return v && typeof v.p === 'string' ? { projectId: v.p, loginHint: typeof v.h === 'string' ? v.h : null } : null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberLastProject(res, projectId, loginHint) {
+  const value = Buffer.from(JSON.stringify({ p: projectId, h: loginHint || undefined })).toString('base64url');
+  res.cookie(LAST_PROJECT_COOKIE, value, { httpOnly: true, sameSite: 'lax', secure: false, maxAge: LAST_PROJECT_MAX_AGE_MS });
+}
+
+// A project that a plain sign-in can open directly with the working scopes:
+// bound to a tenant and with a usable engine credential (so no app-creation
+// consent is needed - that stays an explicit step from /projects).
+function projectReadyForDirectSignIn(project) {
+  return !!(project?.tenant_id && engineCredentialUsable(project));
+}
+
 router.get('/auth/login', async (req, res, next) => {
   try {
+    // Bare sign-in with a remembered, still-ready project: treat it as a
+    // sign-in to that project. ?fresh=1 skips this (used by "sign in with a
+    // different account").
+    let loginHint = typeof req.query.hint === 'string' ? req.query.hint : null;
+    if (!req.query.project && !req.query.fresh) {
+      const last = readLastProject(req);
+      const lastProject = last && getDb().prepare('SELECT * FROM projects WHERE id = ?').get(last.projectId);
+      if (projectReadyForDirectSignIn(lastProject)) {
+        req.query.project = lastProject.id;
+        loginHint = loginHint || last.loginHint;
+      }
+    }
+
     const { verifier, challenge } = generatePkcePair();
     const state = generateState();
     req.session.pkceVerifier = verifier;
@@ -155,6 +199,10 @@ router.get('/auth/login', async (req, res, next) => {
       codeChallenge: challenge,
       codeChallengeMethod: 'S256',
       state,
+      // Pre-selects the account, so Microsoft's SSO skips the account picker
+      // (and the password, if the browser is already signed in).
+      ...(loginHint ? { loginHint } : {}),
+      ...(req.query.fresh ? { prompt: 'select_account' } : {}),
     });
     res.redirect(url);
   } catch (err) {
@@ -315,6 +363,22 @@ router.get('/auth/redirect', async (req, res, next) => {
     }
     req.session.projectId = project.id;
 
+    // An identity-only sign-in (User.Read) can't browse sites or files, so on
+    // its own it left people on a dashboard where every picker failed until
+    // they signed in a SECOND time through /projects. When the project it
+    // landed in is ready, continue straight into that project's sign-in: the
+    // browser is already signed in to Microsoft and the account is
+    // pre-selected, so this second leg normally completes without any prompt.
+    // Not done for an unprovisioned project (that leg would ask for
+    // app-creation consent, which a non-admin teammate can't give).
+    const wasIdentityLeg = !wasProvisionLeg && Array.isArray(scopes)
+      && scopes.length === config.identityScopes.length
+      && scopes.every((s) => config.identityScopes.includes(s));
+    if (wasIdentityLeg && projectReadyForDirectSignIn(project)) {
+      const hint = result.account.username || '';
+      return req.session.save(() => res.redirect(`/auth/login?project=${encodeURIComponent(project.id)}&hint=${encodeURIComponent(hint)}`));
+    }
+
     // First sign-in for this project (or a retry after a previous attempt
     // failed) - create its own dedicated, tenant-local app registration for
     // the engine to use, using this GA's own delegated rights and the
@@ -386,10 +450,12 @@ router.get('/auth/redirect', async (req, res, next) => {
         req.session.lastEngineRepair = { at: new Date().toISOString(), ok: false, error: err.message };
       }
       await hydrateUserProfile(req);
+      rememberLastProject(res, project.id, result.account.username);
       return res.redirect('/settings?repair=engine');
     }
 
     await hydrateUserProfile(req);
+    if (!wasIdentityLeg) rememberLastProject(res, project.id, result.account.username);
 
     res.redirect('/');
   } catch (err) {
@@ -399,6 +465,7 @@ router.get('/auth/redirect', async (req, res, next) => {
 
 router.get('/auth/logout', (req, res) => {
   const tenantId = req.session.tenantId || 'organizations';
+  res.clearCookie(LAST_PROJECT_COOKIE);
   req.session.destroy(() => {
     const logoutUrl =
       `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/logout` +

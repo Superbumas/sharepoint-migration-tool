@@ -16,12 +16,16 @@ function Test-PnPTargetFileMatches {
         [Parameter(Mandatory)]$Connection,
         [Parameter(Mandatory)][string]$TargetServerRelativeUrl,
         [Parameter(Mandatory)][long]$ExpectedSize,
-        $SourceModified = $null
+        $SourceModified = $null,
+        # Office files: SharePoint re-stamps them on copy, so size can't match.
+        [switch]$AllowSizeDifference
     )
     try {
         $existing = Get-PnPFile -Url $TargetServerRelativeUrl -AsFileObject -Connection $Connection -ErrorAction Stop
         if ($null -eq $existing) { return $false }
-        if ([long]$existing.Length -ne $ExpectedSize) { return $false }
+        # A size difference is only tolerated when the dates can still prove
+        # the copy is current.
+        if ([long]$existing.Length -ne $ExpectedSize -and -not ($AllowSizeDifference -and $SourceModified)) { return $false }
         if ($SourceModified) {
             $targetModified = $null
             try { $targetModified = $existing.TimeLastModified } catch {}
@@ -140,7 +144,10 @@ function Get-GraphFileMap {
 # properties (From/To/Subject/Sent) on ingestion and rewrites the file, so a
 # copy consistently comes out a different size. Seen on every .msg in a real
 # job, and a re-copy reproduces the same size, ruling out a bad transfer.
-$script:OfficeExtensions = @('.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.docm', '.xlsm', '.pptm', '.one', '.vsdx', '.msg')
+# .xlsb/.pps and the other binary/template/show variants are rewritten the
+# same way: seen on a OneDrive-to-SharePoint job where they still differed
+# after a download + exact-bytes re-upload.
+$script:OfficeExtensions = @('.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.docm', '.xlsm', '.pptm', '.one', '.vsdx', '.msg', '.xlsb', '.pps', '.ppsx', '.ppsm', '.pot', '.potx', '.potm', '.dot', '.dotx', '.dotm', '.xlt', '.xltx', '.xltm')
 
 # The comparison rules themselves, over two already-built maps of
 # '<relative path>' -> @{ Size; Hash } - shared by SharePoint-to-SharePoint
