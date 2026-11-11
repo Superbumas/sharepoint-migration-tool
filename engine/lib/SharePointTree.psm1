@@ -12,7 +12,14 @@ function Get-PnPFolderTree {
         # foldersPending) - lets the caller surface progress during a walk that
         # can otherwise sit silent for 10+ minutes on large trees. Throttling
         # is the callback's job, not this function's.
-        [scriptblock]$OnProgress
+        [scriptblock]$OnProgress,
+        # Set when the root IS a library root: skips the library's hidden
+        # "Forms" folder (AllItems.aspx, Upload.aspx, template.dotx ...). Those
+        # are SharePoint system files, not user content - Graph and the
+        # verification map never list them, and copying them fails with
+        # SPMigrationQosException. A user folder called Forms anywhere below
+        # the root is still walked.
+        [switch]$SkipLibraryFormsFolder
     )
 
     $root = $RootSiteRelativeUrl.TrimEnd('/')
@@ -27,6 +34,7 @@ function Get-PnPFolderTree {
 
         $folderItems = Get-PnPFolderItem -FolderSiteRelativeUrl $current -ItemType Folder -Connection $Connection -ErrorAction Stop
         foreach ($f in $folderItems) {
+            if ($SkipLibraryFormsFolder -and $current -eq $root -and $f.Name -eq 'Forms') { continue }
             $childPath = "$current/$($f.Name)"
             # Folders is consumed as paths RELATIVE to the enumeration root
             # (Initialize-PnPTargetFolders appends them to the *target* root),
