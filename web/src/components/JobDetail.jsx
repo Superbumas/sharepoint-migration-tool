@@ -602,8 +602,8 @@ export default function JobDetail() {
             {job.status === 'paused' && <button type="button" disabled={busy} onClick={() => act('resume')} className="btn-primary">Resume</button>}
             {['running', 'paused', 'approved', 'queued'].includes(job.status) && <button type="button" disabled={busy} onClick={() => act('cancel')} className="btn-danger">Cancel</button>}
             {['failed', 'cancelled'].includes(job.status) && <button type="button" disabled={busy} onClick={() => act('restart')} className="btn-primary">Restart</button>}
-            {['queued', 'approved', 'paused', 'failed', 'cancelled'].includes(job.status) && (
-              <button type="button" onClick={() => act('preflight')} disabled={busy || preflightBusy} className="btn-secondary" title="Scan the source and check target path lengths, file sizes and item permissions - nothing is copied">
+            {(['queued', 'approved', 'paused', 'failed', 'cancelled'].includes(job.status) || (job.status === 'completed' && !job.cleanup)) && (
+              <button type="button" onClick={() => act('preflight')} disabled={busy || preflightBusy || backgroundOp} className="btn-secondary" title="Scan the source and check target path lengths, file sizes and item permissions (who had access) - nothing is copied or changed">
                 {preflightBusy ? 'Checking…' : 'Pre-flight check'}
               </button>
             )}

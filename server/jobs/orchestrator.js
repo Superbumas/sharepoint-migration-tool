@@ -1399,7 +1399,9 @@ const preflightRuns = new Map(); // jobId -> child process
 function preflightJob(jobId, actor, tenantId) {
   const job = getJob(jobId, tenantId);
   if (!job) throw httpError(404, 'Job not found');
-  if (!['queued', 'approved', 'paused', 'failed', 'cancelled'].includes(job.status)) {
+  // A finished job can be re-checked too (read-only), e.g. to record who had
+  // access to the source before it is cleaned up.
+  if (!['queued', 'approved', 'paused', 'failed', 'cancelled', 'completed'].includes(job.status)) {
     throw httpError(409, `A pre-flight check runs before or between runs - not while the job is "${job.status}".`);
   }
   if (runningJobs.has(jobId)) throw httpError(409, 'The job is running - its own pre-flight report is already in the log.');
