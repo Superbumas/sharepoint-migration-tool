@@ -1,7 +1,7 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Routes, Route, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
-import Header from './components/Header';
+import Header, { Sidebar, AuthBanner } from './components/Header';
 import ProjectPicker from './components/ProjectPicker';
 import SignIn from './components/SignIn';
 import Dashboard from './components/Dashboard';
@@ -28,11 +28,23 @@ function Gate({ children }) {
 
 export default function App() {
   const location = useLocation();
+  // The sidebar can be tucked away with the menu button; the choice sticks.
+  const [sidebarOpen, setSidebarOpen] = useState(() => localStorage.getItem('sidebar') !== 'closed');
+  function toggleSidebar() {
+    setSidebarOpen((open) => {
+      localStorage.setItem('sidebar', open ? 'closed' : 'open');
+      return !open;
+    });
+  }
   return (
     <AuthProvider>
       <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-20 focus:bg-white focus:px-3 focus:py-2 focus:rounded-md focus:shadow">Skip to content</a>
-      <Header />
-      <main id="main" className="max-w-7xl mx-auto px-4 py-6">
+      <Header onToggleSidebar={toggleSidebar} />
+      <div className="flex items-start">
+      {sidebarOpen && <Sidebar />}
+      <div className="flex-1 min-w-0">
+      <AuthBanner />
+      <main id="main" className="max-w-7xl mx-auto px-6 py-6">
         <ErrorBoundary key={location.pathname}>
         <Routes>
           {/* Always reachable, signed in or not - the only way to switch to
@@ -57,6 +69,8 @@ export default function App() {
         </Routes>
         </ErrorBoundary>
       </main>
+      </div>
+      </div>
     </AuthProvider>
   );
 }
