@@ -441,12 +441,13 @@ function Invoke-VerificationPhase {
                 # 25), so a server restart mid-check keeps finished files.
                 $ccLog = @{ At = (Get-Date) }
                 $checked = Invoke-RewrittenContentCheck -Items $todo.ToArray() -RefreshLinks $ccRefresh -Cache $ccCache -CachePath $ccCachePath -OnProgress {
-                    param($n, $bytes, $rel, $throttleWait, $current, $currentBytes)
-                    if ($throttleWait) { Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Content check: throttled by SharePoint, pausing about $($throttleWait)s and retrying (nothing is skipped)." } }
-                    Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal; bytesDone = $bytes; bytesTotal = $ccTotalBytes; last = $rel; current = $current; currentBytes = $currentBytes }
+                    param($n, $bytes, $rel, $throttleWait, $current, $currentBytes, $throttle)
+                    if ($throttleWait) { Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Content check: SharePoint is throttling - pausing about $($throttleWait)s, then carrying on (nothing is skipped)." } }
+                    if ($throttle -and $throttle.Recovered) { Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Content check: SharePoint stopped throttling - back to full speed ($($throttle.Recovered) pause(s) so far, nothing skipped)." } }
+                    Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal; bytesDone = $bytes; bytesTotal = $ccTotalBytes; last = $rel; current = $current; currentBytes = $currentBytes; throttled = [bool]($throttle -and $throttle.Active); throttleWait = $(if ($throttle) { $throttle.WaitLeft } else { 0 }); throttles = $(if ($throttle) { $throttle.Count } else { 0 }) }
                     if (((Get-Date) - $ccLog.At).TotalSeconds -ge 15) {
                         $ccLog.At = Get-Date
-                        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Content check: $n of $ccTotal checked ($([Math]::Round($bytes / 1MB)) of $([Math]::Round($ccTotalBytes / 1MB)) MB)$(if ($current) { " · now: $(($current -split '/')[-1]) ($([Math]::Max(1, [Math]::Round($currentBytes / 1MB))) MB)" })" }
+                        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Content check: $n of $ccTotal checked ($([Math]::Round($bytes / 1MB)) of $([Math]::Round($ccTotalBytes / 1MB)) MB)$(if ($current) { " · now: $(($current -split '/')[-1]) ($([Math]::Max(1, [Math]::Round($currentBytes / 1MB))) MB)" })$(if ($throttle -and $throttle.Active) { " · throttled by SharePoint, waiting ~$($throttle.WaitLeft)s" })" }
                     }
                 }
                 foreach ($c in $checked) {
@@ -996,12 +997,13 @@ try {
                 }
                 $ccLog = @{ At = (Get-Date) }
                 $checked = Invoke-RewrittenContentCheck -Items $todo.ToArray() -RefreshLinks $ccRefresh -Cache $ccCache -CachePath $ContentCachePath -OnProgress {
-                    param($n, $bytes, $rel, $throttleWait, $current, $currentBytes)
-                    if ($throttleWait) { Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Content check: throttled by SharePoint, pausing about $($throttleWait)s and retrying (nothing is skipped)." } }
-                    Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal; bytesDone = $bytes; bytesTotal = $ccTotalBytes; last = $rel; current = $current; currentBytes = $currentBytes }
+                    param($n, $bytes, $rel, $throttleWait, $current, $currentBytes, $throttle)
+                    if ($throttleWait) { Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Content check: SharePoint is throttling - pausing about $($throttleWait)s, then carrying on (nothing is skipped)." } }
+                    if ($throttle -and $throttle.Recovered) { Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Content check: SharePoint stopped throttling - back to full speed ($($throttle.Recovered) pause(s) so far, nothing skipped)." } }
+                    Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal; bytesDone = $bytes; bytesTotal = $ccTotalBytes; last = $rel; current = $current; currentBytes = $currentBytes; throttled = [bool]($throttle -and $throttle.Active); throttleWait = $(if ($throttle) { $throttle.WaitLeft } else { 0 }); throttles = $(if ($throttle) { $throttle.Count } else { 0 }) }
                     if (((Get-Date) - $ccLog.At).TotalSeconds -ge 15) {
                         $ccLog.At = Get-Date
-                        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Cleanup check: $n of $ccTotal checked ($([Math]::Round($bytes / 1MB)) of $([Math]::Round($ccTotalBytes / 1MB)) MB)$(if ($current) { " · now: $(($current -split '/')[-1]) ($([Math]::Max(1, [Math]::Round($currentBytes / 1MB))) MB)" })" }
+                        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Cleanup check: $n of $ccTotal checked ($([Math]::Round($bytes / 1MB)) of $([Math]::Round($ccTotalBytes / 1MB)) MB)$(if ($current) { " · now: $(($current -split '/')[-1]) ($([Math]::Max(1, [Math]::Round($currentBytes / 1MB))) MB)" })$(if ($throttle -and $throttle.Active) { " · throttled by SharePoint, waiting ~$($throttle.WaitLeft)s" })" }
                     }
                 }
                 foreach ($c in $checked) {
