@@ -262,11 +262,35 @@ function Compare-PartMaps([hashtable]$Src, [hashtable]$Tgt) {
 # "could not be checked".
 # $Gate (a synchronized hashtable shared by all lanes) makes one lane's
 # throttle slow every lane down: nobody sends until Gate.Until has passed.
+# It also paces requests to stay under SharePoint's limit instead of only
+# reacting to it: each 429 doubles the gap between any two requests (all
+# lanes together, 100 ms up to 1 s), and every 20 s without a 429 the gap
+# halves until requests flow freely again.
+function Wait-GateSlot($Gate) {
+    $slot = $null
+    [System.Threading.Monitor]::Enter($Gate.SyncRoot)
+    try {
+        $now = [DateTime]::UtcNow
+        if ($Gate.Interval -gt 0 -and ($now - $Gate.LastThrottleAt).TotalSeconds -ge 20 -and ($now - $Gate.LastEaseAt).TotalSeconds -ge 20) {
+            $Gate.Interval = if ($Gate.Interval -lt 50) { 0 } else { [int]($Gate.Interval / 2) }
+            $Gate.LastEaseAt = $now
+        }
+        $slot = if ($Gate.Until -gt $now) { $Gate.Until } else { $now }
+        if ($Gate.Interval -gt 0) {
+            if ($Gate.NextAt -gt $slot) { $slot = $Gate.NextAt }
+            $Gate.NextAt = $slot.AddMilliseconds($Gate.Interval)
+        }
+    } finally { [System.Threading.Monitor]::Exit($Gate.SyncRoot) }
+    $pause = ($slot - [DateTime]::UtcNow).TotalMilliseconds
+    if ($pause -gt 0) { Start-Sleep -Milliseconds ([int]$pause) }
+}
 function Send-HttpWithRetry([System.Net.Http.HttpClient]$Http, [string]$Url, $Range, $Gate, [int]$MaxAttempts = 10) {
+    if ($Gate) { foreach ($k in 'Interval', 'NextAt', 'LastThrottleAt', 'LastEaseAt') { if (-not $Gate.ContainsKey($k)) { $Gate[$k] = if ($k -eq 'Interval') { 0 } else { [DateTime]::MinValue } } } }
     for ($attempt = 1; ; $attempt++) {
         if ($Gate) {
-            $pause = ($Gate.Until - [DateTime]::UtcNow).TotalMilliseconds
-            if ($pause -gt 0) { Start-Sleep -Milliseconds ([int]$pause + (Get-Random -Maximum 500)) }
+            Wait-GateSlot $Gate
+            # A little jitter after a throttle pause so lanes don't restart in step.
+            if ($attempt -gt 1) { Start-Sleep -Milliseconds (Get-Random -Maximum 500) }
         }
         $req = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $Url)
         if ($Range) { $req.Headers.Range = $Range }
@@ -287,6 +311,8 @@ function Send-HttpWithRetry([System.Net.Http.HttpClient]$Http, [string]$Url, $Ra
             [System.Threading.Monitor]::Enter($Gate.SyncRoot)
             try {
                 if ($until -gt $Gate.Until) { $Gate.Until = $until }
+                $Gate.Interval = [Math]::Min(1000, [Math]::Max(100, [int]$Gate.Interval * 2))
+                $Gate.LastThrottleAt = [DateTime]::UtcNow
                 $Gate.Throttles++
                 $Gate.LastWait = [int][Math]::Ceiling($wait)
             } finally { [System.Threading.Monitor]::Exit($Gate.SyncRoot) }
@@ -529,7 +555,8 @@ function Test-RewrittenFileContent {
 # Download links (valid about an hour) are refreshed with -RefreshLinks once
 # they are older than -LinkMaxMinutes; files not started yet pick the fresh
 # link up. OnProgress gets (done, bytesDone, lastRel, throttleWaitSec,
-# currentRel, currentBytes) - "current" is the biggest file still in progress.
+# currentRel, currentBytes, throttle) - "current" is the biggest file still in
+# progress; throttle = @{ Active; WaitLeft; Count; Recovered }.
 function Invoke-RewrittenContentCheck {
     param(
         [Parameter(Mandatory)][object[]]$Items,
@@ -546,14 +573,14 @@ function Invoke-RewrittenContentCheck {
     )
     $modulePath = $PSCommandPath
     # Shared by all lanes: throttle pause, and counters for the caller's log.
-    $gate = [hashtable]::Synchronized(@{ Until = [DateTime]::UtcNow; Throttles = 0; LastWait = 0 })
+    $gate = [hashtable]::Synchronized(@{ Until = [DateTime]::UtcNow; Throttles = 0; LastWait = 0; Interval = 0; NextAt = [DateTime]::MinValue; LastThrottleAt = [DateTime]::MinValue; LastEaseAt = [DateTime]::MinValue })
     # Files currently being checked (rel -> size), for "checking now".
     $inFlight = [hashtable]::Synchronized(@{})
     # Same decorated User-Agent as the copy engine (UserAgent.psm1);
     # Microsoft throttles undecorated traffic harder.
     $ua = if (Get-Command Get-MigrationUserAgent -ErrorAction SilentlyContinue) { Get-MigrationUserAgent } else { $null }
     $results = [System.Collections.Generic.List[object]]::new()
-    $state = @{ Done = 0; Bytes = [long]0; ThrottlesReported = 0; NoteAt = [datetime]::MinValue; LinksAt = (Get-Date); Unsaved = 0; SavedAt = (Get-Date) }
+    $state = @{ Done = 0; Bytes = [long]0; ThrottlesReported = 0; NoteAt = [datetime]::MinValue; LinksAt = (Get-Date); Unsaved = 0; SavedAt = (Get-Date); Throttled = $false; CalmSince = $null; CalmCount = 0 }
     $all = @($Items | Sort-Object { [long]$_.Size })
     $bigFile = 50MB
     $isBig = { param($x) [long]$x.Size -gt $bigFile -and $script:ZipExtensions -notcontains "$($x.Ext)".ToLowerInvariant() }
@@ -593,12 +620,29 @@ function Invoke-RewrittenContentCheck {
         if ($gate.Throttles -gt $state.ThrottlesReported -and ((Get-Date) - $state.NoteAt).TotalSeconds -ge 30) {
             $throttleNote = $gate.LastWait; $state.ThrottlesReported = $gate.Throttles; $state.NoteAt = Get-Date
         }
+        # Throttle status for the progress line: throttled right now (any
+        # lane waiting), and a one-off "recovered" once 20 s pass with no
+        # new 429 after a throttled spell.
+        $nowUtc = [DateTime]::UtcNow
+        $active = $gate.Until -gt $nowUtc
+        $recovered = $null
+        if ($active) { $state.Throttled = $true; $state.CalmSince = $null }
+        elseif ($state.Throttled) {
+            if (-not $state.CalmSince -or $gate.Throttles -ne $state.CalmCount) { $state.CalmSince = Get-Date; $state.CalmCount = $gate.Throttles }
+            elseif (((Get-Date) - $state.CalmSince).TotalSeconds -ge 20) { $recovered = $gate.Throttles; $state.Throttled = $false; $state.CalmSince = $null }
+        }
+        $throttle = @{
+            Active = $active
+            WaitLeft = if ($active) { [int][Math]::Ceiling(($gate.Until - $nowUtc).TotalSeconds) } else { 0 }
+            Count = $gate.Throttles
+            Recovered = $recovered
+        }
         & $refreshIfStale
         $current = $null; [long]$currentSize = 0
         [System.Threading.Monitor]::Enter($inFlight.SyncRoot)
         try { foreach ($e in $inFlight.GetEnumerator()) { if ([long]$e.Value -ge $currentSize) { $current = $e.Key; $currentSize = [long]$e.Value } } }
         finally { [System.Threading.Monitor]::Exit($inFlight.SyncRoot) }
-        if ($OnProgress) { & $OnProgress $state.Done $state.Bytes $r.Rel $throttleNote $current $currentSize }
+        if ($OnProgress) { & $OnProgress $state.Done $state.Bytes $r.Rel $throttleNote $current $currentSize $throttle }
     }
 
     foreach ($set in @(@{ Items = $small; Lanes = $ThrottleLimit }, @{ Items = $big; Lanes = [Math]::Max(1, [Math]::Min($BigLanes, $ThrottleLimit)) })) {

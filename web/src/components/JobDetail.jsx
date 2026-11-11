@@ -86,7 +86,7 @@ function phaseLabel(phase) {
     case 'repairing':
       return phase.checking ? 'Repairing failed files — re-checking the repaired files…' : `Repairing failed files — ${n(phase.done)} of ${n(phase.total)}${phase.current ? ` · ${String(phase.current).split('/').pop()}` : ''}`;
     case 'content_check':
-      return `Checking content of files SharePoint rewrote — ${n(phase.done)} of ${n(phase.total)}${phase.bytesTotal ? ` · ${formatBytes(phase.bytesDone || 0)} of ${formatBytes(phase.bytesTotal)}` : ''}${phase.current ? ` · checking now: ${String(phase.current).split('/').pop()} (${formatBytes(phase.currentBytes || 0)})` : phase.last ? ` · last: ${String(phase.last).split('/').pop()}` : ''}`;
+      return `Checking content of files SharePoint rewrote — ${n(phase.done)} of ${n(phase.total)}${phase.bytesTotal ? ` · ${formatBytes(phase.bytesDone || 0)} of ${formatBytes(phase.bytesTotal)}` : ''}${phase.current ? ` · checking now: ${String(phase.current).split('/').pop()} (${formatBytes(phase.currentBytes || 0)})` : phase.last ? ` · last: ${String(phase.last).split('/').pop()}` : ''}${phase.throttled ? ` · SharePoint is throttling, waiting ~${phase.throttleWait}s (nothing skipped)` : phase.throttles ? ` · full speed (throttled ${n(phase.throttles)}× earlier)` : ''}`;
     case 'permissions':
       return `Copying item permissions — ${n(phase.done)} of ${n(phase.total)} items`;
     case 'purging':
@@ -701,7 +701,7 @@ export default function JobDetail() {
                   <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500" />
                 </span>
               )}
-              <span className="font-medium text-slate-700 truncate">
+              <span className={`font-medium truncate ${job.phase?.throttled ? 'text-amber-600' : 'text-slate-700'}`}>
                 {backgroundOp && !phaseText
                   ? `${OP_LABELS[job.activeOperation] || 'Working'} — connecting and indexing…`
                   : phaseText
