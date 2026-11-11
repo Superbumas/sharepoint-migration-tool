@@ -66,7 +66,19 @@ function banner(url) {
   console.log('');
 }
 
+// Wipe the terminal (screen and scrollback) and redraw the banner, so each
+// job run starts on a clean console. Only on a real terminal: piped/redirected
+// output (a log file, a service) keeps everything. The audit log in the
+// database - which reports and exports read - is never affected.
+function clearScreen(url) {
+  if (!process.stdout.isTTY || process.env.SPMT_KEEP_CONSOLE === '1') return false;
+  process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
+  banner(url);
+  return true;
+}
+
 module.exports = {
+  clearScreen,
   C,
   bar,
   spin,

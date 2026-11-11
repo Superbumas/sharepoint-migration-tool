@@ -329,7 +329,7 @@ function Invoke-VerificationPhase {
             Write-EngineEvent -Type 'verify_mismatch' -Data @{ level = 'error'; reason = 'hash'; sourcePath = $p; message = "VERIFY CONTENT HASH MISMATCH: $p" }
         }
         foreach ($p in ($result.OfficeRewritten | Select-Object -First $maxListed)) {
-            Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Verify note: '$p' differs only because SharePoint re-stamps Office/Outlook document properties on copy (content parts verified unaffected by this mechanism); open the copy to confirm if in doubt." }
+            Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Verify note: '$p' differs only because SharePoint re-stamps document properties (Office, Outlook, saved web pages) on copy (content parts verified unaffected by this mechanism); open the copy to confirm if in doubt." }
         }
 
         $problems = $result.Missing.Count + $result.SizeMismatch.Count + $result.HashMismatch.Count
@@ -596,7 +596,7 @@ try {
         # Same acceptance rule as verification: exact size+hash, hash
         # unavailable degrades to size-only, and Office documents may differ
         # (SharePoint property re-stamp) without failing.
-        $officeExtensions = @('.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.docm', '.xlsm', '.pptm', '.one', '.vsdx', '.xlsb', '.pps', '.ppsx', '.ppsm', '.pot', '.potx', '.potm', '.dot', '.dotx', '.dotm', '.xlt', '.xltx', '.xltm')
+        $officeExtensions = @('.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.docm', '.xlsm', '.pptm', '.one', '.vsdx', '.xlsb', '.pps', '.ppsx', '.ppsm', '.pot', '.potx', '.potm', '.dot', '.dotx', '.dotm', '.xlt', '.xltx', '.xltm', '.htm', '.html', '.mht', '.mhtml')
         $deleted = 0; $kept = 0
         $keptList = [System.Collections.Generic.List[string]]::new()
         foreach ($rel in @($srcMap.Keys)) {
@@ -883,7 +883,7 @@ try {
         # expires after 6h, or delete data/tree-cache/<jobId>.json) recreates them.
         Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Target folders were already created by a previous run of this job - skipping folder pre-creation." }
     } elseif ($isOneDriveTarget) {
-        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Pre-creating $($tree.Folders.Count) target folder(s) in OneDrive under '$($oneDriveCtx.PathRoot)'" }
+        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Checking $($tree.Folders.Count) target folder(s) in OneDrive (creating any that are missing) under '$($oneDriveCtx.PathRoot)'" }
         Initialize-GraphDriveFolders -Connection $oneDriveCtx.Connection -DriveId $oneDriveCtx.DriveId -TargetRootPath $oneDriveCtx.PathRoot -RelativeFolderPaths $tree.Folders -ThrottleLimit $Concurrency -OnProgress {
             param($done, $total)
             Write-PhaseProgress -Phase 'preparing_folders' -Data @{ done = $done; total = $total }
@@ -896,7 +896,7 @@ try {
             } catch {}
         }
     } else {
-        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Pre-creating $($tree.Folders.Count) target folder(s) under '$targetRoot'" }
+        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Checking $($tree.Folders.Count) target folder(s) under '$targetRoot' (creating any that are missing)" }
         Initialize-PnPTargetFolders -Connection $targetConn -TargetRootSiteRelativeUrl $targetRoot -RelativeFolderPaths $tree.Folders -OnProgress {
             param($done, $total)
             Write-PhaseProgress -Phase 'preparing_folders' -Data @{ done = $done; total = $total }
@@ -1032,7 +1032,7 @@ try {
         # script-scope functions): a cross-host copy, e.g. OneDrive (-my
         # host) into a SharePoint site, needs an absolute -TargetUrl.
         # Same list as Verification.psm1's OfficeExtensions.
-        $laneOfficeExtensions = @('.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.docm', '.xlsm', '.pptm', '.one', '.vsdx', '.msg', '.xlsb', '.pps', '.ppsx', '.ppsm', '.pot', '.potx', '.potm', '.dot', '.dotx', '.dotm', '.xlt', '.xltx', '.xltm')
+        $laneOfficeExtensions = @('.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.docm', '.xlsm', '.pptm', '.one', '.vsdx', '.msg', '.xlsb', '.pps', '.ppsx', '.ppsm', '.pot', '.potx', '.potm', '.dot', '.dotx', '.dotm', '.xlt', '.xltx', '.xltm', '.htm', '.html', '.mht', '.mhtml')
         $laneTargetUrlPrefix = ''
         if ($SourceSiteUrl -and $TargetSiteUrl) {
             $laneSrcUri = [Uri]$SourceSiteUrl; $laneTgtUri = [Uri]$TargetSiteUrl

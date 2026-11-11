@@ -534,6 +534,12 @@ function runJob(jobId, actor, tenantId) {
     args.push('-CheckpointJson', job.checkpoint_json);
   }
 
+  // Fresh console per run - but never while another job is running, or its
+  // lines would vanish mid-run. Set SPMT_KEEP_CONSOLE=1 to keep everything.
+  if (runningJobs.size === 0 && clog.clearScreen(`http://localhost:${config.port}`)) {
+    clog.dim('job', `${job.name || jobId}: console cleared for this run - earlier lines stay in the job's reports and exports.`);
+  }
+
   const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'], env: buildEngineSpawnEnv(job, engineIdentity, blobConnectionString) });
 
   const db = getDb();
@@ -688,12 +694,13 @@ function consoleEngineEvent(job, event) {
       if (throttled()) break;
       const p = event;
       const label = p.phase === 'enumerating' ? `scanning source — ${(p.folders ?? 0).toLocaleString()} folders, ${(p.files ?? 0).toLocaleString()} files found`
-        : p.phase === 'preparing_folders' ? `creating target folders — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
+        : p.phase === 'preparing_folders' ? `checking target folders — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
         : p.phase === 'indexing_source' ? `indexing source metadata — ${(p.files ?? 0).toLocaleString()} files`
         : p.phase === 'indexing_target' ? `indexing existing target files — ${(p.files ?? 0).toLocaleString()} files`
         : p.phase === 'hashing_source' ? `hashing source files for verification — ${(p.files ?? 0).toLocaleString()} files`
         : p.phase === 'cleaning' ? `cleaning source — ${(p.deleted ?? 0).toLocaleString()} recycled, ${(p.kept ?? 0).toLocaleString()} kept of ${(p.total ?? 0).toLocaleString()}`
         : p.phase === 'clearing_folders' ? `recycling emptied folders — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
+        : p.phase === 'stamping_folders' ? `restoring folder dates and owners — ${(p.done ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
         : p.phase === 'purging' ? `purging recycle bin — ${(p.purged ?? 0).toLocaleString()}/${(p.total ?? 0).toLocaleString()}`
         : p.phase;
       clog.progress('job', `${name}: ${label}`);
