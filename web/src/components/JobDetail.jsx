@@ -52,6 +52,10 @@ function styleFor(line) {
   return EVENT_STYLE[line.event_type] || { badge: line.event_type, badgeClass: 'text-slate-500', rowClass: 'text-slate-300' };
 }
 
+// Log rows that begin a new run of the job: the live log and its
+// Failures/Warnings counts start from the latest one.
+const RUN_START_EVENTS = new Set(['job_restarted', 'job_run', 'job_resumed']);
+
 // Human line for the phase banner, per engine phase_progress event shape
 // (engine/Invoke-MigrationJob.ps1's Write-PhaseProgress call sites).
 function phaseLabel(phase) {
@@ -205,7 +209,7 @@ export default function JobDetail() {
       // phase_progress/checkpoint heartbeats never become rows at all.
       if (msg.type === 'log_row' && msg.row) {
         setLog((prev) => [...prev.slice(-299), msg.row]);
-        if (msg.row.event_type === 'job_restarted') setShowEarlierRuns(false);
+        if (RUN_START_EVENTS.has(msg.row.event_type)) setShowEarlierRuns(false);
       }
       if (msg.type === 'engine_event' && msg.event) {
         const ev = msg.event;
@@ -328,8 +332,14 @@ export default function JobDetail() {
   const preCopyPhase = job.phase && ['enumerating', 'preparing_folders', 'indexing'].includes(job.phase.phase);
   const showLaneRows = laneEntries.length > 0 || (!preCopyPhase && done > 0);
   let runStart = 0;
+  // Every Run / Resume / Restart starts a fresh view (a restart writes
+  // job_restarted then job_run - keep both lines).
   for (let i = log.length - 1; i > 0; i--) {
-    if (log[i].event_type === 'job_restarted') { runStart = i; break; }
+    if (RUN_START_EVENTS.has(log[i].event_type)) {
+      runStart = i;
+      while (runStart > 0 && RUN_START_EVENTS.has(log[runStart - 1].event_type)) runStart--;
+      break;
+    }
   }
   const earlierCount = runStart;
   const runLog = showEarlierRuns ? log : log.slice(runStart);
