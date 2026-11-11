@@ -56,6 +56,11 @@ router.get('/jobs/:id/report.pdf', (req, res, next) => {
     ).get(job.id).n;
     let cleanup = null;
     try { cleanup = JSON.parse(job.cleanup_json || 'null'); } catch {}
+    // Files a verification repair round copied again: an extra attempt that
+    // the per-item attempt_count never sees (it counts copy-lane retries).
+    const repairedRels = new Set(db.prepare(
+      `SELECT error_message FROM job_log WHERE job_id = ? AND event_type = 'log' AND error_message LIKE 'Re-copied after verification failure: %'`
+    ).all(job.id).map((r) => r.error_message.slice('Re-copied after verification failure: '.length).toLowerCase()));
 
     const isBlob = (job.target_provider || 'sharepoint') === 'azure_blob';
     const isOneDrive = job.target_provider === 'onedrive';
@@ -106,7 +111,7 @@ router.get('/jobs/:id/report.pdf', (req, res, next) => {
     ], { height: 50 });
     r.kv([
       ['How it got there', `${copied.toLocaleString()} copied · ${alreadyThere.toLocaleString()} already present at the target (skipped on a later run)`],
-      ['Runs', `${runs} engine run(s) · ${(job.retries_total ?? 0).toLocaleString()} retries · ${outcome.items.filter((i) => i.attempt_count > 1).length.toLocaleString()} file(s) needed more than one attempt`],
+      ['Runs', `${runs} engine run(s) · ${(job.retries_total ?? 0).toLocaleString()} retries · ${outcome.items.filter((i) => i.attempt_count > 1 || repairedRels.has(rel(i.source_path).toLowerCase())).length.toLocaleString()} file(s) needed more than one attempt${repairedRels.size ? ` (${repairedRels.size.toLocaleString()} re-copied by verification repair)` : ''}`],
       ['Elapsed', elapsedMs ? `${fmtDuration(elapsedMs)} (first start to completion${runs > 1 ? ', including time paused between runs' : ''})` : '-'],
       ['Throughput', elapsedMs && outcome.bytes ? `${formatBytes(outcome.bytes / (elapsedMs / 1000))}/s average · ${filesPerMin(outcome.migrated.length, elapsedMs)} files/min` : '-'],
       ['Metadata', metadataWarnings === 0
@@ -228,7 +233,7 @@ router.get('/jobs/:id/report.pdf', (req, res, next) => {
       [r.width * 0.06, r.width * 0.65, r.width * 0.1, r.width * 0.06, r.width * 0.13],
       items.map((i, idx) => {
         const st = ITEM_STATUS[i.status] || { text: i.status, color: COLORS.muted };
-        return [String(idx + 1), rel(i.source_path), formatBytes(i.size_bytes), String(Math.max(1, i.attempt_count || 1)), st];
+        return [String(idx + 1), rel(i.source_path), formatBytes(i.size_bytes), String(Math.max(1, i.attempt_count || 1) + (repairedRels.has(rel(i.source_path).toLowerCase()) ? 1 : 0)), st];
       }),
       { rowHeight: 11, fontSize: 6.5, aligns: ['right', 'left', 'right', 'right', 'left'] }
     );

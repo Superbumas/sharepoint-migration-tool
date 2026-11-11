@@ -100,10 +100,12 @@ const PROBLEM_LABEL = {
 // path), classified as at-destination or not.
 function jobOutcome(db, job) {
   const rel = relativizer(job);
-  const items = db.prepare(
+  const allItems = db.prepare(
     `SELECT source_path, target_path, status, size_bytes, attempt_count, duration_ms, error_message, item_type, last_run_seq, completed_at
      FROM job_items WHERE job_id = ? ORDER BY source_path`
-  ).all(job.id).filter((i) => i.item_type !== 'folder');
+  ).all(job.id);
+  const folderItems = allItems.filter((i) => i.item_type === 'folder');
+  const items = allItems.filter((i) => i.item_type !== 'folder');
   const verification = safeParse(job.verification_json);
   const ver = effectiveVerification(verification);
   const problemPaths = new Set(ver.problems.map((p) => p.path.toLowerCase()));
@@ -139,6 +141,12 @@ function jobOutcome(db, job) {
   for (const f of migrated) {
     const parts = f.path.split('/');
     for (let k = 1; k < parts.length; k++) folders.add(parts.slice(0, k).join('/').toLowerCase());
+  }
+  // Folder rows count too, so an empty folder (no file under it) is included.
+  for (const d of folderItems) {
+    if (d.status !== 'success' && d.status !== 'skipped') continue;
+    const r = rel(d.source_path).replace(/\/+$/, '');
+    if (r) folders.add(r.toLowerCase());
   }
 
   return { job, items, migrated, notMigrated, bytes, folderCount: folders.size, verification, ver };

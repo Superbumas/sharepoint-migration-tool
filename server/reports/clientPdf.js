@@ -52,7 +52,7 @@ function renderClientPdf(out, data, { title, client, preparedBy, inventory }) {
   r.paragraph(
     `${totals.files.toLocaleString()} files (${formatBytes(totals.bytes)}) across ${totals.folders.toLocaleString()} `
     + `folder${totals.folders === 1 ? '' : 's'} were migrated to ${destKinds.join(' and ') || 'the destination'}`
-    + `${period ? ` between ${period.replace(' – ', ' and ')}` : ''}. `
+    + `${period ? (period.includes(' – ') ? ` between ${period.replace(' – ', ' and ')}` : ` on ${period}`) : ''}. `
     + 'The folder structure and file names were kept as they were, and every file was checked against its original after copying.',
     { size: 10 }
   );
