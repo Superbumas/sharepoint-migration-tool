@@ -43,7 +43,7 @@ function Initialize-MigrationUserAgent {
     $env:PNPPOWERSHELL_UPDATECHECK = 'Off'
     # ...and reports usage telemetry to Application Insights - undecorated
     # traffic to a third host, and nothing the migration needs.
-    $env:PNPPOWERSHELL_DISABLETELEMETRY = 'true'
+    $env:PNP_DISABLETELEMETRY = 'true'
     $global:PSDefaultParameterValues['Invoke-WebRequest:UserAgent'] = $script:UserAgent
     $global:PSDefaultParameterValues['Invoke-RestMethod:UserAgent'] = $script:UserAgent
 }
