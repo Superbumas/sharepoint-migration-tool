@@ -6,6 +6,8 @@ const http = require('node:http');
 const { Server } = require('socket.io');
 
 const config = require('./config');
+// Mirror all terminal output to data/logs before anything else prints.
+require('./util/consoleLog').installFileLog(path.join(path.dirname(path.resolve(config.sqliteDbPath)), 'logs'));
 require('./util/userAgent');
 const { getDb } = require('./db');
 const authRoutes = require('./auth/routes');

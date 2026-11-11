@@ -11,7 +11,11 @@ const { parseDate } = require('./pdf');
 // ran before .msg joined that list (PR #34) recorded .msg rewrites as size
 // mismatches - effectiveVerification() reclassifies them here, so old jobs
 // report the same way new ones do without re-running anything.
-const OFFICE_EXTENSIONS = new Set(['.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.docm', '.xlsm', '.pptm', '.one', '.vsdx', '.msg']);
+const OFFICE_EXTENSIONS = new Set([
+  '.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.docm', '.xlsm', '.pptm', '.one', '.vsdx', '.msg',
+  '.xlsb', '.pps', '.ppsx', '.ppsm', '.pot', '.potx', '.potm', '.dot', '.dotx', '.dotm', '.xlt', '.xltx', '.xltm',
+  '.htm', '.html', '.mht', '.mhtml',
+]);
 
 function extOf(p) {
   return path.posix.extname(String(p || '').replace(/\\/g, '/')).toLowerCase();
@@ -192,7 +196,22 @@ function describeTarget(job, mapping, outcome) {
 function describeSource(job, mapping) {
   if ((job.source_provider || 'sharepoint') === 'filesystem') return { kind: 'File share', where: job.source_path };
   const site = mapping?.source_site_name || job.source_site_url;
+  // A user's OneDrive is a personal SharePoint site on the -my host.
+  if (/-my\.sharepoint\.com\/personal\//i.test(String(job.source_site_url || ''))) {
+    return { kind: 'OneDrive', where: `${site} › ${job.source_path || job.source_library}` };
+  }
   return { kind: 'SharePoint Online', where: `${site} › ${job.source_library}${job.source_path ? `/${job.source_path}` : ''}` };
+}
+
+// A whole OneDrive (no sub-path) would otherwise be called "Documents" -
+// the person's name is what the client recognises.
+function displayName(job, mapping) {
+  const isOneDrive = /-my\.sharepoint\.com\/personal\//i.test(String(job.source_site_url || ''));
+  if (isOneDrive && !String(job.source_path || '').replace(/[\\/]/g, '')) {
+    const site = String(mapping?.source_site_name || '').replace(/\s*\(OneDrive\)\s*$/i, '').trim();
+    if (site) return `${site} (OneDrive)`;
+  }
+  return folderName(job);
 }
 
 function buildClientData(db, jobs) {
@@ -202,7 +221,7 @@ function buildClientData(db, jobs) {
     const mapping = job.mapping_id ? getMapping.get(job.mapping_id) : null;
     return {
       ...outcome,
-      name: folderName(job),
+      name: displayName(job, mapping),
       source: describeSource(job, mapping),
       target: describeTarget(job, mapping, outcome),
       completedAt: job.completed_at,

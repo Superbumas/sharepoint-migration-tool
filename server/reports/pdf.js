@@ -2,12 +2,17 @@
 // client-facing migration report (server/api/report.js). Pure JS, no browser
 // dependency, so either PDF can be attached to an email / filed as-is.
 
+// Knowall IT brand (knowall-branding skill): orange #EF5F24 accent and
+// title rule, #FDE4D6 table headers, #111111 headings, Knowall logo top-left,
+// "Knowall IT" + page number footer, dd/mm/yyyy dates. No navy.
 const COLORS = {
-  ink: '#1e293b', muted: '#64748b', faint: '#94a3b8',
-  line: '#e2e8f0', headBg: '#f1f5f9', zebra: '#f8fafc',
-  green: '#15803d', red: '#b91c1c', amber: '#b45309', blue: '#1d4ed8',
-  navy: '#0f2a4a', accent: '#2563eb', greenBg: '#ecfdf5', amberBg: '#fffbeb',
+  ink: '#111111', body: '#333333', muted: '#666666', faint: '#8c8c8c',
+  line: '#dddddd', headBg: '#FDE4D6', zebra: '#fafafa', track: '#f1f1f1',
+  green: '#15803d', red: '#b91c1c', amber: '#b45309',
+  accent: '#EF5F24', greenBg: '#ecfdf5', amberBg: '#fffbeb',
 };
+const LOGO_PATH = require('path').join(__dirname, 'assets', 'knowall-logo.png');
+const BRAND_NAME = 'Knowall IT';
 
 function formatBytes(n) {
   if (!n && n !== 0) return '-';
@@ -25,11 +30,11 @@ function parseDate(s) {
 function fmtDate(s) {
   const d = parseDate(s);
   if (!d) return s || '-';
-  return d.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' });
+  return d.toLocaleString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }).replace(',', '');
 }
 function fmtDay(s) {
   const d = s instanceof Date ? s : parseDate(s);
-  return d ? d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) : '-';
+  return d ? d.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '-';
 }
 function fmtDuration(ms) {
   if (!ms || ms < 0) return '-';
@@ -55,15 +60,49 @@ class Report {
   // lineBreak:false, which made long file paths spill into the row below.
   // Measure and hard-truncate (keeping the tail - the filename end is the
   // informative part of a path) before drawing.
-  fit(text, width, fontSize, font = 'Helvetica') {
+  fit(text, width, fontSize, font = 'Helvetica', keepStart = false) {
     const s = String(text ?? '');
     this.doc.font(font).fontSize(fontSize);
     if (this.doc.widthOfString(s) <= width) return s;
+    if (keepStart) {
+      // Names (not paths) read from the front: "Catherine James-Ol…".
+      let t = s;
+      while (t.length > 1 && this.doc.widthOfString(`${t}…`) > width) t = t.slice(0, -1);
+      return `${t.trimEnd()}…`;
+    }
     let t = s;
     while (t.length > 1 && this.doc.widthOfString(`…${t}`) > width) {
       t = t.slice(Math.max(1, Math.floor(t.length * 0.1)));
     }
     return `…${t}`;
+  }
+  // Knowall header: logo top-left, bold title, orange rule under it, then
+  // optional subtitle/meta lines. Leaves doc.y below the block.
+  brandHeader({ eyebrow, title, subtitle, meta } = {}) {
+    const { doc } = this;
+    const top = doc.page.margins.top - 18;
+    const logoW = 150;
+    try { doc.image(LOGO_PATH, this.left, top, { width: logoW }); } catch { /* logo missing: text-only header */ }
+    let y = top + logoW * (170 / 1000) + 26;
+    if (eyebrow) {
+      doc.font('Helvetica-Bold').fontSize(8.5).fillColor(COLORS.accent).text(eyebrow.toUpperCase(), this.left, y, { characterSpacing: 1.2, lineBreak: false });
+      y += 14;
+    }
+    doc.font('Helvetica-Bold').fontSize(22).fillColor(COLORS.ink)
+      .text(this.fit(title, this.width, 22, 'Helvetica-Bold', true), this.left, y, { width: this.width, lineBreak: false });
+    y += 30;
+    doc.moveTo(this.left, y).lineTo(this.left + this.width, y).lineWidth(2).strokeColor(COLORS.accent).stroke();
+    y += 9;
+    if (subtitle) {
+      doc.font('Helvetica').fontSize(10).fillColor(COLORS.body).text(subtitle, this.left, y, { width: this.width, lineBreak: false });
+      y += 15;
+    }
+    if (meta) {
+      doc.font('Helvetica').fontSize(8).fillColor(COLORS.muted).text(meta, this.left, y, { width: this.width, lineBreak: false });
+      y += 12;
+    }
+    doc.x = this.left;
+    doc.y = y + 10;
   }
   section(title, { color = COLORS.ink } = {}) {
     this.ensure(48);
@@ -74,7 +113,7 @@ class Report {
     doc.moveDown(0.5);
     doc.font('Helvetica');
   }
-  paragraph(text, { size = 9, color = COLORS.ink } = {}) {
+  paragraph(text, { size = 9, color = COLORS.body } = {}) {
     const { doc } = this;
     this.ensure(30);
     doc.font('Helvetica').fontSize(size).fillColor(color).text(text, this.left, doc.y, { width: this.width, lineGap: 2 });
@@ -127,7 +166,7 @@ class Report {
       const y = doc.y;
       doc.font('Helvetica').fontSize(8).fillColor(COLORS.ink)
         .text(this.fit(label, labelW - 6, 8), this.left, y + 1, { width: labelW - 6, lineBreak: false });
-      doc.roundedRect(this.left + labelW, y + 1, barW, 8, 2).fillColor(COLORS.headBg).fill();
+      doc.roundedRect(this.left + labelW, y + 1, barW, 8, 2).fillColor(COLORS.track).fill();
       const w = Math.max(2, (value / max) * barW);
       doc.roundedRect(this.left + labelW, y + 1, w, 8, 2).fillColor(color).fill();
       doc.fontSize(7.5).fillColor(COLORS.muted)
@@ -163,7 +202,7 @@ class Report {
       let x = this.left;
       headers.forEach((h, i) => {
         const fitted = this.fit(h, widths[i] - 8, fontSize, 'Helvetica-Bold');
-        doc.fontSize(fontSize).fillColor(COLORS.muted).font('Helvetica-Bold')
+        doc.fontSize(fontSize).fillColor(COLORS.ink).font('Helvetica-Bold')
           .text(fitted, x + 4, y + (rowH - fontSize) / 2 - 0.5, { width: widths[i] - 8, align: opts.aligns?.[i] || 'left', lineBreak: false });
         x += widths[i];
       });
@@ -182,7 +221,7 @@ class Report {
         const font = isObj && cell.bold ? 'Helvetica-Bold' : 'Helvetica';
         // fit() guarantees one line per cell - pdfkit wraps to `width` even
         // with lineBreak:false, which used to pile rows on top of each other.
-        const fitted = this.fit(isObj ? cell.text : cell, widths[i] - 8, fontSize, font);
+        const fitted = this.fit(isObj ? cell.text : cell, widths[i] - 8, fontSize, font, isObj && cell.keepStart);
         doc.font(font).fontSize(fontSize).fillColor(isObj && cell.color ? cell.color : COLORS.ink)
           .text(fitted, x + 4, y + (rowH - fontSize) / 2 - 0.5, { width: widths[i] - 8, align: opts.aligns?.[i] || 'left', lineBreak: false });
         x += widths[i];
@@ -201,11 +240,15 @@ class Report {
       // automatic page break and append a blank page per footer.
       const bottomMargin = doc.page.margins.bottom;
       doc.page.margins.bottom = 0;
-      doc.fontSize(7).fillColor(COLORS.faint).font('Helvetica').text(
-        `${label}  ·  page ${p + 1} of ${range.count}`,
-        this.left, doc.page.height - 36,
-        { width: this.width, align: 'center', lineBreak: false }
-      );
+      const fy = doc.page.height - 36;
+      doc.moveTo(this.left, fy - 7).lineTo(this.left + this.width, fy - 7).lineWidth(0.5).strokeColor(COLORS.line).stroke();
+      doc.font('Helvetica-Bold').fontSize(7).fillColor(COLORS.ink).text(BRAND_NAME, this.left, fy, { width: this.width / 4, lineBreak: false });
+      if (label) {
+        doc.font('Helvetica').fontSize(7).fillColor(COLORS.muted)
+          .text(this.fit(label, this.width / 2, 7, 'Helvetica', true), this.left + this.width / 4, fy, { width: this.width / 2, align: 'center', lineBreak: false });
+      }
+      doc.font('Helvetica').fontSize(7).fillColor(COLORS.muted)
+        .text(`Page ${p + 1} of ${range.count}`, this.left + (this.width * 3) / 4, fy, { width: this.width / 4, align: 'right', lineBreak: false });
       doc.page.margins.bottom = bottomMargin;
     }
   }

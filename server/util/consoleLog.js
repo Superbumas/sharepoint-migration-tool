@@ -66,7 +66,51 @@ function banner(url) {
   console.log('');
 }
 
+// Wipe the terminal (screen and scrollback) and redraw the banner, so each
+// job run starts on a clean console. Only on a real terminal: piped/redirected
+// output (a log file, a service) keeps everything. The audit log in the
+// database - which reports and exports read - is never affected.
+function clearScreen(url) {
+  if (!process.stdout.isTTY || process.env.SPMT_KEEP_CONSOLE === '1') return false;
+  process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
+  banner(url);
+  return true;
+}
+
+// Everything the terminal shows (these lines AND any raw console.* output
+// from elsewhere) is also appended, without colours, to a daily file under
+// <data dir>/logs/server-YYYY-MM-DD.log - so clearing the screen at a run
+// start never throws anything away.
+let fileLogDir = null;
+function installFileLog(dir) {
+  if (fileLogDir || process.env.SPMT_NO_FILE_LOG === '1') return;
+  const fs = require('node:fs');
+  const path = require('node:path');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch { return; }
+  fileLogDir = dir;
+  const strip = (t) => t.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/\x1bc/g, '');
+  const tee = (stream) => {
+    const orig = stream.write.bind(stream);
+    stream.write = (chunk, ...rest) => {
+      try {
+        const text = strip(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+        if (text) {
+          const d = new Date();
+          const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+          fs.appendFileSync(path.join(dir, `server-${day}.log`), text);
+        }
+      } catch { /* never let file logging break the terminal */ }
+      return orig(chunk, ...rest);
+    };
+  };
+  tee(process.stdout);
+  tee(process.stderr);
+}
+
 module.exports = {
+  clearScreen,
+  installFileLog,
+  logDir: () => fileLogDir,
   C,
   bar,
   spin,
