@@ -677,7 +677,8 @@ try {
         Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = 'Source cleanup started: each file is re-verified against its migrated copy right now, then moved to the source site recycle bin. Files that do not verify are kept.' }
 
         $srcDriveId = Get-GraphDriveId -Connection $sourceConn -SiteUrl $SourceSiteUrl -Library $SourceLibrary
-        $srcMap = Get-GraphFileMap -Connection $sourceConn -DriveId $srcDriveId -RootPath $SourcePath -OnProgress {
+        # Download links are kept for the content check of rewritten files.
+        $srcMap = Get-GraphFileMap -Connection $sourceConn -DriveId $srcDriveId -RootPath $SourcePath -IncludeDownloadUrl:(-not $isBlobTarget) -OnProgress {
             param($count)
             Write-PhaseProgress -Phase 'indexing_source' -Data @{ files = $count }
         }
@@ -686,17 +687,62 @@ try {
         $tgtMap = if ($isBlobTarget) {
             Get-BlobKeyMap -BlobEndpoint $blobCtx.BlobEndpoint -Container $blobCtx.Container -Sas $blobCtx.Sas -Prefix $blobCtx.Prefix
         } elseif ($isOneDriveTarget) {
-            Get-GraphFileMap -Connection $oneDriveCtx.Connection -DriveId $oneDriveCtx.DriveId -RootPath $oneDriveCtx.PathRoot -OnProgress $tgtProgress
+            Get-GraphFileMap -Connection $oneDriveCtx.Connection -DriveId $oneDriveCtx.DriveId -RootPath $oneDriveCtx.PathRoot -IncludeDownloadUrl -OnProgress $tgtProgress
         } else {
             $tgtDriveId = Get-GraphDriveId -Connection $targetConn -SiteUrl $effTargetSite -Library $effTargetLib
-            Get-GraphFileMap -Connection $targetConn -DriveId $tgtDriveId -RootPath $targetPathInLib -OnProgress $tgtProgress
+            Get-GraphFileMap -Connection $targetConn -DriveId $tgtDriveId -RootPath $targetPathInLib -IncludeDownloadUrl -OnProgress $tgtProgress
+        }
+
+        $officeExtensions = @('.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.docm', '.xlsm', '.pptm', '.one', '.vsdx', '.xlsb', '.pps', '.ppsx', '.ppsm', '.pot', '.potx', '.potm', '.dot', '.dotx', '.dotm', '.xlt', '.xltx', '.xltm', '.htm', '.html', '.mht', '.mhtml')
+
+        # --- Content proof for files SharePoint rewrote ------------------
+        # A rewritten Office file or web page can't be vouched for by size or
+        # hash, so its source is recycled ONLY if the content check (the same
+        # one verification uses, ContentCheck.psm1) proves the target copy
+        # identical right now. 'different' or 'could not be checked' keeps
+        # the source. Cached results are reused only while both hashes match.
+        $contentProven = [System.Collections.Generic.HashSet[string]]::new()
+        $contentReason = @{}
+        if (-not $isBlobTarget) {
+            $ccCache = @{}
+            if ($ContentCachePath -and (Test-Path $ContentCachePath)) {
+                try { (Get-Content $ContentCachePath -Raw | ConvertFrom-Json -AsHashtable).GetEnumerator() | ForEach-Object { $ccCache[$_.Key] = $_.Value } } catch {}
+            }
+            $todo = [System.Collections.Generic.List[object]]::new()
+            foreach ($rel in @($srcMap.Keys)) {
+                $s = $srcMap[$rel]; $t = $tgtMap[$rel]
+                if (-not $t) { continue }
+                if (-not ($officeExtensions -contains ([System.IO.Path]::GetExtension($rel).ToLowerInvariant()))) { continue }
+                if ([long]$s.Size -eq [long]$t.Size -and $s.Hash -and $t.Hash -and $s.Hash -eq $t.Hash) { continue }  # byte-identical, no rewrite
+                $key = "$rel|$($s.Hash)|$($s.Size)|$($t.Hash)|$($t.Size)"
+                if ($s.Hash -and $t.Hash -and $ccCache.ContainsKey($key)) {
+                    $c = $ccCache[$key]
+                    if ($c.Status -eq 'equivalent') { $null = $contentProven.Add($rel) } else { $contentReason[$rel] = "content check: $($c.Detail)" }
+                    continue
+                }
+                $todo.Add(@{ Rel = $rel; Key = $key; Ext = [System.IO.Path]::GetExtension($rel); Size = [long]$s.Size; SourceUrl = $s.DownloadUrl; TargetUrl = $t.DownloadUrl })
+            }
+            if ($todo.Count -gt 0) {
+                Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Cleanup check: comparing $($todo.Count) file(s) SharePoint rewrote part by part against their originals before anything is recycled..." }
+                $ccTotal = $todo.Count
+                $checked = Invoke-RewrittenContentCheck -Items $todo.ToArray() -OnProgress {
+                    param($n)
+                    Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal }
+                }
+                foreach ($c in $checked) {
+                    $ccCache[$c.Key] = @{ Status = $c.Status; Detail = $c.Detail }
+                    if ($c.Status -eq 'equivalent') { $null = $contentProven.Add($c.Rel) } else { $contentReason[$c.Rel] = "content check: $($c.Detail)" }
+                }
+                if ($ContentCachePath) {
+                    try { $ccCache | ConvertTo-Json -Depth 4 -Compress | Set-Content -Path $ContentCachePath -Encoding utf8 } catch {}
+                }
+            }
         }
         Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Cleanup check: $($srcMap.Count) source file(s) vs $($tgtMap.Count) migrated file(s). Re-verifying and recycling each file now..." }
 
-        # Same acceptance rule as verification: exact size+hash, hash
-        # unavailable degrades to size-only, and Office documents may differ
-        # (SharePoint property re-stamp) without failing.
-        $officeExtensions = @('.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.docm', '.xlsm', '.pptm', '.one', '.vsdx', '.xlsb', '.pps', '.ppsx', '.ppsm', '.pot', '.potx', '.potm', '.dot', '.dotx', '.dotm', '.xlt', '.xltx', '.xltm', '.htm', '.html', '.mht', '.mhtml')
+        # Same acceptance rule as verification: exact size+hash (hash
+        # unavailable degrades to size-only), and a rewritten Office file or
+        # web page only if the content check above proved it identical.
         $deleted = 0; $kept = 0
         $keptList = [System.Collections.Generic.List[string]]::new()
         foreach ($rel in @($srcMap.Keys)) {
@@ -709,10 +755,10 @@ try {
                         (-not $tgt.SourceMd5 -or -not $tgt.ContentMd5 -or $tgt.SourceMd5 -eq $tgt.ContentMd5)
                 } else {
                     $isOffice = $officeExtensions -contains ([System.IO.Path]::GetExtension($rel).ToLowerInvariant())
-                    if ([long]$src.Size -eq [long]$tgt.Size) {
-                        $verified = (-not $src.Hash -or -not $tgt.Hash) -or ($src.Hash -eq $tgt.Hash) -or $isOffice
-                    } elseif ($isOffice) {
-                        $verified = $true
+                    if ($isOffice) {
+                        $verified = ([long]$src.Size -eq [long]$tgt.Size -and $src.Hash -and $tgt.Hash -and $src.Hash -eq $tgt.Hash) -or $contentProven.Contains($rel)
+                    } elseif ([long]$src.Size -eq [long]$tgt.Size) {
+                        $verified = (-not $src.Hash -or -not $tgt.Hash) -or ($src.Hash -eq $tgt.Hash)
                     }
                 }
             }
@@ -732,7 +778,7 @@ try {
                 $kept++; $keptList.Add($rel)
                 Write-EngineEvent -Type 'source_kept' -Data @{
                     sourcePath = $serverRel
-                    reason = if ($tgt) { 'migrated copy does not match the source right now' } else { 'no migrated copy found at the target' }
+                    reason = if (-not $tgt) { 'no migrated copy found at the target' } elseif ($contentReason.ContainsKey($rel)) { "migrated copy not proven identical ($($contentReason[$rel]))" } else { 'migrated copy does not match the source right now' }
                 }
             }
             Write-PhaseProgress -Phase 'cleaning' -Data @{ deleted = $deleted; kept = $kept; total = $srcMap.Count }

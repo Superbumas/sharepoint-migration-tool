@@ -532,10 +532,17 @@ export default function JobDetail() {
   }
   // Source cleanup only exists for SharePoint sources - the engine never
   // deletes from a file share (no recycle bin to soften it).
-  if (job.status === 'completed' && !backgroundOp && v?.ok && !job.cleanup && job.source.provider !== 'filesystem') {
+  // Only offered from a verification that content-checked the files
+  // SharePoint rewrote (older ones only assumed them fine - click Verify).
+  const contentProven = v && (v.contentVerified != null || !(v.officeRewritten > 0));
+  if (job.status === 'completed' && !backgroundOp && v?.ok && contentProven && !job.cleanup && job.source.provider !== 'filesystem') {
     notices.push({
       key: 'archive', tone: 'info', title: 'Archive complete?',
-      detail: 'every file is hash-verified at the target · move the source files to the site\'s recycle bin (recoverable ~93 days), each re-verified once more at deletion time',
+      detail: [
+        'every file verified at the target (hash, or content for files SharePoint rewrote)',
+        v.contentUnchecked > 0 && `${v.contentUnchecked} file(s) not content-checked will be kept`,
+        'move the source files to the site\'s recycle bin (recoverable ~93 days), each re-verified once more at deletion time',
+      ].filter(Boolean).join(' · '),
       action: <button type="button" onClick={() => act('cleanup-source')} className="btn-danger shrink-0">Delete source files…</button>,
     });
   }
