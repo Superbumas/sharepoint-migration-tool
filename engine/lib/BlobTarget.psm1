@@ -282,7 +282,7 @@ function Test-BlobTargetMatches {
             $modifiedMeta = $resp.Headers['x-ms-meta-modified'] | Select-Object -First 1
             if ($modifiedMeta) {
                 $targetModified = [datetime]$modifiedMeta
-                if ($targetModified -lt ([datetime]$SourceModified).AddSeconds(-5))  # 5s: file vs list-item timestamps can differ by ~1s { return $false }
+                if ($targetModified -lt ([datetime]$SourceModified).AddSeconds(-5)) { return $false }  # 5s: file vs list-item timestamps can differ by ~1s
             }
         }
         return $true

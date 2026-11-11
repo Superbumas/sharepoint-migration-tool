@@ -101,7 +101,7 @@ function Test-OneDriveTargetMatches {
     }
     if ([long]$item.size -ne $ExpectedSize) { return $false }
     if ($SourceModified -and $item.lastModifiedDateTime) {
-        if ([datetime]$item.lastModifiedDateTime -lt ([datetime]$SourceModified).AddSeconds(-5))  # 5s: file vs list-item timestamps can differ by ~1s { return $false }
+        if ([datetime]$item.lastModifiedDateTime -lt ([datetime]$SourceModified).AddSeconds(-5)) { return $false }  # 5s: file vs list-item timestamps can differ by ~1s
     }
     return $true
 }

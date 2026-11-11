@@ -29,7 +29,7 @@ function Test-PnPTargetFileMatches {
         if ($SourceModified) {
             $targetModified = $null
             try { $targetModified = $existing.TimeLastModified } catch {}
-            if ($targetModified -and $targetModified -lt ([datetime]$SourceModified).AddSeconds(-5))  # 5s: file vs list-item timestamps can differ by ~1s { return $false }
+            if ($targetModified -and $targetModified -lt ([datetime]$SourceModified).AddSeconds(-5)) { return $false }  # 5s: file vs list-item timestamps can differ by ~1s
         }
         return $true
     } catch {
@@ -91,11 +91,15 @@ function Get-GraphFileMap {
         # Forwarded to Invoke-WithRetry - see its own doc comment. Optional:
         # a caller that doesn't care about visibility into individual page
         # retries can simply omit it.
-        [scriptblock]$OnRetry
+        [scriptblock]$OnRetry,
+        # Adds each file's pre-authenticated download link (valid ~1 hour) -
+        # used by the content check of files SharePoint rewrites.
+        [switch]$IncludeDownloadUrl
     )
     $root = $RootPath.Trim('/')
     $select = 'name,size,file,folder'
     if ($IncludeDetails) { $select += ',createdDateTime,lastModifiedDateTime,createdBy,lastModifiedBy' }
+    if ($IncludeDownloadUrl) { $select += ',@microsoft.graph.downloadUrl' }
     $map = @{}
     $stack = [System.Collections.Generic.Stack[string]]::new()
     $stack.Push($root)
@@ -124,6 +128,7 @@ function Get-GraphFileMap {
                 } else {
                     $rel = if ($root) { $childPath.Substring($root.Length).TrimStart('/') } else { $childPath }
                     $entry = @{ Size = [long]$item.size; Hash = $item.file.hashes.quickXorHash }
+                    if ($IncludeDownloadUrl) { $entry.DownloadUrl = $item.'@microsoft.graph.downloadUrl' }
                     if ($IncludeDetails) {
                         $entry.Created = if ($item.createdDateTime) { [datetime]$item.createdDateTime } else { $null }
                         $entry.Modified = if ($item.lastModifiedDateTime) { [datetime]$item.lastModifiedDateTime } else { $null }
