@@ -626,6 +626,8 @@ function Invoke-RewrittenContentCheck {
                         return @{ Rel = $it.Rel; Key = $it.Key; Size = $it.Size; Status = 'unchecked'; Detail = 'too large for a content check' }
                     }
                     # Plain assignments: an if-expression enumerates a byte[] into an object[]
+                    # (millions of boxed bytes - minutes of CPU and GBs of memory on a big file).
+                    if ($it.SourceFile) { $src = [System.IO.File]::ReadAllBytes($it.SourceFile) } else { $src = Get-HttpBytes $http $it.SourceUrl $gate }
                     $tgt = Get-HttpBytes $http $it.TargetUrl $gate
                 } finally { $http.Dispose() }
                 $r = Test-RewrittenFileContent -SourceBytes $src -TargetBytes $tgt -Extension $it.Ext
