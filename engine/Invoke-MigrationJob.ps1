@@ -131,6 +131,14 @@ param(
     # job_* lifecycle events - a re-verification must not change a completed
     # job's status.
     [switch]$VerifyOnly,
+    # Targeted repair ("Repair N files" on the job page): re-copy only the
+    # files the last verification flagged (read from -RepairFromPath, that
+    # verification's summary JSON), restore their original dates/people,
+    # re-check only those files, and emit the merged verification summary.
+    # No enumeration, pre-flight, folder pass or full index. Like -VerifyOnly
+    # it never emits job_* lifecycle events.
+    [switch]$RepairOnly,
+    [string]$RepairFromPath,
     # Archive-move semantics: for every source file whose migrated copy
     # re-verifies RIGHT NOW (existence + size + hash rule, same as the
     # verification phase), move the source file to the site RECYCLE BIN
@@ -313,6 +321,20 @@ function Invoke-VerificationPhase {
         $isFsSource = $SourceProvider -eq 'filesystem'
         $hashLabel = if ($isBlob) { 'MD5' } else { 'QuickXorHash' }
         Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Verifying migration: comparing existence, size and content hash ($hashLabel) of every source file against its copy..." }
+        # Listing both trees can take minutes on a big library: heartbeat the
+        # job page's progress card on every Graph page, and put a line in the
+        # live log at most every 15 s so the log doesn't look frozen.
+        $vProgress = @{ LogAt = (Get-Date) }
+        $idxSrc = {
+            param($count)
+            Write-PhaseProgress -Phase 'indexing_source' -Data @{ files = $count }
+            if (((Get-Date) - $vProgress.LogAt).TotalSeconds -ge 15) { $vProgress.LogAt = Get-Date; Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Verify: listed $count source file(s) so far..." } }
+        }
+        $idxTgt = {
+            param($count)
+            Write-PhaseProgress -Phase 'indexing_target' -Data @{ files = $count }
+            if (((Get-Date) - $vProgress.LogAt).TotalSeconds -ge 15) { $vProgress.LogAt = Get-Date; Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Verify: listed $count migrated file(s) at the target so far..." } }
+        }
         $result = if ($isOneDrive) {
             # Both sides come from Graph (Get-GraphFileMap), so this is the
             # same generic hash-based comparator every SharePoint target
@@ -326,9 +348,9 @@ function Invoke-VerificationPhase {
                 }
             } else {
                 $srcDriveId = Get-GraphDriveId -Connection $SourceConn -SiteUrl $SourceSite -Library $SourceLib
-                Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib -IncludeDownloadUrl
+                Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib -IncludeDownloadUrl -OnProgress $idxSrc
             }
-            $tgtMap = Get-GraphFileMap -Connection $OneDriveCtx.Connection -DriveId $OneDriveCtx.DriveId -RootPath $OneDriveCtx.PathRoot -IncludeDownloadUrl
+            $tgtMap = Get-GraphFileMap -Connection $OneDriveCtx.Connection -DriveId $OneDriveCtx.DriveId -RootPath $OneDriveCtx.PathRoot -IncludeDownloadUrl -OnProgress $idxTgt
             Compare-MigratedFileMaps -SourceMap $srcMap -TargetMap $tgtMap
         } elseif ($isFsSource) {
             # Local QuickXorHash of every source file vs the hash SharePoint
@@ -339,11 +361,11 @@ function Invoke-VerificationPhase {
                 Write-PhaseProgress -Phase 'hashing_source' -Data @{ files = $count }
             }
             $tgtDriveId = Get-GraphDriveId -Connection $TargetConn -SiteUrl $TargetSite -Library $TargetLib
-            $tgtMap = Get-GraphFileMap -Connection $TargetConn -DriveId $tgtDriveId -RootPath $TargetPathInLib -IncludeDownloadUrl
+            $tgtMap = Get-GraphFileMap -Connection $TargetConn -DriveId $tgtDriveId -RootPath $TargetPathInLib -IncludeDownloadUrl -OnProgress $idxTgt
             Compare-MigratedFileMaps -SourceMap $srcMap -TargetMap $tgtMap
         } elseif ($isBlob) {
             $srcDriveId = Get-GraphDriveId -Connection $SourceConn -SiteUrl $SourceSite -Library $SourceLib
-            $srcMap = Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib
+            $srcMap = Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib -OnProgress $idxSrc
             $tgtMap = Get-BlobKeyMap -BlobEndpoint $BlobCtx.BlobEndpoint -Container $BlobCtx.Container -Sas $BlobCtx.Sas -Prefix $BlobCtx.Prefix
             Compare-BlobMigratedTree -SourceMap $srcMap -TargetMap $tgtMap
         } else {
@@ -351,8 +373,8 @@ function Invoke-VerificationPhase {
             # download links included) for the rewritten-file content check.
             $srcDriveId = Get-GraphDriveId -Connection $SourceConn -SiteUrl $SourceSite -Library $SourceLib
             $tgtDriveId = Get-GraphDriveId -Connection $TargetConn -SiteUrl $TargetSite -Library $TargetLib
-            $srcMap = Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib -IncludeDownloadUrl
-            $tgtMap = Get-GraphFileMap -Connection $TargetConn -DriveId $tgtDriveId -RootPath $TargetPathInLib -IncludeDownloadUrl
+            $srcMap = Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib -IncludeDownloadUrl -OnProgress $idxSrc
+            $tgtMap = Get-GraphFileMap -Connection $TargetConn -DriveId $tgtDriveId -RootPath $TargetPathInLib -IncludeDownloadUrl -OnProgress $idxTgt
             Compare-MigratedFileMaps -SourceMap $srcMap -TargetMap $tgtMap
         }
 
@@ -402,10 +424,17 @@ function Invoke-VerificationPhase {
                     $m = Get-GraphFileMap -Connection $ccTgtLinks.Conn -DriveId $ccTgtLinks.Drive -RootPath $ccTgtLinks.Root -IncludeDownloadUrl; foreach ($k in @($m.Keys)) { $out.Target[$k] = $m[$k].DownloadUrl }
                     $out
                 }
-                $checked = Invoke-RewrittenContentCheck -Items $todo.ToArray() -RefreshLinks $ccRefresh -OnProgress {
-                    param($n, $bytes, $rel, $throttleWait)
+                # -Cache/-CachePath: results are saved as they arrive (every
+                # 25), so a server restart mid-check keeps finished files.
+                $ccLog = @{ At = (Get-Date) }
+                $checked = Invoke-RewrittenContentCheck -Items $todo.ToArray() -RefreshLinks $ccRefresh -Cache $ccCache -CachePath $ccCachePath -OnProgress {
+                    param($n, $bytes, $rel, $throttleWait, $current, $currentBytes)
                     if ($throttleWait) { Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Content check: throttled by SharePoint, pausing about $($throttleWait)s and retrying (nothing is skipped)." } }
-                    Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal; bytesDone = $bytes; bytesTotal = $ccTotalBytes; last = $rel }
+                    Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal; bytesDone = $bytes; bytesTotal = $ccTotalBytes; last = $rel; current = $current; currentBytes = $currentBytes }
+                    if (((Get-Date) - $ccLog.At).TotalSeconds -ge 15) {
+                        $ccLog.At = Get-Date
+                        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Content check: $n of $ccTotal checked ($([Math]::Round($bytes / 1MB)) of $([Math]::Round($ccTotalBytes / 1MB)) MB)$(if ($current) { " · now: $(($current -split '/')[-1]) ($([Math]::Max(1, [Math]::Round($currentBytes / 1MB))) MB)" })" }
+                    }
                 }
                 foreach ($c in $checked) {
                     if (-not (Test-TransientContentResult $c)) { $ccCache[$c.Key] = @{ Status = $c.Status; Detail = $c.Detail } }
@@ -654,6 +683,155 @@ try {
         exit 0
     }
 
+    if ($RepairOnly) {
+        # --- Targeted repair ("Repair N files") ------------------------------
+        # Re-copies only the files the last verification flagged, puts their
+        # original dates and people back, re-checks only those files (hash, and
+        # the content check for files SharePoint rewrites) and emits the
+        # previous verification summary with those files' outcomes merged in.
+        # No enumeration, pre-flight, folder pass or full index - seconds for a
+        # handful of files whatever the library size.
+        if ($isFsSource -or $isBlobTarget -or $isOneDriveTarget) {
+            Write-EngineEvent -Type 'log' -Data @{ level = 'error'; message = 'Repairing individual files is available for SharePoint/OneDrive to SharePoint jobs - use "Full re-run" for this job.' }
+            exit 0
+        }
+        $prev = Get-Content -LiteralPath $RepairFromPath -Raw | ConvertFrom-Json -AsHashtable
+        $prevReason = @{}
+        foreach ($p in @($prev.problems)) { if ($p.path -and -not $prevReason.ContainsKey($p.path)) { $prevReason[$p.path] = "$($p.reason)" } }
+        $paths = @($prevReason.Keys)
+        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Repair: re-copying $($paths.Count) file(s) that failed verification, then re-checking only those files..." }
+        $srcDriveId = Get-GraphDriveId -Connection $sourceConn -SiteUrl $SourceSiteUrl -Library $SourceLibrary
+        $tgtDriveId = Get-GraphDriveId -Connection $targetConn -SiteUrl $effTargetSite -Library $effTargetLib
+        $graphItem = {
+            param($Conn, $Drive, $Root, $Rel)
+            $p = (@($Root, $Rel) | Where-Object { $_ }) -join '/'
+            try { Invoke-PnPGraphMethod -Url "v1.0/drives/$Drive/root:/$(ConvertTo-BlobEscapedKey -Key $p.Trim('/'))" -Connection $Conn -ErrorAction Stop } catch { $null }
+        }
+        $repairList = $null
+        $done = 0
+        foreach ($rel in $paths) {
+            Write-PhaseProgress -Phase 'repairing' -Data @{ done = $done; total = $paths.Count; current = $rel }
+            $done++
+            $s = & $graphItem $sourceConn $srcDriveId $SourcePath $rel
+            if (-not $s -or -not $s.file) {
+                Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Repair: '$rel' no longer exists at the source - nothing to copy." }
+                continue
+            }
+            $leaf = ($rel -split '/')[-1]
+            $relDir = if ($rel.Contains('/')) { $rel.Substring(0, $rel.LastIndexOf('/')) } else { '' }
+            $tgtFolderWebRel = (@($targetRoot, $relDir) | Where-Object { $_ }) -join '/'
+            try {
+                # Exact bytes: download from the source through Graph (name-
+                # and encoding-proof) and upload with Add-PnPFile. A server-
+                # side copy is what produced the bad copy in the first place,
+                # so it is not tried again here.
+                Invoke-WithRetry -MaxAttempts 3 -Action {
+                    $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ('mig-repair-' + [guid]::NewGuid().ToString('N'))
+                    $null = New-Item -ItemType Directory -Path $tmpDir -Force
+                    try {
+                        $tmpFile = Join-Path $tmpDir $leaf
+                        Save-GraphFileToPath -Connection $sourceConn -DriveId $srcDriveId -RelPath ((@($SourcePath, $rel) | Where-Object { $_ }) -join '/') -OutFile $tmpFile
+                        $stream = [System.IO.File]::OpenRead($tmpFile)
+                        try { Add-PnPFile -FileName $leaf -Folder $tgtFolderWebRel -Stream $stream -Connection $targetConn -ErrorAction Stop | Out-Null }
+                        finally { $stream.Dispose() }
+                    } finally { Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
+                }
+                # Original created/modified and people, from the source item.
+                try {
+                    if (-not $repairList) { $repairList = Get-PnPList -Identity (($targetRoot -split '/')[0]) -Connection $targetConn -ErrorAction Stop }
+                    $vals = @{}; $ppl = @{}
+                    if ($s.createdDateTime) { $vals['Created'] = [datetime]$s.createdDateTime }
+                    if ($s.lastModifiedDateTime) { $vals['Modified'] = [datetime]$s.lastModifiedDateTime }
+                    if ($s.createdBy.user.email) { $ppl['Author'] = $s.createdBy.user.email }
+                    if ($s.lastModifiedBy.user.email) { $ppl['Editor'] = $s.lastModifiedBy.user.email }
+                    $fileRef = "$targetSiteServerRelative/$targetRoot/$rel".Replace('//', '/')
+                    $esc = [System.Security.SecurityElement]::Escape($fileRef)
+                    $li = Get-PnPListItem -List $repairList -Query "<View Scope='RecursiveAll'><Query><Where><Eq><FieldRef Name='FileRef'/><Value Type='Text'>$esc</Value></Eq></Where></Query><RowLimit>1</RowLimit></View>" -Connection $targetConn -ErrorAction Stop | Select-Object -First 1
+                    if ($li -and ($vals.Count + $ppl.Count) -gt 0) {
+                        try { Set-PnPListItem -List $repairList -Identity $li.Id -Values ($vals + $ppl) -Connection $targetConn -ErrorAction Stop | Out-Null }
+                        catch { if ($vals.Count) { Set-PnPListItem -List $repairList -Identity $li.Id -Values $vals -Connection $targetConn -ErrorAction Stop | Out-Null } }
+                    }
+                } catch {
+                    Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Repair: re-copied '$rel' but could not restore its original dates/people: $($_.Exception.Message)" }
+                }
+                Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Repair: re-copied '$rel' (exact bytes)." }
+            } catch {
+                Write-EngineEvent -Type 'log' -Data @{ level = 'error'; message = "Repair: re-copy FAILED for '$rel': $($_.Exception.Message)" }
+            }
+        }
+
+        # Re-check only the repaired files: both sides read fresh from Graph.
+        Write-PhaseProgress -Phase 'repairing' -Data @{ done = $paths.Count; total = $paths.Count; current = $null; checking = $true }
+        $srcMap = @{}; $tgtMap = @{}
+        foreach ($rel in $paths) {
+            $s = & $graphItem $sourceConn $srcDriveId $SourcePath $rel
+            $t = & $graphItem $targetConn $tgtDriveId $targetPathInLib $rel
+            if ($s -and $s.file) { $srcMap[$rel] = @{ Size = [long]$s.size; Hash = $s.file.hashes.quickXorHash; DownloadUrl = $s.'@microsoft.graph.downloadUrl' } }
+            if ($t -and $t.file) { $tgtMap[$rel] = @{ Size = [long]$t.size; Hash = $t.file.hashes.quickXorHash; DownloadUrl = $t.'@microsoft.graph.downloadUrl' } }
+        }
+        $cmp = Compare-MigratedFileMaps -SourceMap $srcMap -TargetMap $tgtMap
+        $content = @{}
+        if ($cmp.OfficeRewritten.Count -gt 0) {
+            $ccCache = @{}
+            if ($ContentCachePath -and (Test-Path $ContentCachePath)) {
+                try { (Get-Content $ContentCachePath -Raw | ConvertFrom-Json -AsHashtable).GetEnumerator() | ForEach-Object { $ccCache[$_.Key] = $_.Value } } catch {}
+            }
+            $todo = foreach ($rel in $cmp.OfficeRewritten) {
+                $s = $srcMap[$rel]; $t = $tgtMap[$rel]
+                @{ Rel = $rel; Key = "$rel|$($s.Hash)|$($s.Size)|$($t.Hash)|$($t.Size)"; Ext = [System.IO.Path]::GetExtension($rel); Size = [long]$s.Size; SourceUrl = $s.DownloadUrl; TargetUrl = $t.DownloadUrl }
+            }
+            foreach ($c in (Invoke-RewrittenContentCheck -Items @($todo) -Cache $ccCache -CachePath $ContentCachePath)) { $content[$c.Rel] = $c }
+        }
+
+        # Merge each repaired file's new outcome into the previous summary.
+        $sum = $prev
+        $counter = @{ missing = 'missing'; size = 'sizeMismatch'; hash = 'hashMismatch' }
+        $rewrittenExt = @('.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.docm', '.xlsm', '.pptm', '.one', '.vsdx', '.msg', '.xlsb', '.pps', '.ppsx', '.ppsm', '.pot', '.potx', '.potm', '.dot', '.dotx', '.dotm', '.xlt', '.xltx', '.xltm', '.htm', '.html', '.mht', '.mhtml')
+        $remaining = [System.Collections.Generic.List[object]]::new()
+        $unchecked = [System.Collections.Generic.List[object]]::new(); foreach ($u in @($sum.contentUncheckedList)) { if ($u) { $unchecked.Add($u) } }
+        $fixed = 0
+        foreach ($rel in $paths) {
+            $old = $prevReason[$rel]
+            if ($counter.ContainsKey($old)) { $sum[$counter[$old]] = [Math]::Max(0, [int]$sum[$counter[$old]] - 1) }
+            # officeRewritten counts only rewritten files WITHOUT a problem, so a
+            # flagged file was never in it - a repaired one that comes back
+            # rewritten-but-identical-in-content is added to it.
+            $wasRewrittenCounted = $false
+            $new = $null; $detail = $null
+            if (-not $srcMap.ContainsKey($rel)) { $new = 'gone' }
+            elseif ($cmp.Missing -contains $rel) { $new = 'missing' }
+            elseif ($cmp.SizeMismatch -contains $rel) { $new = 'size' }
+            elseif ($cmp.HashMismatch -contains $rel) { $new = 'hash' }
+            elseif ($cmp.OfficeRewritten -contains $rel) {
+                $c = $content[$rel]
+                if ($c -and $c.Status -eq 'equivalent') { $new = 'content-ok' }
+                elseif ($c -and $c.Status -eq 'different') { $new = 'hash'; $detail = $c.Detail }
+                else { $new = 'unchecked'; $detail = if ($c) { $c.Detail } else { 'not checked' } }
+            } else { $new = 'identical' }
+            switch ($new) {
+                'gone' { if ($wasRewrittenCounted) { $sum.officeRewritten = [Math]::Max(0, [int]$sum.officeRewritten - 1) }; Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Repair: '$rel' is no longer at the source, so it is no longer checked." } }
+                'identical' { $sum.identical = [int]$sum.identical + 1; if ($wasRewrittenCounted) { $sum.officeRewritten = [Math]::Max(0, [int]$sum.officeRewritten - 1) }; $fixed++; Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Repair: '$rel' now verified identical (hash)." } }
+                'content-ok' { $sum.contentVerified = [int]$sum.contentVerified + 1; if (-not $wasRewrittenCounted) { $sum.officeRewritten = [int]$sum.officeRewritten + 1 }; $fixed++; Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Repair: '$rel' now verified identical in content." } }
+                'unchecked' { $sum.contentUnchecked = [int]$sum.contentUnchecked + 1; if (-not $wasRewrittenCounted) { $sum.officeRewritten = [int]$sum.officeRewritten + 1 }; $unchecked.Add(@{ path = $rel; detail = $detail }); Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Repair: '$rel' re-copied but could not be content-checked - $detail" } }
+                default {
+                    $sum[$counter[$new]] = [int]$sum[$counter[$new]] + 1
+                    $remaining.Add(@{ path = $rel; reason = $new })
+                    Write-EngineEvent -Type 'verify_mismatch' -Data @{ level = 'error'; reason = $new; sourcePath = $rel; message = "STILL FAILS after repair ($new$(if ($detail) { ": $detail" })): $rel" }
+                }
+            }
+        }
+        $sum.problems = @($remaining)
+        $sum.contentUncheckedList = @($unchecked | Select-Object -First 200)
+        $problems = [int]$sum.missing + [int]$sum.sizeMismatch + [int]$sum.hashMismatch
+        $sum.ok = ($problems -eq 0)
+        $sum.problemsTruncated = $false
+        Write-EngineEvent -Type 'verification_summary' -Data @{ verification = $sum }
+        $verdict = if ($problems -gt 0) { "FOUND $problems PROBLEM(S)" } elseif ([int]$sum.contentUnchecked -gt 0) { "PASSED, BUT $($sum.contentUnchecked) FILE(S) NOT YET CONTENT-CHECKED (click Verify again to check only those)" } else { 'PASSED' }
+        Write-EngineEvent -Type 'log' -Data @{ level = ($problems -eq 0 ? 'info' : 'error'); message = "Repair done: $fixed of $($paths.Count) file(s) fixed. Verification ${verdict}: $($sum.identical) of $($sum.sourceFiles) files verified identical (hash), $($sum.contentVerified) re-stamped by SharePoint and verified identical in content, $($sum.contentUnchecked) re-stamped but not content-checked, $($sum.missing) missing, $($sum.sizeMismatch) size / $($sum.hashMismatch) content mismatches." }
+        exit 0
+    }
+
+
     if ($PurgeRecycleBin) {
         # --- Permanent purge of this job's recycled items -------------------
         # Recycled files still count toward the site's storage quota (first
@@ -748,10 +926,15 @@ try {
                     $m = Get-GraphFileMap -Connection $ccTgtLinks.Conn -DriveId $ccTgtLinks.Drive -RootPath $ccTgtLinks.Root -IncludeDownloadUrl; foreach ($k in @($m.Keys)) { $out.Target[$k] = $m[$k].DownloadUrl }
                     $out
                 }
-                $checked = Invoke-RewrittenContentCheck -Items $todo.ToArray() -RefreshLinks $ccRefresh -OnProgress {
-                    param($n, $bytes, $rel, $throttleWait)
+                $ccLog = @{ At = (Get-Date) }
+                $checked = Invoke-RewrittenContentCheck -Items $todo.ToArray() -RefreshLinks $ccRefresh -Cache $ccCache -CachePath $ContentCachePath -OnProgress {
+                    param($n, $bytes, $rel, $throttleWait, $current, $currentBytes)
                     if ($throttleWait) { Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Content check: throttled by SharePoint, pausing about $($throttleWait)s and retrying (nothing is skipped)." } }
-                    Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal; bytesDone = $bytes; bytesTotal = $ccTotalBytes; last = $rel }
+                    Write-PhaseProgress -Phase 'content_check' -Data @{ done = $n; total = $ccTotal; bytesDone = $bytes; bytesTotal = $ccTotalBytes; last = $rel; current = $current; currentBytes = $currentBytes }
+                    if (((Get-Date) - $ccLog.At).TotalSeconds -ge 15) {
+                        $ccLog.At = Get-Date
+                        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Cleanup check: $n of $ccTotal checked ($([Math]::Round($bytes / 1MB)) of $([Math]::Round($ccTotalBytes / 1MB)) MB)$(if ($current) { " · now: $(($current -split '/')[-1]) ($([Math]::Max(1, [Math]::Round($currentBytes / 1MB))) MB)" })" }
+                    }
                 }
                 foreach ($c in $checked) {
                     if (-not (Test-TransientContentResult $c)) { $ccCache[$c.Key] = @{ Status = $c.Status; Detail = $c.Detail } }

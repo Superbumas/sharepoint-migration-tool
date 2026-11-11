@@ -19,6 +19,7 @@ const EVENT_STYLE = {
   verify_mismatch: { badge: '⚠ verify', badgeClass: 'bg-red-500/20 text-red-400 font-semibold', rowClass: 'text-red-300', rowBg: 'bg-red-500/10' },
   verification_summary: { badge: '🛡 verify', badgeClass: 'bg-sky-500/15 text-sky-400', rowClass: 'text-sky-300' },
   verify_started: { badge: '🛡 verify', badgeClass: 'bg-sky-500/15 text-sky-400', rowClass: 'text-sky-300' },
+  repair_started: { badge: '🔧 repair', badgeClass: 'bg-sky-500/15 text-sky-400', rowClass: 'text-sky-300' },
   preflight_started: { badge: '✈ pre-flight', badgeClass: 'bg-sky-500/15 text-sky-400', rowClass: 'text-sky-300' },
   preflight_report: { badge: '✈ pre-flight', badgeClass: 'bg-sky-500/15 text-sky-400', rowClass: 'text-sky-300' },
   job_created: { badge: '● created', badgeClass: 'text-slate-300 font-semibold', rowClass: 'text-slate-300' },
@@ -58,7 +59,7 @@ function styleFor(line) {
 // Failures/Warnings counts start from the latest one.
 // Verify / clean-up / purge on a finished job also start a fresh view, so a
 // Verify doesn't sit under the previous run's copied lines.
-const RUN_START_EVENTS = new Set(['job_restarted', 'job_run', 'job_resumed', 'verify_started', 'cleanup_started', 'purge_started']);
+const RUN_START_EVENTS = new Set(['job_restarted', 'job_run', 'job_resumed', 'verify_started', 'repair_started', 'cleanup_started', 'purge_started']);
 
 // Human line for the phase banner, per engine phase_progress event shape
 // (engine/Invoke-MigrationJob.ps1's Write-PhaseProgress call sites).
@@ -79,8 +80,10 @@ function phaseLabel(phase) {
       return `Cleaning source — ${n(phase.deleted)} recycled · ${n(phase.kept)} kept of ${n(phase.total)}`;
     case 'stamping_folders':
       return `Restoring folder dates and owners — ${n(phase.done)} of ${n(phase.total)}`;
+    case 'repairing':
+      return phase.checking ? 'Repairing failed files — re-checking the repaired files…' : `Repairing failed files — ${n(phase.done)} of ${n(phase.total)}${phase.current ? ` · ${String(phase.current).split('/').pop()}` : ''}`;
     case 'content_check':
-      return `Checking content of files SharePoint rewrote — ${n(phase.done)} of ${n(phase.total)}${phase.bytesTotal ? ` · ${formatBytes(phase.bytesDone || 0)} of ${formatBytes(phase.bytesTotal)}` : ''}${phase.last ? ` · last: ${String(phase.last).split('/').pop()}` : ''}`;
+      return `Checking content of files SharePoint rewrote — ${n(phase.done)} of ${n(phase.total)}${phase.bytesTotal ? ` · ${formatBytes(phase.bytesDone || 0)} of ${formatBytes(phase.bytesTotal)}` : ''}${phase.current ? ` · checking now: ${String(phase.current).split('/').pop()} (${formatBytes(phase.currentBytes || 0)})` : phase.last ? ` · last: ${String(phase.last).split('/').pop()}` : ''}`;
     case 'purging':
       return `Purging recycle bin — ${n(phase.purged)} of ${n(phase.total)} permanently deleted`;
     case 'clearing_folders':
@@ -480,13 +483,16 @@ export default function JobDetail() {
   const backgroundOp = job.status === 'completed' && (!!job.activeOperation || !!job.phase);
   // While a Verify / clean-up / pre-flight runs, the progress card shows
   // that run, not the finished copy's "Completed — N of N".
-  const OP_LABELS = { verify: 'Verifying', preflight: 'Pre-flight check', cleanup: 'Cleaning source', purge: 'Purging recycle bin' };
+  const OP_LABELS = { verify: 'Verifying', repair: 'Repairing failed files', preflight: 'Pre-flight check', cleanup: 'Cleaning source', purge: 'Purging recycle bin' };
   const opPhase = backgroundOp ? job.phase : null;
   const opDone = opPhase ? (opPhase.done ?? opPhase.deleted ?? opPhase.purged) : null;
   const opTotal = opPhase?.total || null;
   const opPct = opTotal ? Math.min(100, ((opDone || 0) / opTotal) * 100) : null;
   if (job.activeOperation === 'verify') {
     notices.push({ key: 'verifying', tone: 'info', title: 'Verifying now', detail: 'every file is being re-checked against its copy · the result appears here when it finishes' });
+  }
+  if (job.activeOperation === 'repair') {
+    notices.push({ key: 'verifying', tone: 'info', title: 'Repairing now', detail: 're-copying and re-checking only the files the last verification flagged · the result appears here when it finishes' });
   }
   if (v) {
     notices.push({
@@ -504,7 +510,10 @@ export default function JobDetail() {
           {!v.ok && v.problems?.length > 0 && (
             <button type="button" onClick={() => setShowProblems((s) => !s)} className="text-xs font-medium text-blue-600 hover:underline shrink-0">{showProblems ? 'Hide files' : `Show ${v.problems.length} files`}</button>
           )}
-          {!v.ok && job.status === 'completed' && !backgroundOp && <button type="button" onClick={() => act('restart')} className="btn-primary shrink-0">Re-run to repair…</button>}
+          {!v.ok && job.status === 'completed' && !backgroundOp && v.problems?.length > 0 && !v.problemsTruncated && (job.source.provider || 'sharepoint') === 'sharepoint' && (job.target.provider || 'sharepoint') === 'sharepoint' && (
+            <button type="button" disabled={busy} onClick={() => act('repair-files')} className="btn-primary shrink-0" title="Re-copy and re-check only these files - no full scan">Repair {v.problems.length} file{v.problems.length === 1 ? '' : 's'}</button>
+          )}
+          {!v.ok && job.status === 'completed' && !backgroundOp && <button type="button" onClick={() => act('restart')} className="btn-secondary shrink-0" title="Re-run the whole job: scan, copy what differs, verify everything">Full re-run…</button>}
         </>
       ),
       expanded: !v.ok && showProblems && v.problems?.length > 0 && (

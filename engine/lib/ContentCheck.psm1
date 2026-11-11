@@ -299,7 +299,7 @@ function Get-HttpBytes([System.Net.Http.HttpClient]$Http, [string]$Url, $Gate) {
     $resp = Send-HttpWithRetry $Http $Url $null $Gate
     try {
         if (-not $resp.IsSuccessStatusCode) { throw "download returned $([int]$resp.StatusCode) ($($resp.ReasonPhrase))" }
-        return $resp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+        return , $resp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
     } finally { $resp.Dispose() }
 }
 function Read-ZipRange([hashtable]$Ref, [long]$Offset, [long]$Count) {
@@ -310,7 +310,7 @@ function Read-ZipRange([hashtable]$Ref, [long]$Offset, [long]$Count) {
             $null = $fs.Seek($Offset, 'Begin'); $buf = [byte[]]::new($Count); $read = 0
             while ($read -lt $Count) { $n = $fs.Read($buf, $read, $Count - $read); if ($n -le 0) { break }; $read += $n }
             if ($read -ne $Count) { throw 'short read' }
-            return $buf
+            return , $buf
         } finally { $fs.Dispose() }
     }
     $resp = Send-HttpWithRetry $Ref.Http $Ref.Url ([System.Net.Http.Headers.RangeHeaderValue]::new($Offset, $Offset + $Count - 1)) $Ref.Gate
@@ -318,7 +318,7 @@ function Read-ZipRange([hashtable]$Ref, [long]$Offset, [long]$Count) {
         if ([int]$resp.StatusCode -ne 206) { throw "range request returned $([int]$resp.StatusCode)" }
         $b = $resp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
         if ($b.Length -ne $Count) { throw 'range request returned the wrong length' }
-        return $b
+        return , $b
     } finally { $resp.Dispose() }
 }
 function Read-ZipTail([hashtable]$Ref, [int]$Want) {
@@ -385,12 +385,12 @@ function Get-ZipEntryBytes([hashtable]$Ref, [hashtable]$Entry) {
     if ([BitConverter]::ToUInt32($h, 0) -ne 0x04034B50) { throw "bad local header for $($Entry.Name)" }
     $dataOff = $Entry.Offset + 30 + [BitConverter]::ToUInt16($h, 26) + [BitConverter]::ToUInt16($h, 28)
     $data = Read-ZipRange $Ref $dataOff $Entry.CSize
-    if ($Entry.Method -eq 0) { return $data }
+    if ($Entry.Method -eq 0) { return , $data }
     if ($Entry.Method -ne 8) { throw "unsupported compression in $($Entry.Name)" }
     $in = [System.IO.MemoryStream]::new($data); $out = [System.IO.MemoryStream]::new()
     $z = [System.IO.Compression.DeflateStream]::new($in, [System.IO.Compression.CompressionMode]::Decompress)
     try { $z.CopyTo($out) } finally { $z.Dispose(); $in.Dispose() }
-    return $out.ToArray()
+    return , $out.ToArray()
 }
 # Returns $null for a non-zip extension; throws when the index route can't
 # decide (caller then downloads both files in full).
@@ -432,7 +432,7 @@ function Remove-SharePointHtmlProperties([byte[]]$Bytes) {
     $s = $enc.GetString($Bytes)
     $s = $s.Replace($script:MsoXmlns, '')
     $s = [regex]::Replace($s, '(\r?\n)?<!--\[if gte mso 9\]><xml>\s*<mso:CustomDocumentProperties>.*?</mso:CustomDocumentProperties>\s*</xml><!\[endif\]-->(\r?\n)?', '', 'Singleline')
-    return $enc.GetBytes($s)
+    return , $enc.GetBytes($s)
 }
 
 # A result that only says this attempt failed (download error, throttling,
@@ -456,6 +456,25 @@ function Test-RewrittenFileContent {
         return @{ Status = 'equivalent'; Detail = 'byte-identical' }
     }
     try {
+        # A password-protected Office document is not a zip: Office wraps the
+        # encrypted package in an OLE container (EncryptionInfo +
+        # EncryptedPackage streams), and SharePoint adds its property streams
+        # to that container like it does for .doc/.xls. Compare it stream by
+        # stream - the encrypted content itself must be identical.
+        $isCfb = { param($b) $b.Length -ge 8 -and $b[0] -eq 0xD0 -and $b[1] -eq 0xCF -and $b[2] -eq 0x11 -and $b[3] -eq 0xE0 }
+        if ($script:ZipExtensions -contains $ext -and ((& $isCfb $SourceBytes) -or (& $isCfb $TargetBytes))) {
+            if (-not ((& $isCfb $SourceBytes) -and (& $isCfb $TargetBytes))) {
+                return @{ Status = 'different'; Detail = 'one copy is password-protected and the other is not' }
+            }
+            $filter = { param($m) $o = @{}; foreach ($k in $m.Keys) {
+                    if ($k -like 'MsoDataStore*' -or $k -eq "$([char]5)DocumentSummaryInformation" -or $k -eq "$([char]5)SummaryInformation") { continue }
+                    $o[$k] = $m[$k] }; $o }
+            $srcStreams = & $filter ([SpmtCfbReader]::ReadStreams($SourceBytes))
+            $tgtStreams = & $filter ([SpmtCfbReader]::ReadStreams($TargetBytes))
+            $diff = Compare-PartMaps $srcStreams $tgtStreams
+            if ($diff.Count -eq 0) { return @{ Status = 'equivalent'; Detail = 'password-protected document: encrypted content identical (only SharePoint property streams differ)' } }
+            return @{ Status = 'different'; Detail = (($diff | Select-Object -First 5) -join '; ') }
+        }
         if ($script:ZipExtensions -contains $ext) {
             $diff = Compare-PartMaps (Get-OpcPartMap $SourceBytes) (Get-OpcPartMap $TargetBytes)
             if ($diff.Count -eq 0) { return @{ Status = 'equivalent'; Detail = 'all document parts identical (only SharePoint property parts differ)' } }
@@ -486,65 +505,105 @@ function Test-RewrittenFileContent {
     }
 }
 
-# Downloads both copies of each rewritten file (in parallel) and runs
-# Test-RewrittenFileContent on them. Items: @{ Rel; Ext; Size;
+# Checks each rewritten file against its original (in parallel) and returns
+# one @{ Rel; Key; Status; Detail } per item. Items: @{ Rel; Ext; Size;
 # SourceUrl | SourceFile; TargetUrl; Key }. Download URLs are Graph's
 # pre-authenticated @microsoft.graph.downloadUrl, so lanes need no PnP
-# connection. Returns one @{ Rel; Key; Status; Detail } per item.
+# connection. Modern Office files are compared by zip index (a few KB);
+# everything else is downloaded in full.
 #
-# Smallest files go first, so most of a library is done quickly and a few
-# big decks don't hold up the count. Work runs in batches: big files (over
-# 50 MB) only two at a time to keep memory down, and Graph's download links
-# (valid about an hour) are refreshed with -RefreshLinks before a batch once
-# they are older than -LinkMaxMinutes. OnProgress gets (done, bytesDone, rel).
+# Two continuous parallel streams, smallest files first: every file except
+# big non-zip ones (over 50 MB, downloaded in full) runs -ThrottleLimit at a
+# time with no batch barrier - a slow file only holds up its own lane - then
+# the big ones run -BigLanes at a time to keep memory in check.
+#
+# Results are written into -Cache as they arrive and -CachePath is rewritten
+# every -SaveEvery new results (at most every 10 s), so stopping or
+# restarting the server mid-check keeps the work already done. Failed
+# attempts (throttling, download errors) are never cached.
+#
+# Download links (valid about an hour) are refreshed with -RefreshLinks once
+# they are older than -LinkMaxMinutes; files not started yet pick the fresh
+# link up. OnProgress gets (done, bytesDone, lastRel, throttleWaitSec,
+# currentRel, currentBytes) - "current" is the biggest file still in progress.
 function Invoke-RewrittenContentCheck {
     param(
         [Parameter(Mandatory)][object[]]$Items,
         [int]$ThrottleLimit = 8,
+        [int]$BigLanes = 4,
         [long]$MaxBytes = 300MB,
         [scriptblock]$OnProgress,
         # Returns @{ Source = @{ rel = url }; Target = @{ rel = url } }.
         [scriptblock]$RefreshLinks,
-        [int]$LinkMaxMinutes = 40
+        [int]$LinkMaxMinutes = 40,
+        [hashtable]$Cache,
+        [string]$CachePath,
+        [int]$SaveEvery = 25
     )
     $modulePath = $PSCommandPath
     # Shared by all lanes: throttle pause, and counters for the caller's log.
     $gate = [hashtable]::Synchronized(@{ Until = [DateTime]::UtcNow; Throttles = 0; LastWait = 0 })
+    # Files currently being checked (rel -> size), for "checking now".
+    $inFlight = [hashtable]::Synchronized(@{})
     # Same decorated User-Agent as the copy engine (UserAgent.psm1);
     # Microsoft throttles undecorated traffic harder.
     $ua = if (Get-Command Get-MigrationUserAgent -ErrorAction SilentlyContinue) { Get-MigrationUserAgent } else { $null }
-    $throttlesReported = 0
-    $throttleNoteAt = [datetime]::MinValue
-    $done = 0
-    [long]$bytesDone = 0
     $results = [System.Collections.Generic.List[object]]::new()
-    $ordered = @($Items | Sort-Object { [long]$_.Size })
-    $linksAt = Get-Date
+    $state = @{ Done = 0; Bytes = [long]0; ThrottlesReported = 0; NoteAt = [datetime]::MinValue; LinksAt = (Get-Date); Unsaved = 0; SavedAt = (Get-Date) }
+    $all = @($Items | Sort-Object { [long]$_.Size })
     $bigFile = 50MB
-    $i = 0
-    # Zip-based Office files are checked from their index, so only other
-    # big files (downloaded in full) count as big.
-    $heavy = { param($x) [long]$x.Size -gt $bigFile -and $script:ZipExtensions -notcontains "$($x.Ext)".ToLowerInvariant() }
-    while ($i -lt $ordered.Count) {
-        $isBig = & $heavy $ordered[$i]
-        $batchSize = if ($isBig) { 4 } else { [Math]::Max(1, $ThrottleLimit * 4) }
-        $batch = [System.Collections.Generic.List[object]]::new()
-        while ($i -lt $ordered.Count -and $batch.Count -lt $batchSize -and ((& $heavy $ordered[$i]) -eq $isBig)) {
-            $batch.Add($ordered[$i]); $i++
+    $isBig = { param($x) [long]$x.Size -gt $bigFile -and $script:ZipExtensions -notcontains "$($x.Ext)".ToLowerInvariant() }
+    $small = @($all | Where-Object { -not (& $isBig $_) })
+    $big = @($all | Where-Object { & $isBig $_ })
+
+    $saveCache = {
+        if (-not $CachePath -or -not $Cache) { return }
+        try { $Cache | ConvertTo-Json -Depth 4 -Compress | Set-Content -Path $CachePath -Encoding utf8 } catch { }
+        $state.Unsaved = 0; $state.SavedAt = Get-Date
+    }
+    $refreshIfStale = {
+        if (-not $RefreshLinks -or ((Get-Date) - $state.LinksAt).TotalMinutes -lt $LinkMaxMinutes) { return }
+        try {
+            $fresh = & $RefreshLinks
+            # Items are shared by reference with the lanes, so files not
+            # started yet download through the new links.
+            foreach ($it in $all) {
+                if (-not $it.SourceFile -and $fresh.Source -and $fresh.Source.ContainsKey($it.Rel)) { $it.SourceUrl = $fresh.Source[$it.Rel] }
+                if ($fresh.Target -and $fresh.Target.ContainsKey($it.Rel)) { $it.TargetUrl = $fresh.Target[$it.Rel] }
+            }
+        } catch { }
+        $state.LinksAt = Get-Date
+    }
+    $consume = {
+        $r = $_
+        $results.Add(@{ Rel = $r.Rel; Key = $r.Key; Status = $r.Status; Detail = $r.Detail })
+        $state.Done++
+        $state.Bytes += [long]$r.Size
+        if ($Cache -and $r.Key -and -not (Test-TransientContentResult $r)) {
+            $Cache[$r.Key] = @{ Status = $r.Status; Detail = $r.Detail }
+            $state.Unsaved++
+            if ($state.Unsaved -ge $SaveEvery -and ((Get-Date) - $state.SavedAt).TotalSeconds -ge 10) { & $saveCache }
         }
-        if ($RefreshLinks -and ((Get-Date) - $linksAt).TotalMinutes -ge $LinkMaxMinutes) {
-            try {
-                $fresh = & $RefreshLinks
-                foreach ($it in @($ordered[($i - $batch.Count)..($ordered.Count - 1)])) {
-                    if (-not $it.SourceFile -and $fresh.Source -and $fresh.Source.ContainsKey($it.Rel)) { $it.SourceUrl = $fresh.Source[$it.Rel] }
-                    if ($fresh.Target -and $fresh.Target.ContainsKey($it.Rel)) { $it.TargetUrl = $fresh.Target[$it.Rel] }
-                }
-                $linksAt = Get-Date
-            } catch { }
+        $throttleNote = $null
+        # At most one throttle note every 30 s, so the log isn't flooded.
+        if ($gate.Throttles -gt $state.ThrottlesReported -and ((Get-Date) - $state.NoteAt).TotalSeconds -ge 30) {
+            $throttleNote = $gate.LastWait; $state.ThrottlesReported = $gate.Throttles; $state.NoteAt = Get-Date
         }
-        $lanes = if ($isBig) { [Math]::Min(2, $ThrottleLimit) } else { $ThrottleLimit }
-        $batch.ToArray() | ForEach-Object -ThrottleLimit $lanes -Parallel {
+        & $refreshIfStale
+        $current = $null; [long]$currentSize = 0
+        [System.Threading.Monitor]::Enter($inFlight.SyncRoot)
+        try { foreach ($e in $inFlight.GetEnumerator()) { if ([long]$e.Value -ge $currentSize) { $current = $e.Key; $currentSize = [long]$e.Value } } }
+        finally { [System.Threading.Monitor]::Exit($inFlight.SyncRoot) }
+        if ($OnProgress) { & $OnProgress $state.Done $state.Bytes $r.Rel $throttleNote $current $currentSize }
+    }
+
+    foreach ($set in @(@{ Items = $small; Lanes = $ThrottleLimit }, @{ Items = $big; Lanes = [Math]::Max(1, [Math]::Min($BigLanes, $ThrottleLimit)) })) {
+        if ($set.Items.Count -eq 0) { continue }
+        & $refreshIfStale
+        $set.Items | ForEach-Object -ThrottleLimit $set.Lanes -Parallel {
             $it = $_
+            $flight = $using:inFlight
+            $flight[$it.Rel] = [long]$it.Size
             Import-Module $using:modulePath
             try {
                 if (-not $it.TargetUrl -or (-not $it.SourceUrl -and -not $it.SourceFile)) {
@@ -566,26 +625,21 @@ function Invoke-RewrittenContentCheck {
                     if ($it.Size -gt $using:MaxBytes) {
                         return @{ Rel = $it.Rel; Key = $it.Key; Size = $it.Size; Status = 'unchecked'; Detail = 'too large for a content check' }
                     }
-                    $src = if ($it.SourceFile) { [System.IO.File]::ReadAllBytes($it.SourceFile) } else { Get-HttpBytes $http $it.SourceUrl $gate }
+                    # Plain assignments: an if-expression enumerates a byte[] into an object[]
+                    # (millions of boxed bytes - minutes of CPU and GBs of memory on a big file).
+                    if ($it.SourceFile) { $src = [System.IO.File]::ReadAllBytes($it.SourceFile) } else { $src = Get-HttpBytes $http $it.SourceUrl $gate }
                     $tgt = Get-HttpBytes $http $it.TargetUrl $gate
                 } finally { $http.Dispose() }
                 $r = Test-RewrittenFileContent -SourceBytes $src -TargetBytes $tgt -Extension $it.Ext
                 return @{ Rel = $it.Rel; Key = $it.Key; Size = $it.Size; Status = $r.Status; Detail = $r.Detail }
             } catch {
                 return @{ Rel = $it.Rel; Key = $it.Key; Size = $it.Size; Status = 'unchecked'; Detail = "download failed: $($_.Exception.Message)" }
+            } finally {
+                $flight.Remove($it.Rel)
             }
-        } | ForEach-Object {
-            $results.Add(@{ Rel = $_.Rel; Key = $_.Key; Status = $_.Status; Detail = $_.Detail })
-            $done++
-            $bytesDone += [long]$_.Size
-            $throttleNote = $null
-            # At most one throttle note every 30 s, so the log isn't flooded.
-            if ($gate.Throttles -gt $throttlesReported -and ((Get-Date) - $throttleNoteAt).TotalSeconds -ge 30) {
-                $throttleNote = $gate.LastWait; $throttlesReported = $gate.Throttles; $throttleNoteAt = Get-Date
-            }
-            if ($OnProgress) { & $OnProgress $done $bytesDone $_.Rel $throttleNote }
-        }
+        } | ForEach-Object $consume
     }
+    if ($state.Unsaved -gt 0) { & $saveCache }
     return $results
 }
 
