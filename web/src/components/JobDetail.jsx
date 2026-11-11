@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
+import PermissionsSettings from './PermissionsSettings';
 import { formatBytes, jobTitle } from '../lib/format';
 import { socket } from '../lib/socket';
 import StatusPill from './StatusPill';
@@ -20,6 +21,8 @@ const EVENT_STYLE = {
   verification_summary: { badge: '🛡 verify', badgeClass: 'bg-sky-500/15 text-sky-400', rowClass: 'text-sky-300' },
   verify_started: { badge: '🛡 verify', badgeClass: 'bg-sky-500/15 text-sky-400', rowClass: 'text-sky-300' },
   repair_started: { badge: '🔧 repair', badgeClass: 'bg-sky-500/15 text-sky-400', rowClass: 'text-sky-300' },
+  permissions_started: { badge: '🔑 permissions', badgeClass: 'bg-sky-500/15 text-sky-400', rowClass: 'text-sky-300' },
+  permissions_copied: { badge: '🔑 permissions', badgeClass: 'bg-green-500/15 text-green-400 font-semibold', rowClass: 'text-green-300' },
   preflight_started: { badge: '✈ pre-flight', badgeClass: 'bg-sky-500/15 text-sky-400', rowClass: 'text-sky-300' },
   preflight_report: { badge: '✈ pre-flight', badgeClass: 'bg-sky-500/15 text-sky-400', rowClass: 'text-sky-300' },
   job_created: { badge: '● created', badgeClass: 'text-slate-300 font-semibold', rowClass: 'text-slate-300' },
@@ -59,7 +62,7 @@ function styleFor(line) {
 // Failures/Warnings counts start from the latest one.
 // Verify / clean-up / purge on a finished job also start a fresh view, so a
 // Verify doesn't sit under the previous run's copied lines.
-const RUN_START_EVENTS = new Set(['job_restarted', 'job_run', 'job_resumed', 'verify_started', 'repair_started', 'cleanup_started', 'purge_started']);
+const RUN_START_EVENTS = new Set(['job_restarted', 'job_run', 'job_resumed', 'verify_started', 'repair_started', 'permissions_started', 'cleanup_started', 'purge_started']);
 
 // Human line for the phase banner, per engine phase_progress event shape
 // (engine/Invoke-MigrationJob.ps1's Write-PhaseProgress call sites).
@@ -84,6 +87,8 @@ function phaseLabel(phase) {
       return phase.checking ? 'Repairing failed files — re-checking the repaired files…' : `Repairing failed files — ${n(phase.done)} of ${n(phase.total)}${phase.current ? ` · ${String(phase.current).split('/').pop()}` : ''}`;
     case 'content_check':
       return `Checking content of files SharePoint rewrote — ${n(phase.done)} of ${n(phase.total)}${phase.bytesTotal ? ` · ${formatBytes(phase.bytesDone || 0)} of ${formatBytes(phase.bytesTotal)}` : ''}${phase.current ? ` · checking now: ${String(phase.current).split('/').pop()} (${formatBytes(phase.currentBytes || 0)})` : phase.last ? ` · last: ${String(phase.last).split('/').pop()}` : ''}`;
+    case 'permissions':
+      return `Copying item permissions — ${n(phase.done)} of ${n(phase.total)} items`;
     case 'purging':
       return `Purging recycle bin — ${n(phase.purged)} of ${n(phase.total)} permanently deleted`;
     case 'clearing_folders':
@@ -152,6 +157,7 @@ export default function JobDetail() {
   const [showEarlierRuns, setShowEarlierRuns] = useState(false);
   const [showProblems, setShowProblems] = useState(false);
   const [showPreflight, setShowPreflight] = useState(false);
+  const [showPerms, setShowPerms] = useState(false);
   // True from clicking "Pre-flight check" until its report lands (or the run
   // ends without one) - the job's status doesn't change during the check, so
   // this is what lets the phase banner show for an approved/paused job.
@@ -399,6 +405,7 @@ export default function JobDetail() {
   const problemCount = v && !v.ok ? v.missing + v.sizeMismatch + v.hashMismatch : 0;
 
   const notices = [];
+  const backgroundOpEarly = job.status === 'completed' && (!!job.activeOperation || !!job.phase);
   const pf = job.preflight;
   if (pf && pf.files != null) {
     const perms = pf.uniquePermissions;
@@ -413,7 +420,7 @@ export default function JobDetail() {
         !pf.ok && pf.longPaths?.count > 0 && `${pf.longPaths.count.toLocaleString()} target path(s) over ${pf.maxPathLength} characters`,
         !pf.ok && pf.largeFiles?.count > 0 && `${pf.largeFiles.count} file(s) over 250 GB`,
         `longest target path ${pf.longestPath} of ${pf.maxPathLength} characters (${pf.prefixLength} used by the target location)`,
-        perms?.checked && perms.count > 0 && `${perms.count.toLocaleString()} item(s) with their own permissions (not copied)`,
+        perms?.checked && perms.count > 0 && !job.permissions?.copy && `${perms.count.toLocaleString()} item(s) with their own permissions (not copied)`,
         perms?.checked && perms.count === 0 && 'no items with their own permissions',
         perms && !perms.checked && 'permission check could not run',
         job.preflightAt && `checked ${job.preflightAt}`,
@@ -476,21 +483,48 @@ export default function JobDetail() {
       ),
     });
   }
+  const ownPerms = job.preflight?.uniquePermissions;
+  const spToSp = (job.source?.provider || 'sharepoint') === 'sharepoint' && (job.target?.provider || 'sharepoint') === 'sharepoint';
+  if (ownPerms?.checked && ownPerms.count > 0 && spToSp) {
+    const on = !!job.permissions?.copy;
+    const pc = job.permissions?.lastCopy;
+    notices.push({
+      key: 'permissions', tone: on ? 'ok' : 'info',
+      title: on ? 'Copy item permissions: on' : `${ownPerms.count.toLocaleString()} item(s) have their own sharing — permissions are not copied`,
+      detail: on
+        ? `the ${ownPerms.count.toLocaleString()} item(s) with their own sharing get the same people, roles and new sharing links at the target after copying · guests ${job.permissions.includeGuests ? 'included' : 'skipped'}${Object.keys(job.permissions.userMap || {}).length ? ` · ${Object.keys(job.permissions.userMap).length} user mapping(s)` : ''} · results in Export access (CSV)`
+        : 'turn on "Copy item permissions" to re-apply them at the target, or use Export access (CSV) to re-apply by hand',
+      action: (
+        <>
+          {on && job.status === 'completed' && ownPerms.access && <button type="button" disabled={busy || backgroundOpEarly} onClick={() => act('copy-permissions')} className="btn-secondary shrink-0 text-xs" title="Apply the recorded permissions to the copied items now (safe to repeat - grants already in place are left as they are)">Copy permissions now</button>}
+          <button type="button" onClick={() => setShowPerms((s) => !s)} className="text-xs font-medium text-blue-600 hover:underline shrink-0">{showPerms ? 'Hide settings' : 'Settings'}</button>
+        </>
+      ),
+      expanded: showPerms && (
+        <div className="border-t border-slate-100 bg-slate-50/60 pl-11 pr-4 py-3">
+          <PermissionsSettings key={JSON.stringify(job.permissions || {})} job={job} onSaved={refreshJob} />
+        </div>
+      ),
+    });
+  }
   if (isLive && job.progress.itemsFailed > 0) {
     notices.push({ key: 'failed', tone: 'warn', title: `${job.progress.itemsFailed} file(s) failed so far`, detail: 'see the Failures filter in the log', action: <button type="button" onClick={() => setLogFilter('failures')} className="text-xs font-medium text-blue-600 hover:underline shrink-0">Show in log</button> });
   }
   // A Verify / clean-up / pre-flight on a finished job reports a phase while
   // it runs; until it ends, the stored verification is the previous result.
-  const backgroundOp = job.status === 'completed' && (!!job.activeOperation || !!job.phase);
+  const backgroundOp = backgroundOpEarly;
   // While a Verify / clean-up / pre-flight runs, the progress card shows
   // that run, not the finished copy's "Completed — N of N".
-  const OP_LABELS = { verify: 'Verifying', repair: 'Repairing failed files', preflight: 'Pre-flight check', cleanup: 'Cleaning source', purge: 'Purging recycle bin' };
+  const OP_LABELS = { verify: 'Verifying', repair: 'Repairing failed files', permissions: 'Copying item permissions', preflight: 'Pre-flight check', cleanup: 'Cleaning source', purge: 'Purging recycle bin' };
   const opPhase = backgroundOp ? job.phase : null;
   const opDone = opPhase ? (opPhase.done ?? opPhase.deleted ?? opPhase.purged) : null;
   const opTotal = opPhase?.total || null;
   const opPct = opTotal ? Math.min(100, ((opDone || 0) / opTotal) * 100) : null;
   if (job.activeOperation === 'verify') {
     notices.push({ key: 'verifying', tone: 'info', title: 'Verifying now', detail: 'every file is being re-checked against its copy · the result appears here when it finishes' });
+  }
+  if (job.activeOperation === 'permissions') {
+    notices.push({ key: 'verifying', tone: 'info', title: 'Copying item permissions now', detail: 'the recorded people, groups and sharing links are being applied to the copied items · results go into Export access (CSV)' });
   }
   if (job.activeOperation === 'repair') {
     notices.push({ key: 'verifying', tone: 'info', title: 'Repairing now', detail: 're-copying and re-checking only the files the last verification flagged · the result appears here when it finishes' });

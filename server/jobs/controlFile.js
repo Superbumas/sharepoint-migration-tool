@@ -69,4 +69,16 @@ function accessReportPath(jobId) {
   return path.join(ACCESS_DIR, `${jobId}.json`);
 }
 
-module.exports = { controlFilePath, writeControlFile, removeControlFile, treeCachePath, removeTreeCache, contentCachePath, accessReportPath };
+// "Copy item permissions" settings handed to the engine (-CopyPermissionsPath).
+// Returns null when the job doesn't have the setting on.
+function writePermissionSettings(job) {
+  let s = null;
+  try { s = JSON.parse(job.permissions_json || 'null'); } catch {}
+  if (!s || !s.copy) return null;
+  const file = path.join(ACCESS_DIR, `${job.id}.settings.json`);
+  fs.mkdirSync(ACCESS_DIR, { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ includeGuests: !!s.includeGuests, userMap: s.userMap || {} }), 'utf8');
+  return file;
+}
+
+module.exports = { controlFilePath, writeControlFile, removeControlFile, treeCachePath, removeTreeCache, contentCachePath, accessReportPath, writePermissionSettings };

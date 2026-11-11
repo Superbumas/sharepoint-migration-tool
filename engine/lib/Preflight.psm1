@@ -188,17 +188,17 @@ function Get-ItemAccessGrants {
                     $scope = switch ("$($p.link.scope)") { 'anonymous' { 'anyone' } 'organization' { 'organisation' } 'users' { 'specific people' } 'existingAccess' { 'existing access' } default { "$($p.link.scope)" } }
                     $who = @(@($p.grantedToIdentitiesV2) + @($p.grantedToIdentities) | Where-Object { $_ })
                     if ($who.Count -eq 0) {
-                        [ordered]@{ name = "Sharing link ($scope, $($p.link.type))"; email = ''; role = $role; source = 'link'; linkScope = $scope; linkType = "$($p.link.type)"; external = ($scope -eq 'anyone'); expires = "$($p.expirationDateTime)"; hasPassword = [bool]$p.hasPassword }
+                        [ordered]@{ name = "Sharing link ($scope, $($p.link.type))"; email = ''; role = $role; source = 'link'; linkScope = $scope; linkType = "$($p.link.type)"; external = ($scope -eq 'anyone'); expires = "$($p.expirationDateTime)"; hasPassword = [bool]$p.hasPassword; kind = 'link'; login = ''; principalId = ''; linkId = "$($p.id)"; linkUrl = "$($p.link.webUrl)" }
                     }
                     foreach ($w in $who) {
                         $u = if ($w.user) { $w.user } elseif ($w.siteUser) { $w.siteUser } elseif ($w.group) { $w.group } else { $w.siteGroup }
-                        [ordered]@{ name = "$($u.displayName)"; email = "$($u.email)"; role = $role; source = 'link'; linkScope = $scope; linkType = "$($p.link.type)"; external = (& $isExternal $u.email $u.loginName); expires = "$($p.expirationDateTime)"; hasPassword = [bool]$p.hasPassword }
+                        [ordered]@{ name = "$($u.displayName)"; email = "$($u.email)"; role = $role; source = 'link'; linkScope = $scope; linkType = "$($p.link.type)"; external = (& $isExternal $u.email $u.loginName); expires = "$($p.expirationDateTime)"; hasPassword = [bool]$p.hasPassword; kind = $(if ($w.group) { 'group' } elseif ($w.siteGroup) { 'siteGroup' } else { 'user' }); login = "$($u.loginName)"; principalId = "$($u.id)"; linkId = "$($p.id)"; linkUrl = "$($p.link.webUrl)" }
                     }
                 } else {
                     $g = $p.grantedToV2; if (-not $g) { $g = $p.grantedTo }
                     $isGroup = [bool]($g.group -or $g.siteGroup)
                     $u = if ($g.user) { $g.user } elseif ($g.siteUser) { $g.siteUser } elseif ($g.group) { $g.group } else { $g.siteGroup }
-                    [ordered]@{ name = "$($u.displayName)"; email = "$($u.email)"; role = $role; source = $(if ($isGroup) { 'group' } else { 'direct' }); linkScope = ''; linkType = ''; external = (& $isExternal $u.email $u.loginName); expires = "$($p.expirationDateTime)"; hasPassword = $false }
+                    [ordered]@{ name = "$($u.displayName)"; email = "$($u.email)"; role = $role; source = $(if ($isGroup) { 'group' } else { 'direct' }); linkScope = ''; linkType = ''; external = (& $isExternal $u.email $u.loginName); expires = "$($p.expirationDateTime)"; hasPassword = $false; kind = $(if ($g.group) { 'group' } elseif ($g.siteGroup) { 'siteGroup' } else { 'user' }); login = "$($u.loginName)"; principalId = "$($u.id)"; linkId = ''; linkUrl = '' }
                 }
             }
             $row.grants = @($grants)
