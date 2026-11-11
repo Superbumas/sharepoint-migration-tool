@@ -38,20 +38,14 @@ function renderClientPdf(out, data, { title, client, preparedBy, inventory }) {
   const allVerified = totals.folders > 0 && totals.verifiedFolders === totals.folders && totals.notMigrated === 0;
   const showInventory = inventory ?? totals.files <= INVENTORY_PDF_LIMIT;
 
-  // --- Cover band ----------------------------------------------------------
-  const bandH = 128;
-  doc.rect(0, 0, doc.page.width, bandH).fillColor(COLORS.navy).fill();
-  doc.rect(0, bandH, doc.page.width, 4).fillColor(COLORS.accent).fill();
-  doc.font('Helvetica').fontSize(9).fillColor('#93c5fd')
-    .text('MIGRATION REPORT', r.left, 38, { characterSpacing: 1.5 });
-  doc.font('Helvetica-Bold').fontSize(24).fillColor('#ffffff')
-    .text(r.fit(client || title, r.width, 24, 'Helvetica-Bold'), r.left, 54, { width: r.width, lineBreak: false });
+  // --- Header (Knowall brand) ---------------------------------------------
   const period = periodText(totals);
-  doc.font('Helvetica').fontSize(10).fillColor('#cbd5e1')
-    .text(period || ' ', r.left, 88, { width: r.width });
-  doc.fontSize(8).fillColor('#94a3b8')
-    .text(`Issued ${fmtDay(new Date())}${preparedBy ? `  ·  Prepared by ${preparedBy}` : ''}`, r.left, 106, { width: r.width });
-  doc.y = bandH + 26;
+  r.brandHeader({
+    eyebrow: 'Migration report',
+    title: client || title,
+    subtitle: period || undefined,
+    meta: `Issued ${fmtDay(new Date())}${preparedBy ? `  ·  Prepared by ${preparedBy}, Knowall IT` : '  ·  Knowall IT'}`,
+  });
 
   // --- Summary -------------------------------------------------------------
   const destKinds = [...new Set(folders.map((f) => f.target.kind))];
@@ -83,7 +77,7 @@ function renderClientPdf(out, data, { title, client, preparedBy, inventory }) {
   r.section('Migrated locations');
   r.table(
     ['Folder', 'Destination', 'Files', 'Size', 'Status'],
-    [r.width * 0.27, r.width * 0.31, r.width * 0.1, r.width * 0.11, r.width * 0.21],
+    [r.width * 0.25, r.width * 0.37, r.width * 0.08, r.width * 0.11, r.width * 0.19],
     folders.map((f) => {
       const st = statusFor(f);
       return [{ text: f.name, bold: true, keepStart: true }, f.target.where, f.migrated.length.toLocaleString(), formatBytes(f.bytes), { text: st.text, color: st.color }];
@@ -94,7 +88,7 @@ function renderClientPdf(out, data, { title, client, preparedBy, inventory }) {
     r.ensure(18);
     const y = doc.y;
     doc.moveTo(r.left, y).lineTo(r.left + r.width, y).lineWidth(0.75).strokeColor(COLORS.ink).stroke();
-    const cols = [r.width * 0.27, r.width * 0.31, r.width * 0.1, r.width * 0.11];
+    const cols = [r.width * 0.25, r.width * 0.37, r.width * 0.08, r.width * 0.11];
     doc.font('Helvetica-Bold').fontSize(7.5).fillColor(COLORS.ink);
     doc.text('Total', r.left + 4, y + 4, { width: cols[0] - 8, lineBreak: false });
     doc.text(totals.files.toLocaleString(), r.left + cols[0] + cols[1] + 4, y + 4, { width: cols[2] - 8, align: 'right', lineBreak: false });
@@ -146,10 +140,11 @@ function renderClientPdf(out, data, { title, client, preparedBy, inventory }) {
   // --- Per-location detail -------------------------------------------------
   for (const f of folders) {
     doc.addPage();
-    doc.font('Helvetica').fontSize(8).fillColor(COLORS.accent).text('LOCATION', r.left, doc.y, { characterSpacing: 1.2 });
+    doc.font('Helvetica-Bold').fontSize(8).fillColor(COLORS.accent).text('LOCATION', r.left, doc.y, { characterSpacing: 1.2 });
     const nameY = doc.y + 2;
     doc.font('Helvetica-Bold').fontSize(17).fillColor(COLORS.ink).text(r.fit(f.name, r.width, 17, 'Helvetica-Bold'), r.left, nameY, { lineBreak: false });
-    doc.y = nameY + 28;
+    doc.moveTo(r.left, nameY + 24).lineTo(r.left + r.width, nameY + 24).lineWidth(1.5).strokeColor(COLORS.accent).stroke();
+    doc.y = nameY + 34;
     r.kv([
       ['From', `${f.source.where}  (${f.source.kind})`],
       ['To', `${f.target.where}  (${f.target.kind})`],
@@ -186,7 +181,7 @@ function renderClientPdf(out, data, { title, client, preparedBy, inventory }) {
     }
   }
 
-  r.footer(`${client || title}  ·  Migration report`);
+  r.footer(`${client || title} · Migration report`);
   doc.end();
 }
 

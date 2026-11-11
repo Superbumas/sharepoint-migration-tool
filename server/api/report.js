@@ -87,13 +87,11 @@ router.get('/jobs/:id/report.pdf', (req, res, next) => {
     const r = new Report(doc);
 
     // --- Title block ------------------------------------------------------
-    doc.fontSize(19).fillColor(COLORS.ink).font('Helvetica-Bold').text('Migration Report (internal)');
-    doc.moveDown(0.15);
-    doc.fontSize(10).fillColor(COLORS.muted).font('Helvetica').text(job.name);
-    doc.moveDown(0.1);
-    doc.fontSize(8).fillColor(COLORS.faint).text(`Generated ${new Date().toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })}  ·  Job ${job.id}`);
-    doc.moveTo(r.left, doc.y + 6).lineTo(r.left + r.width, doc.y + 6).lineWidth(2).strokeColor(COLORS.ink).stroke();
-    doc.moveDown(1);
+    r.brandHeader({
+      eyebrow: 'Migration report · internal',
+      title: job.name,
+      meta: `Generated ${fmtDate(new Date().toISOString())}  ·  Job ${job.id}`,
+    });
 
     // --- Outcome ----------------------------------------------------------
     r.section('Final outcome');
