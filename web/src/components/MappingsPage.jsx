@@ -268,7 +268,7 @@ export default function MappingsPage() {
               {sourceKind === 'filesystem'
                 ? <FileSharePicker label="Source (tick one or more folders on a file share)" onSelect={setSource} multi />
                 : sourceKind === 'onedrive'
-                ? <OneDriveSourcePicker label="Source (a user's OneDrive - tick one or more folders/files)" onSelect={setSource} multi />
+                ? <OneDriveSourcePicker label="Source (a user's OneDrive - tick one or more folders/files)" onSelect={setSource} multi clearSignal={sourceClear} />
                 : <SharePointPicker label="Source (tick one or more folders/files)" onSelect={setSource} multi clearSignal={sourceClear} />}
               {targetKind === 'azure_blob'
                 ? <BlobTargetPicker onSelect={setTarget} />

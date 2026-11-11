@@ -10,7 +10,7 @@ import SharePointPicker from './SharePointPicker';
 // selection it produces is an ordinary SharePoint source (siteUrl + library +
 // paths), which the engine already knows how to read - no separate OneDrive
 // read path is needed.
-export default function OneDriveSourcePicker({ label, onSelect, multi = false }) {
+export default function OneDriveSourcePicker({ label, onSelect, multi = false, clearSignal = 0 }) {
   const [chosenUser, setChosenUser] = useState(null);
   const [resolving, setResolving] = useState(false);
   const [resolved, setResolved] = useState(null); // { site, driveId }
@@ -62,6 +62,7 @@ export default function OneDriveSourcePicker({ label, onSelect, multi = false })
           preferredDriveId={resolved.driveId}
           onSelect={onSelect}
           multi={multi}
+          clearSignal={clearSignal}
         />
       )}
     </div>
