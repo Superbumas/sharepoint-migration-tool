@@ -221,11 +221,12 @@ function Compare-PartMaps([hashtable]$Src, [hashtable]$Tgt) {
 $script:MsoXmlns = ' xmlns:mso="urn:schemas-microsoft-com:office:office" xmlns:msdt="uuid:C2F41010-65B3-11d1-A29F-00AA00C14882"'
 function Remove-SharePointHtmlProperties([byte[]]$Bytes) {
     # Latin-1 maps every byte to one char and back, so this edits bytes
-    # without any encoding round-trip.
+    # without any encoding round-trip. SharePoint wraps its block in line
+    # breaks, which go with it.
     $enc = [System.Text.Encoding]::Latin1
     $s = $enc.GetString($Bytes)
     $s = $s.Replace($script:MsoXmlns, '')
-    $s = [regex]::Replace($s, '<!--\[if gte mso 9\]><xml>\s*<mso:CustomDocumentProperties>.*?</mso:CustomDocumentProperties>\s*</xml><!\[endif\]-->', '', 'Singleline')
+    $s = [regex]::Replace($s, '(\r?\n)?<!--\[if gte mso 9\]><xml>\s*<mso:CustomDocumentProperties>.*?</mso:CustomDocumentProperties>\s*</xml><!\[endif\]-->(\r?\n)?', '', 'Singleline')
     return $enc.GetBytes($s)
 }
 
