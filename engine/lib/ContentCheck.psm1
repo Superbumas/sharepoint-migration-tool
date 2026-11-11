@@ -232,7 +232,7 @@ function Compare-PartMaps([hashtable]$Src, [hashtable]$Tgt) {
 # "could not be checked".
 # $Gate (a synchronized hashtable shared by all lanes) makes one lane's
 # throttle slow every lane down: nobody sends until Gate.Until has passed.
-function Send-HttpWithRetry([System.Net.Http.HttpClient]$Http, [string]$Url, $Range, $Gate, [int]$MaxAttempts = 8) {
+function Send-HttpWithRetry([System.Net.Http.HttpClient]$Http, [string]$Url, $Range, $Gate, [int]$MaxAttempts = 10) {
     for ($attempt = 1; ; $attempt++) {
         if ($Gate) {
             $pause = ($Gate.Until - [DateTime]::UtcNow).TotalMilliseconds
@@ -243,10 +243,14 @@ function Send-HttpWithRetry([System.Net.Http.HttpClient]$Http, [string]$Url, $Ra
         $resp = $Http.SendAsync($req).GetAwaiter().GetResult()
         $code = [int]$resp.StatusCode
         if (($code -ne 429 -and $code -ne 503 -and $code -ne 504) -or $attempt -ge $MaxAttempts) { return $resp }
+        # The longer of our own doubling backoff and SharePoint's Retry-After.
+        # Under sustained throttling SharePoint keeps answering "Retry-After:
+        # 1", and taking that literally gave up after ~10 s (seen on hilasti:
+        # 96 of 3,000 files left unchecked).
         $wait = [Math]::Min(60, [Math]::Pow(2, $attempt))
         $ra = $resp.Headers.RetryAfter
-        if ($ra -and $ra.Delta) { $wait = [Math]::Min(120, [Math]::Max(1, $ra.Delta.Value.TotalSeconds)) }
-        elseif ($ra -and $ra.Date) { $wait = [Math]::Min(120, [Math]::Max(1, ($ra.Date.Value - [DateTimeOffset]::UtcNow).TotalSeconds)) }
+        if ($ra -and $ra.Delta) { $wait = [Math]::Min(120, [Math]::Max($wait, $ra.Delta.Value.TotalSeconds)) }
+        elseif ($ra -and $ra.Date) { $wait = [Math]::Min(120, [Math]::Max($wait, ($ra.Date.Value - [DateTimeOffset]::UtcNow).TotalSeconds)) }
         $resp.Dispose(); $req.Dispose()
         if ($Gate) {
             $until = [DateTime]::UtcNow.AddSeconds($wait)
