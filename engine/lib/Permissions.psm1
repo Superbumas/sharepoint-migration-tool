@@ -40,12 +40,20 @@ function Copy-ItemPermissions {
         param([string]$Method, [string]$Url, $Content)
         $p = @{ Method = $Method; Url = $Url; Connection = $Connection }
         if ($null -ne $Content) { $p.Content = $Content }
+        # A POST with no body (breakroleinheritance, addroleassignment) must
+        # still send "{}": without -Content, PnP.PowerShell 3.x sends a body
+        # SharePoint rejects with "Cannot handle the data at position 0".
+        elseif ($Method -eq 'Post') { $p.Content = @{} }
         Invoke-WithRetry -Action { Invoke-PnPSPRestMethod @p }
     }
     $graph = {
         param([string]$Method, [string]$Url, $Content)
         $p = @{ Method = $Method; Url = $Url; Connection = $Connection }
-        if ($null -ne $Content) { $p.Content = $Content; $p.ContentType = 'application/json' }
+        # Pass the body as an object, never a JSON string: PnP.PowerShell 3.x
+        # re-encodes a string body, so Graph never sees the fields. createLink
+        # then ignored type/scope and made anyone-EDIT links (seen on hilasti).
+        if ($Content -is [string]) { $Content = $Content | ConvertFrom-Json -AsHashtable }
+        if ($null -ne $Content) { $p.Content = $Content }
         Invoke-WithRetry -Action { Invoke-PnPGraphMethod @p }
     }
     $escPath = { param($p) ((($p -replace '\\', '/') -split '/') | Where-Object { $_ } | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/' }
@@ -221,9 +229,31 @@ function Copy-ItemPermissions {
                         $body.expirationDateTime = $exp.ToUniversalTime().ToString('o')
                     }
                     try {
-                        $link = & $graph 'Post' "v1.0/drives/$TargetDriveId/items/$driveItemId/createLink" ($body | ConvertTo-Json -Compress)
+                        $link = & $graph 'Post' "v1.0/drives/$TargetDriveId/items/$driveItemId/createLink" $body
                         $created = $true
-                        $existing += $link
+                    } catch {
+                        $why = & $errText $_
+                        foreach ($g in $rows) { if (-not $g.result) { $g.result = "failed: could not create the $($first.linkScope) link ($why)"; $stats.failed++ } }
+                        continue
+                    }
+                    # Guard: read the new link back and make sure it is exactly
+                    # the scope and type asked for. SharePoint answers a request
+                    # it could not read with a default link (seen: anyone-EDIT
+                    # for an anyone-view source), so a mismatch is removed at
+                    # once and reported - never left in place wider than asked.
+                    $got = $null
+                    try { if ($link.id) { $got = & $graph 'Get' "v1.0/drives/$TargetDriveId/items/$driveItemId/permissions/$($link.id)" $null } } catch {}
+                    if (-not $got -or "$($got.link.scope)" -ne $scope -or "$($got.link.type)" -ne $type) {
+                        $seen = if ($got) { "$($got.link.scope)/$($got.link.type)" } elseif ($link.link) { "$($link.link.scope)/$($link.link.type)" } else { 'unreadable' }
+                        $removed = $false
+                        if ($link.id) { try { & $graph 'Delete' "v1.0/drives/$TargetDriveId/items/$driveItemId/permissions/$($link.id)" $null | Out-Null; $removed = $true } catch {} }
+                        $what = if ($removed) { 'removed it again' } else { "COULD NOT REMOVE IT - remove it by hand: $($link.link.webUrl)" }
+                        & $say 'warn' "Copy item permissions: ${rel} - asked SharePoint for a $scope/$type link but got $seen; $what."
+                        foreach ($g in $rows) { if (-not $g.result) { $g.result = "failed: SharePoint created a $seen link instead of $scope/$type - $what"; $stats.failed++ } }
+                        continue
+                    }
+                    try {
+                        $existing += $got
                     } catch {
                         $why = & $errText $_
                         foreach ($g in $rows) { if (-not $g.result) { $g.result = "failed: could not create the $($first.linkScope) link ($why)"; $stats.failed++ } }

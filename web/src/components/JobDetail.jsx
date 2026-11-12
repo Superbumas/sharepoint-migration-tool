@@ -532,10 +532,11 @@ export default function JobDetail() {
   if (v) {
     notices.push({
       key: 'verify', tone: backgroundOp ? 'info' : !v.ok ? 'error' : v.contentUnchecked > 0 ? 'warn' : 'ok',
-      title: backgroundOp ? 'Previous verification (being re-checked now)' : v.ok && v.contentUnchecked > 0 ? `Verified, but ${v.contentUnchecked} file(s) not yet content-checked — click Verify to check only those` : v.ok ? `Verified: ${v.identical} of ${v.sourceFiles} files byte-identical` : `Verification found ${problemCount} problem(s)`,
+      title: backgroundOp ? 'Previous verification (being re-checked now)' : v.ok && v.contentUnchecked > 0 ? `Verified, but ${v.contentUnchecked} file(s) not yet content-checked — click Verify to check only those` : v.ok ? `Verified: ${(v.identical || 0) + (v.contentVerified || 0)} of ${v.sourceFiles} identical · ${v.identical || 0} byte-identical${v.contentVerified ? `, ${v.contentVerified} re-stamped by SharePoint (content checked)` : ''}` : `Verification found ${problemCount} problem(s)`,
       detail: [
         !v.ok && `${v.missing} missing · ${v.sizeMismatch} size / ${v.hashMismatch} hash mismatches`,
-        v.officeRewritten > 0 && (v.contentVerified != null
+        // A clean pass already says all this in the headline.
+        !(v.ok && !v.contentUnchecked) && v.officeRewritten > 0 && (v.contentVerified != null
           ? `${v.contentVerified} re-stamped by SharePoint, content checked and identical${v.contentUnchecked ? ` · ${v.contentUnchecked} re-stamped but not content-checked` : ''}`
           : `${v.officeRewritten} Office file(s) re-stamped by SharePoint (content not checked)`),
         job.verifiedAt && `verified ${job.verifiedAt}`,
