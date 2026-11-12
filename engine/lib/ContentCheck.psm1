@@ -263,16 +263,22 @@ function Compare-PartMaps([hashtable]$Src, [hashtable]$Tgt) {
 # $Gate (a synchronized hashtable shared by all lanes) makes one lane's
 # throttle slow every lane down: nobody sends until Gate.Until has passed.
 # It also paces requests to stay under SharePoint's limit instead of only
-# reacting to it: each 429 doubles the gap between any two requests (all
-# lanes together, 100 ms up to 1 s), and every 20 s without a 429 the gap
-# halves until requests flow freely again.
+# reacting to it: the first 429/503 opens a small gap between any two
+# requests (all lanes together, $script:GateStartMs), each further one
+# doubles it up to $script:GateMaxMs, and every $script:GateEaseSec seconds
+# without one the gap halves until requests flow freely again. (The first
+# version started at 100 ms and eased only every 20 s, which held all lanes
+# to ~10 requests/s for minutes after one short burst of 429s.)
+$script:GateStartMs = 8
+$script:GateMaxMs = 1000
+$script:GateEaseSec = 10
 function Wait-GateSlot($Gate) {
     $slot = $null
     [System.Threading.Monitor]::Enter($Gate.SyncRoot)
     try {
         $now = [DateTime]::UtcNow
-        if ($Gate.Interval -gt 0 -and ($now - $Gate.LastThrottleAt).TotalSeconds -ge 20 -and ($now - $Gate.LastEaseAt).TotalSeconds -ge 20) {
-            $Gate.Interval = if ($Gate.Interval -lt 50) { 0 } else { [int]($Gate.Interval / 2) }
+        if ($Gate.Interval -gt 0 -and ($now - $Gate.LastThrottleAt).TotalSeconds -ge $script:GateEaseSec -and ($now - $Gate.LastEaseAt).TotalSeconds -ge $script:GateEaseSec) {
+            $Gate.Interval = if ($Gate.Interval -le $script:GateStartMs) { 0 } else { [int]($Gate.Interval / 2) }
             $Gate.LastEaseAt = $now
         }
         $slot = if ($Gate.Until -gt $now) { $Gate.Until } else { $now }
@@ -300,8 +306,9 @@ function Send-HttpWithRetry([System.Net.Http.HttpClient]$Http, [string]$Url, $Ra
         # The longer of our own doubling backoff and SharePoint's Retry-After.
         # Under sustained throttling SharePoint keeps answering "Retry-After:
         # 1", and taking that literally gave up after ~10 s (seen on hilasti:
-        # 96 of 3,000 files left unchecked).
-        $wait = [Math]::Min(60, [Math]::Pow(2, $attempt))
+        # 96 of 3,000 files left unchecked). Our own backoff starts at 1 s
+        # (1, 2, 4 ... 60 s): Retry-After still sets the minimum.
+        $wait = [Math]::Min(60, [Math]::Pow(2, $attempt - 1))
         $ra = $resp.Headers.RetryAfter
         if ($ra -and $ra.Delta) { $wait = [Math]::Min(120, [Math]::Max($wait, $ra.Delta.Value.TotalSeconds)) }
         elseif ($ra -and $ra.Date) { $wait = [Math]::Min(120, [Math]::Max($wait, ($ra.Date.Value - [DateTimeOffset]::UtcNow).TotalSeconds)) }
@@ -311,7 +318,7 @@ function Send-HttpWithRetry([System.Net.Http.HttpClient]$Http, [string]$Url, $Ra
             [System.Threading.Monitor]::Enter($Gate.SyncRoot)
             try {
                 if ($until -gt $Gate.Until) { $Gate.Until = $until }
-                $Gate.Interval = [Math]::Min(1000, [Math]::Max(100, [int]$Gate.Interval * 2))
+                $Gate.Interval = [Math]::Min($script:GateMaxMs, [Math]::Max($script:GateStartMs, [int]$Gate.Interval * 2))
                 $Gate.LastThrottleAt = [DateTime]::UtcNow
                 $Gate.Throttles++
                 $Gate.LastWait = [int][Math]::Ceiling($wait)
