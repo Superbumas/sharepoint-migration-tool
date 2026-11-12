@@ -168,4 +168,19 @@ function Invoke-WithRetry {
     }
 }
 
-Export-ModuleMember -Function Get-HttpStatusCode, Get-RetryAfterMs, Test-IsRetryableStatus, Invoke-WithRetry
+# Turns SharePoint's "file is open / checked out" errors into plain words
+# (the raw text, e.g. "The file ... is locked for shared use by x@y", is
+# kept in brackets). Any other message is returned unchanged.
+function Get-FriendlyErrorText([string]$Message) {
+    if (-not $Message) { return $Message }
+    if ($Message -match 'locked for shared use|SPFileLockException|is locked for (exclusive )?use|-2147018894|resource you are attempting to access is locked|\b423\b.*[Ll]ocked') {
+        $who = if ($Message -match 'locked for (?:shared |exclusive )?use by ([^\s"''}\.,]+(?:\.[^\s"''}\.,]+)*)') { " by $($matches[1])" } else { '' }
+        return "File is open or locked in Word/Office$who - close it everywhere, wait a few minutes, then Repair (or run the job) again. (SharePoint said: $Message)"
+    }
+    if ($Message -match 'checked out|SPFileCheckOutException|-2130575306|-2130246326') {
+        return "File is checked out at the target - check it in or discard the check-out (Library > ... > Check in), then Repair (or run the job) again. (SharePoint said: $Message)"
+    }
+    return $Message
+}
+
+Export-ModuleMember -Function Get-HttpStatusCode, Get-RetryAfterMs, Test-IsRetryableStatus, Invoke-WithRetry, Get-FriendlyErrorText
