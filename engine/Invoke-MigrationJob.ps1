@@ -825,7 +825,7 @@ try {
                 }
                 Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Repair: re-copied '$rel' (exact bytes)." }
             } catch {
-                Write-EngineEvent -Type 'log' -Data @{ level = 'error'; message = "Repair: re-copy FAILED for '$rel': $($_.Exception.Message)" }
+                Write-EngineEvent -Type 'log' -Data @{ level = 'error'; message = "Repair: re-copy FAILED for '$rel': $(Get-FriendlyErrorText $_.Exception.Message)" }
             }
         }
 
@@ -1754,7 +1754,7 @@ try {
                     $statusCode = Get-HttpStatusCode -Exception $_.Exception
                     $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_failed' -Data @{
                         sourcePath = $sourceFileServerRel; targetPath = $targetFileServerRel
-                        error      = $_.Exception.Message; httpStatus = $statusCode; retryCount = $script:attemptsUsed
+                        error      = (Get-FriendlyErrorText $_.Exception.Message); httpStatus = $statusCode; retryCount = $script:attemptsUsed
                     }))
                 } finally {
                     $null = $Shared.InFlight.Remove($LaneIndex)
@@ -1909,7 +1909,7 @@ try {
                     $statusCode = Get-HttpStatusCode -Exception $_.Exception
                     $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_failed' -Data @{
                         sourcePath = $sourceFileServerRel; targetPath = $targetDisplayPath
-                        error      = $_.Exception.Message; httpStatus = $statusCode; retryCount = $script:attemptsUsed
+                        error      = (Get-FriendlyErrorText $_.Exception.Message); httpStatus = $statusCode; retryCount = $script:attemptsUsed
                     }))
                 } finally {
                     $null = $Shared.InFlight.Remove($LaneIndex)
@@ -2092,7 +2092,7 @@ try {
                         # "Nullable object must have a value" is unactionable,
                         # but "InvalidOperationException: ..." pins down where
                         # it came from for the next round of diagnosis.
-                        error      = "$($_.Exception.GetType().Name): $($_.Exception.Message)"; httpStatus = $statusCode; retryCount = $script:attemptsUsed
+                        error      = (Get-FriendlyErrorText "$($_.Exception.GetType().Name): $($_.Exception.Message)"); httpStatus = $statusCode; retryCount = $script:attemptsUsed
                     }))
                 } finally {
                     $null = $Shared.InFlight.Remove($LaneIndex)
@@ -2295,7 +2295,7 @@ try {
                         $statusCode = Get-HttpStatusCode -Exception $_.Exception
                         $ResultQueue.Enqueue((New-EngineEventJson -Type 'item_failed' -Data @{
                             sourcePath = $sourceFilePath; targetPath = $targetFileServerRel
-                            error      = $_.Exception.Message; httpStatus = $statusCode; retryCount = $script:attemptsUsed
+                            error      = (Get-FriendlyErrorText $_.Exception.Message); httpStatus = $statusCode; retryCount = $script:attemptsUsed
                         }))
                     }
                 } finally {
@@ -2686,7 +2686,7 @@ try {
                     $attempted[$rel] = @{ SrcRel = $srcRel; Size = [long]$file.Size }
                     Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Re-copied after verification failure: $rel" }
                 } catch {
-                    Write-EngineEvent -Type 'log' -Data @{ level = 'error'; message = "Re-copy FAILED for '$rel': $($_.Exception.Message)" }
+                    Write-EngineEvent -Type 'log' -Data @{ level = 'error'; message = "Re-copy FAILED for '$rel': $(Get-FriendlyErrorText $_.Exception.Message)" }
                 }
             }
             if ($attempted.Count -eq 0) { break }
