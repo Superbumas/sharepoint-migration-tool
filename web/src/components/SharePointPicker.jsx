@@ -335,7 +335,7 @@ export default function SharePointPicker({ label, onSelect, multi = false, fixed
                       <div className="font-medium text-slate-800 truncate">{s.displayName || s.name}</div>
                       <div className="text-xs text-slate-400 truncate">{s.webUrl?.replace(/^https?:\/\//, '')}</div>
                     </div>
-                    <div className="text-right shrink-0 w-24">
+                    <div className="text-right shrink-0 w-24" title="SharePoint storage used, as in the admin centre: includes old versions and the recycle bin, so it is usually more than the files that get copied">
                       {s.storageUsed != null ? (
                         <>
                           <div className="text-xs font-medium text-slate-600 tabular-nums">{s.storageUsed == null ? '' : formatBytes(s.storageUsed)}</div>
