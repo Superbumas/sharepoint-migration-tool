@@ -3,7 +3,7 @@ const PDFDocument = require('pdfkit');
 const { requireAuth, getActor, getTenantId, getProjectId, ownerScope, canAccessRow } = require('../auth/middleware');
 const { getDb } = require('../db');
 const { COLORS, Report, formatBytes, fmtDate, fmtDuration, parseDate } = require('../reports/pdf');
-const { jobOutcome, fileTypeBreakdown, buildClientData, PROBLEM_LABEL, sourceRoot } = require('../reports/data');
+const { jobOutcome, fileTypeBreakdown, buildClientData, PROBLEM_LABEL, sourceRoot, mirrorOutcome } = require('../reports/data');
 const { renderClientPdf } = require('../reports/clientPdf');
 const { renderClientXlsx } = require('../reports/clientXlsx');
 
@@ -171,6 +171,27 @@ router.get('/jobs/:id/report.pdf', (req, res, next) => {
       ]);
     } else {
       r.kv([['Result', 'Source files not removed - source remains intact.', COLORS.muted]]);
+    }
+
+    // --- Destination mirror ----------------------------------------------
+    const mirror = mirrorOutcome(db, job);
+    r.section('Destination mirror (kept in step with the source)');
+    if (mirror.files.length + mirror.folders.length > 0) {
+      r.kv([
+        ['Files removed', `${mirror.files.length.toLocaleString()} (${formatBytes(mirror.bytes)}) - copied in an earlier pass, since deleted, renamed or moved at the source`],
+        ['Folders removed', String(mirror.folders.length)],
+        ['Where they are now', 'Destination site recycle bin - restorable to their original place for up to 93 days, never permanently deleted by the tool', COLORS.green],
+        ['Kept', `Files added at the destination and ${mirror.keptEdited.toLocaleString()} cop${mirror.keptEdited === 1 ? 'y' : 'ies'} edited there since were left untouched`],
+        ['Mirrored at', fmtDate(mirror.at)],
+      ]);
+      r.table(
+        ['Removed item', 'Type', 'Size'],
+        [r.width * 0.76, r.width * 0.1, r.width * 0.14],
+        [...mirror.folders.map((d) => [`${d.path}/`, 'Folder', '']), ...mirror.files.map((f) => [f.path, 'File', formatBytes(f.size)])],
+        { rowHeight: 11, fontSize: 6.5, aligns: ['left', 'left', 'right'] }
+      );
+    } else {
+      r.kv([['Result', 'Not run - nothing was removed from the destination.', COLORS.muted]]);
     }
 
     // --- Access not copied (items with their own permissions) --------------

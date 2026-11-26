@@ -151,6 +151,21 @@ param(
     # root - recycled items still count toward SharePoint storage quota for 93
     # days otherwise. Touches nothing outside the source root. Irreversible.
     [switch]$PurgeRecycleBin,
+    # Target mirror ("Mirror the source" on a completed job): removes from the
+    # TARGET what this tool copied earlier but is no longer in the source -
+    # files deleted, renamed or moved at the source since a test pass - plus
+    # the folders that leaves empty. -MirrorOwnedPath is a JSON file the
+    # server writes: { owned: [{ path, at }], approved: [rel] } where path is
+    # a target server-relative URL this mapping's jobs copied and at the UTC
+    # time the tool last wrote it. Files the tool never copied (added at the
+    # target) and copies edited at the target since are always kept.
+    # Without -MirrorApply it only emits a mirror_preview (nothing changes);
+    # with it, every approved file is re-checked right now and moved to the
+    # TARGET site's recycle bin (recoverable ~93 days), never deleted
+    # permanently. Like -VerifyOnly it never emits job_* lifecycle events.
+    [switch]$MirrorTarget,
+    [switch]$MirrorApply,
+    [string]$MirrorOwnedPath,
     # Pre-flight-only mode: connects, scans the source tree and runs the
     # content checks (target path length, file size, unique permissions -
     # see engine/lib/Preflight.psm1), emits one preflight_report event and
@@ -540,6 +555,9 @@ try {
     if ($isOneDriveTarget -and $isFsSource -and -not $TargetOneDriveHostUrl) {
         throw 'TargetOneDriveHostUrl is required for a filesystem source migrating into OneDrive (there is no other SharePoint connection in this job to mint a Graph token from).'
     }
+    if ($MirrorTarget -and ($isFsSource -or $isBlobTarget -or $isOneDriveTarget)) {
+        throw 'Mirroring the source is available for SharePoint/OneDrive to SharePoint jobs only.'
+    }
     if ($isFsSource -and ($CleanupSource -or $PurgeRecycleBin)) {
         # The engine deletes source content only via SharePoint's recycle bin
         # (recoverable); a file share has no equivalent, so a filesystem
@@ -924,6 +942,175 @@ try {
             }
         }
         Write-EngineEvent -Type 'purge_summary' -Data @{ purged = $purged; bytes = $purgedBytes; binTotal = $all.Count }
+        exit 0
+    }
+
+    if ($MirrorTarget) {
+        # --- Target mirror ------------------------------------------------
+        # Makes the target match the source again after a test pass: what
+        # this tool copied earlier and the source no longer has (deleted,
+        # renamed or moved there since) is moved to the TARGET site's recycle
+        # bin, along with the folders that leaves empty. Two things are
+        # always kept: files the tool never copied (someone added them at
+        # the target) and copies someone has edited at the target since the
+        # tool wrote them. Both indexes are read fresh; a preview is never
+        # trusted at apply time - every file is re-checked right now.
+        Write-EngineEvent -Type 'log' -Data @{ level = $(if ($MirrorApply) { 'warn' } else { 'info' }); message = $(if ($MirrorApply) { 'Mirror started: removing from the target the approved files that are no longer in the source - each one is re-checked now and moved to the target site recycle bin (recoverable), never deleted permanently.' } else { 'Mirror preview: comparing the source with the target - nothing is changed.' }) }
+        $owned = Get-Content -LiteralPath $MirrorOwnedPath -Raw | ConvertFrom-Json -AsHashtable
+        # Target server-relative URL -> path relative to this job's target
+        # folder. Anything the tool copied somewhere else (an older target
+        # folder for this mapping) is outside the mirror and ignored.
+        $tgtPrefix = "$targetSiteServerRelative/$targetRoot/".Replace('//', '/')
+        $ownedAt = @{}
+        foreach ($o in @($owned.owned)) {
+            $p = ([string]$o.path).Replace('\', '/')
+            if (-not $p.StartsWith($tgtPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+            $rel = $p.Substring($tgtPrefix.Length).Trim('/')
+            if (-not $rel) { continue }
+            $at = if ($o.at) { [datetime]::Parse([string]$o.at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal) } else { $null }
+            if (-not $ownedAt.ContainsKey($rel) -or ($at -and $ownedAt[$rel] -and $at -gt $ownedAt[$rel])) { $ownedAt[$rel] = $at }
+        }
+        $approved = $null
+        if ($MirrorApply) {
+            $approved = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($a in @($owned.approvedFiles) + @($owned.approvedFolders)) { if ($a) { $null = $approved.Add([string]$a) } }
+        }
+
+        $srcDriveId = Get-GraphDriveId -Connection $sourceConn -SiteUrl $SourceSiteUrl -Library $SourceLibrary
+        $srcFolders = [System.Collections.Generic.List[string]]::new()
+        $srcMap = Get-GraphFileMap -Connection $sourceConn -DriveId $srcDriveId -RootPath $SourcePath -FolderList $srcFolders -OnProgress {
+            param($count)
+            Write-PhaseProgress -Phase 'indexing_source' -Data @{ files = $count }
+        }
+        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Mirror: source has $($srcMap.Count) file(s) in $($srcFolders.Count) folder(s). Now reading the target..." }
+        $tgtDriveId = Get-GraphDriveId -Connection $targetConn -SiteUrl $effTargetSite -Library $effTargetLib
+        $tgtFolders = [System.Collections.Generic.List[string]]::new()
+        $tgtMap = Get-GraphFileMap -Connection $targetConn -DriveId $tgtDriveId -RootPath $targetPathInLib -IncludeDetails -FolderList $tgtFolders -OnProgress {
+            param($count)
+            Write-PhaseProgress -Phase 'indexing_target' -Data @{ files = $count }
+        }
+        # An empty source next to a target full of copies is far more likely
+        # a source that could not be read than one that was emptied - refuse
+        # rather than clear the target.
+        if ($srcMap.Count -eq 0 -and $tgtMap.Count -gt 0) {
+            throw "The source folder lists no files at all while the target has $($tgtMap.Count) - stopping without removing anything. If the source really was emptied, remove the target folder by hand."
+        }
+        $srcFolderSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($f in $srcFolders) { $null = $srcFolderSet.Add($f) }
+
+        # A copy counts as edited at the target if it was modified after the
+        # tool last wrote it (the copy itself carries the source's original
+        # modified date, or the copy time when that stamp failed).
+        $graceSec = 120
+        $removeFiles = [System.Collections.Generic.List[object]]::new()
+        $keptEdited = [System.Collections.Generic.List[object]]::new()
+        $keptAdded = [System.Collections.Generic.List[object]]::new()
+        foreach ($rel in @($tgtMap.Keys)) {
+            if ($srcMap.ContainsKey($rel)) { continue }
+            $t = $tgtMap[$rel]
+            $mod = if ($t.Modified) { ([datetime]$t.Modified).ToUniversalTime() } else { $null }
+            $entry = @{ path = $rel; size = [long]$t.Size; modified = $(if ($mod) { $mod.ToString('o') } else { $null }); modifiedBy = $t.EditorEmail }
+            if (-not $ownedAt.ContainsKey($rel)) { $keptAdded.Add($entry); continue }
+            $at = $ownedAt[$rel]
+            if ($mod -and $at -and $mod -gt $at.AddSeconds($graceSec)) { $keptEdited.Add($entry); continue }
+            $removeFiles.Add($entry)
+        }
+        # Folders: not in the source, and nothing left beneath them once the
+        # removals are done (kept files protect their whole parent chain).
+        $removeSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($r in $removeFiles) { $null = $removeSet.Add($r.path) }
+        $protected = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($rel in @($tgtMap.Keys)) {
+            if ($removeSet.Contains($rel)) { continue }
+            $parts = @(($rel -split '/') | Where-Object { $_ })
+            for ($i = 1; $i -lt $parts.Count; $i++) { $null = $protected.Add(($parts[0..($i - 1)] -join '/')) }
+        }
+        # Only folders the tool created: an ancestor of something it copied.
+        $ownedFolders = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($rel in @($ownedAt.Keys)) {
+            $parts = @(($rel -split '/') | Where-Object { $_ })
+            for ($i = 1; $i -lt $parts.Count; $i++) { $null = $ownedFolders.Add(($parts[0..($i - 1)] -join '/')) }
+        }
+        $removeFolders = @($tgtFolders | Where-Object { $_ -and -not $srcFolderSet.Contains($_) -and -not $protected.Contains($_) -and $ownedFolders.Contains($_) } |
+            Sort-Object { ($_ -split '/').Count } -Descending)
+        # Drop folders whose parent is also being removed - recycling the
+        # parent takes them along, and listing both reads as double counting.
+        $folderSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$removeFolders, [System.StringComparer]::OrdinalIgnoreCase)
+        $topFolders = @($removeFolders | Where-Object {
+            $parts = @($_ -split '/'); $under = $false
+            for ($i = 1; $i -lt $parts.Count; $i++) { if ($folderSet.Contains(($parts[0..($i - 1)] -join '/'))) { $under = $true; break } }
+            -not $under
+        })
+
+        if (-not $MirrorApply) {
+            [long]$bytes = ($removeFiles | Measure-Object -Property size -Sum).Sum
+            Write-EngineEvent -Type 'mirror_preview' -Data @{
+                sourceFiles = $srcMap.Count; targetFiles = $tgtMap.Count
+                files = @($removeFiles | Sort-Object { $_.path }); bytes = $bytes
+                folders = @($removeFolders | Sort-Object); topFolders = @($topFolders | Sort-Object)
+                keptEdited = @($keptEdited | Sort-Object { $_.path })
+                keptAddedCount = $keptAdded.Count; keptAdded = @($keptAdded | Sort-Object { $_.path } | Select-Object -First 500)
+            }
+            exit 0
+        }
+
+        $removed = [System.Collections.Generic.List[object]]::new()
+        $kept = [System.Collections.Generic.List[object]]::new()
+        $n = 0
+        foreach ($r in $removeFiles) {
+            $n++
+            Write-PhaseProgress -Phase 'mirroring' -Data @{ done = $n; total = $removeFiles.Count; current = $r.path }
+            if (-not $approved.Contains($r.path)) { continue }   # not in the preview that was approved
+            $serverRel = "$tgtPrefix$($r.path)"
+            try {
+                Remove-PnPFile -ServerRelativeUrl $serverRel -Recycle -Force -Connection $targetConn -ErrorAction Stop | Out-Null
+                $removed.Add($r)
+                Write-EngineEvent -Type 'target_removed' -Data @{ targetPath = $serverRel; kind = 'file'; size = $r.size }
+            } catch {
+                $kept.Add(@{ path = $r.path; reason = "could not recycle: $($_.Exception.Message)" })
+                Write-EngineEvent -Type 'target_kept' -Data @{ targetPath = $serverRel; reason = "could not recycle: $($_.Exception.Message)" }
+            }
+        }
+        # Approved files that no longer qualify (back in the source, edited
+        # at the target since the preview) are kept and said so.
+        $nowRemovable = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($r in $removeFiles) { $null = $nowRemovable.Add($r.path) }
+        foreach ($a in @($owned.approvedFiles)) {
+            if ($a -and -not $nowRemovable.Contains([string]$a)) {
+                $reason = if ($srcMap.ContainsKey([string]$a)) { 'back in the source since the preview' } elseif (-not $tgtMap.ContainsKey([string]$a)) { 'already gone from the target' } else { 'edited at the target since the preview' }
+                $kept.Add(@{ path = [string]$a; reason = $reason })
+                Write-EngineEvent -Type 'target_kept' -Data @{ targetPath = "$tgtPrefix$a"; reason = $reason }
+            }
+        }
+        $foldersRemoved = [System.Collections.Generic.List[string]]::new()
+        foreach ($relDir in $removeFolders) {
+            if (-not $approved.Contains($relDir)) { continue }
+            $leaf = ($relDir -split '/')[-1]
+            $parentRel = if ($relDir.Contains('/')) { $relDir.Substring(0, $relDir.LastIndexOf('/')) } else { '' }
+            $parentPath = "$targetRoot/$parentRel".TrimEnd('/').Replace('//', '/')
+            try {
+                Remove-PnPFolder -Name $leaf -Folder $parentPath -Recycle -Force -Connection $targetConn -ErrorAction Stop | Out-Null
+                $foldersRemoved.Add($relDir)
+                Write-EngineEvent -Type 'target_removed' -Data @{ targetPath = "$tgtPrefix$relDir"; kind = 'folder' }
+            } catch {
+                Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Mirror: could not recycle empty folder '$relDir': $($_.Exception.Message)" }
+            }
+        }
+        $folderRemovedSet = [System.Collections.Generic.HashSet[string]]::new([string[]]@($foldersRemoved), [System.StringComparer]::OrdinalIgnoreCase)
+        [long]$bytesRemoved = ($removed | Measure-Object -Property size -Sum).Sum
+        Write-EngineEvent -Type 'mirror_summary' -Data @{
+            removed = $removed.Count; bytes = $bytesRemoved; foldersRemoved = $foldersRemoved.Count; kept = $kept.Count
+            files = @($removed | Sort-Object { $_.path })
+            folders = @($foldersRemoved | Where-Object {
+                $parts = @($_ -split '/'); $under = $false
+                for ($i = 1; $i -lt $parts.Count; $i++) { if ($folderRemovedSet.Contains(($parts[0..($i - 1)] -join '/'))) { $under = $true; break } }
+                -not $under
+            } | Sort-Object)
+            keptList = @($kept)
+            keptEdited = @($keptEdited | Sort-Object { $_.path })
+            keptAddedCount = $keptAdded.Count
+            targetSite = $effTargetSite; targetFolder = $targetRoot
+        }
         exit 0
     }
 
