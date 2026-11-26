@@ -264,6 +264,18 @@ router.post('/jobs/:id/purge-recycle-bin', (req, res, next) => {
   catch (err) { next(err); }
 });
 
+router.post('/jobs/:id/mirror-preview', (req, res, next) => {
+  if (!requireVisibleJob(req, res)) return;
+  try { res.json(mapJob(orchestrator.mirrorPreviewJob(req.params.id, getActor(req), getTenantId(req)))); }
+  catch (err) { next(err); }
+});
+
+router.post('/jobs/:id/mirror-apply', (req, res, next) => {
+  if (!requireVisibleJob(req, res)) return;
+  try { res.json(mapJob(orchestrator.mirrorApplyJob(req.params.id, getActor(req), getTenantId(req)))); }
+  catch (err) { next(err); }
+});
+
 router.post('/jobs/:id/pause', (req, res, next) => {
   if (!requireVisibleJob(req, res)) return;
   try { res.json(mapJob(orchestrator.pauseJob(req.params.id, getActor(req), getTenantId(req)))); }

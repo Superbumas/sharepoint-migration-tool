@@ -94,7 +94,10 @@ function Get-GraphFileMap {
         [scriptblock]$OnRetry,
         # Adds each file's pre-authenticated download link (valid ~1 hour) -
         # used by the content check of files SharePoint rewrites.
-        [switch]$IncludeDownloadUrl
+        [switch]$IncludeDownloadUrl,
+        # When given, receives the path (relative to RootPath) of every folder
+        # found under it - the target mirror needs folders as well as files.
+        [System.Collections.Generic.List[string]]$FolderList
     )
     $root = $RootPath.Trim('/')
     $select = 'name,size,file,folder'
@@ -128,6 +131,7 @@ function Get-GraphFileMap {
                 $childPath = if ($current) { "$current/$($item.name)" } else { $item.name }
                 if ($item.folder) {
                     $stack.Push($childPath)
+                    if ($null -ne $FolderList) { $FolderList.Add($(if ($root) { $childPath.Substring($root.Length).TrimStart('/') } else { $childPath })) }
                 } else {
                     $rel = if ($root) { $childPath.Substring($root.Length).TrimStart('/') } else { $childPath }
                     $entry = @{ Size = [long]$item.size; Hash = $item.file.hashes.quickXorHash }

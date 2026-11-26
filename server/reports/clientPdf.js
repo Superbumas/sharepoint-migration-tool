@@ -139,6 +139,35 @@ function renderClientPdf(out, data, { title, client, preparedBy, inventory }) {
     );
   }
 
+  // --- Kept in step with the source (target mirror) ------------------------
+  const mirrored = folders.flatMap((f) => [
+    ...f.mirror.folders.map((d) => ({ folder: f.name, path: `${d.path}/`, kind: 'Folder', size: null, at: d.at })),
+    ...f.mirror.files.map((m) => ({ folder: f.name, path: m.path, kind: 'File', size: m.size, at: m.at })),
+  ]);
+  if (mirrored.length > 0) {
+    r.section('Kept in step with the source');
+    r.paragraph(
+      'The source stayed in use between the first copy and the final one. Before signing off, the destination was brought back into line with it: '
+      + `${plural(totals.mirroredFiles, 'file')}${totals.mirroredFolders ? ` and ${plural(totals.mirroredFolders, 'folder')}` : ''} `
+      + 'that had since been deleted, renamed or moved at the source were removed from the destination, so it now matches the source exactly. '
+      + '(A renamed or moved file is already at the destination under its new name or location.)'
+    );
+    r.callout('Nothing was permanently deleted',
+      'These items were moved to the destination SharePoint site\'s recycle bin. They can be restored from there, to their original place, '
+      + 'for up to 93 days after the date shown; after that SharePoint empties the recycle bin automatically. '
+      + 'Files that had been added or edited directly at the destination were left untouched.');
+    if (mirrored.length <= INVENTORY_PDF_LIMIT) {
+      r.table(
+        ['Folder', 'Removed item', 'Type', 'Moved to recycle bin'],
+        [r.width * 0.17, r.width * 0.55, r.width * 0.1, r.width * 0.18],
+        mirrored.map((m) => [m.folder, m.path, m.kind, fmtDay(m.at)]),
+        { rowHeight: 13, fontSize: 7 }
+      );
+    } else {
+      r.paragraph(`The full list of ${mirrored.length.toLocaleString()} removed items is in the accompanying Excel workbook ("Removed (recycle bin)").`, { color: COLORS.muted, size: 8.5 });
+    }
+  }
+
   // --- Files to review -----------------------------------------------------
   const review = folders.flatMap((f) => f.notMigrated.map((n) => ({ ...n, folder: f.name })));
   if (review.length > 0) {
@@ -163,6 +192,9 @@ function renderClientPdf(out, data, { title, client, preparedBy, inventory }) {
       ['From', `${f.source.where}  (${f.source.kind})`],
       ['To', `${f.target.where}  (${f.target.kind})`],
       ['Completed', fmtDay(f.completedAt)],
+      ...(f.mirror.files.length + f.mirror.folders.length > 0
+        ? [['Kept in step', `${plural(f.mirror.files.length, 'file')}${f.mirror.folders.length ? ` and ${plural(f.mirror.folders.length, 'folder')}` : ''} no longer in the source moved to the destination recycle bin (restorable up to 93 days)`]]
+        : []),
     ], { labelW: 70 });
     doc.moveDown(0.4);
     const st = statusFor(f);

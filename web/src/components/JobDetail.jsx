@@ -46,6 +46,12 @@ const EVENT_STYLE = {
   cleanup_summary: { badge: '🗑 done', badgeClass: 'bg-green-500/15 text-green-400 font-semibold', rowClass: 'text-green-300' },
   purge_started: { badge: '⛔ purge', badgeClass: 'bg-red-500/15 text-red-400 font-semibold', rowClass: 'text-red-300' },
   purge_summary: { badge: '⛔ purged', badgeClass: 'bg-green-500/15 text-green-400 font-semibold', rowClass: 'text-green-300' },
+  mirror_preview_started: { badge: '⇄ mirror', badgeClass: 'bg-sky-500/15 text-sky-400', rowClass: 'text-sky-300' },
+  mirror_preview: { badge: '⇄ preview', badgeClass: 'bg-sky-500/15 text-sky-400', rowClass: 'text-sky-300' },
+  mirror_started: { badge: '⇄ mirror', badgeClass: 'bg-amber-500/15 text-amber-400 font-semibold', rowClass: 'text-amber-300' },
+  target_removed: { badge: '🗑 recycled', badgeClass: 'text-slate-500', rowClass: 'text-slate-500' },
+  target_kept: { badge: '⚠ kept', badgeClass: 'bg-amber-500/15 text-amber-400', rowClass: 'text-amber-300' },
+  mirror_summary: { badge: '⇄ done', badgeClass: 'bg-green-500/15 text-green-400 font-semibold', rowClass: 'text-green-300' },
 };
 
 // 'log' events carry a level (info/warn/error) rather than a distinct type.
@@ -62,7 +68,7 @@ function styleFor(line) {
 // Failures/Warnings counts start from the latest one.
 // Verify / clean-up / purge on a finished job also start a fresh view, so a
 // Verify doesn't sit under the previous run's copied lines.
-const RUN_START_EVENTS = new Set(['job_restarted', 'job_run', 'job_resumed', 'verify_started', 'repair_started', 'permissions_started', 'cleanup_started', 'purge_started']);
+const RUN_START_EVENTS = new Set(['job_restarted', 'job_run', 'job_resumed', 'verify_started', 'repair_started', 'permissions_started', 'cleanup_started', 'purge_started', 'mirror_preview_started', 'mirror_started']);
 
 // Human line for the phase banner, per engine phase_progress event shape
 // (engine/Invoke-MigrationJob.ps1's Write-PhaseProgress call sites).
@@ -91,6 +97,8 @@ function phaseLabel(phase) {
       return `Copying item permissions — ${n(phase.done)} of ${n(phase.total)} items`;
     case 'purging':
       return `Purging recycle bin — ${n(phase.purged)} of ${n(phase.total)} permanently deleted`;
+    case 'mirroring':
+      return `Mirroring the source — ${n(phase.done)} of ${n(phase.total)} leftover(s) moved to the destination recycle bin${phase.current ? ` · ${String(phase.current).split('/').pop()}` : ''}`;
     case 'clearing_folders':
       return `Recycling emptied folders — ${n(phase.done)} of ${n(phase.total)}`;
     case 'preflight':
@@ -156,6 +164,7 @@ export default function JobDetail() {
   // unless asked for.
   const [showEarlierRuns, setShowEarlierRuns] = useState(false);
   const [showProblems, setShowProblems] = useState(false);
+  const [showMirror, setShowMirror] = useState(false);
   const [showPreflight, setShowPreflight] = useState(false);
   const [showPerms, setShowPerms] = useState(false);
   // True from clicking "Pre-flight check" until its report lands (or the run
@@ -296,6 +305,17 @@ export default function JobDetail() {
         refreshJob();
         return;
       }
+      if (action === 'mirror-apply') {
+        const p = job.mirrorPreview || {};
+        const answer = prompt(
+          `MIRROR THE SOURCE?\n\n${(p.files || []).length.toLocaleString()} file(s) and ${(p.topFolders || []).length.toLocaleString()} folder(s) at the destination are no longer in the source (deleted, renamed or moved there). They will be moved to the DESTINATION site's RECYCLE BIN - recoverable from there for ~93 days, nothing is deleted permanently.\n\nEach file is re-checked first; anything back in the source or edited at the destination since the preview is kept. Files added at the destination and copies edited there are never touched.\n\nType MIRROR to proceed.`
+        );
+        if (answer !== 'MIRROR') return;
+        await api.post(`/api/jobs/${id}/mirror-apply`);
+        setShowMirror(false);
+        refreshJob();
+        return;
+      }
       if (action === 'purge-recycle-bin') {
         const answer = prompt(
           'PERMANENTLY DELETE RECYCLED ITEMS?\n\nThis permanently removes the recycle-bin items this job\'s cleanup created (only items from this job\'s source folder - nothing else). They can NOT be recovered afterwards.\n\nThis is how the SharePoint storage actually gets freed - recycled items count toward quota for 93 days otherwise.\n\nType PURGE to proceed.'
@@ -396,7 +416,7 @@ export default function JobDetail() {
     if (logFilter === 'all') return true;
     if (logFilter === 'failures') return !resolvedRows.has(l) && (l.event_type === 'item_failed' || l.event_type === 'verify_mismatch' || l.event_type === 'job_failed' || (l.event_type === 'log' && l.level === 'error'));
     if (logFilter === 'warnings') return l.event_type === 'item_retry' || l.event_type === 'source_kept' || l.event_type === 'job_interrupted' || (l.event_type === 'log' && l.level === 'warn');
-    if (logFilter === 'job') return String(l.event_type || '').startsWith('job_') || ['verification_summary', 'verify_started', 'cleanup_started', 'cleanup_summary', 'purge_started', 'purge_summary'].includes(l.event_type);
+    if (logFilter === 'job') return String(l.event_type || '').startsWith('job_') || ['verification_summary', 'verify_started', 'cleanup_started', 'cleanup_summary', 'purge_started', 'purge_summary', 'mirror_preview_started', 'mirror_preview', 'mirror_started', 'mirror_summary'].includes(l.event_type);
     return true;
   });
   const failureCount = runLog.filter((l) => !resolvedRows.has(l) && (l.event_type === 'item_failed' || l.event_type === 'verify_mismatch' || (l.event_type === 'log' && l.level === 'error'))).length;
@@ -515,7 +535,7 @@ export default function JobDetail() {
   const backgroundOp = backgroundOpEarly;
   // While a Verify / clean-up / pre-flight runs, the progress card shows
   // that run, not the finished copy's "Completed — N of N".
-  const OP_LABELS = { verify: 'Verifying', repair: 'Repairing failed files', permissions: 'Copying item permissions', preflight: 'Pre-flight check', cleanup: 'Cleaning source', purge: 'Purging recycle bin' };
+  const OP_LABELS = { mirror: 'Mirroring the source', 'mirror-preview': 'Checking what changed in the source', verify: 'Verifying', repair: 'Repairing failed files', permissions: 'Copying item permissions', preflight: 'Pre-flight check', cleanup: 'Cleaning source', purge: 'Purging recycle bin' };
   const opPhase = backgroundOp ? job.phase : null;
   const opDone = opPhase ? (opPhase.done ?? opPhase.deleted ?? opPhase.purged) : null;
   const opTotal = opPhase?.total || null;
@@ -525,6 +545,12 @@ export default function JobDetail() {
   }
   if (job.activeOperation === 'permissions') {
     notices.push({ key: 'verifying', tone: 'info', title: 'Copying item permissions now', detail: 'the recorded people, groups and sharing links are being applied to the copied items · results go into Export access (CSV)' });
+  }
+  if (job.activeOperation === 'mirror-preview') {
+    notices.push({ key: 'verifying', tone: 'info', title: 'Checking the source against the destination', detail: 'nothing is changed · the list of leftovers appears here when it finishes' });
+  }
+  if (job.activeOperation === 'mirror') {
+    notices.push({ key: 'verifying', tone: 'info', title: 'Mirroring the source now', detail: 'leftovers are being moved to the destination site\'s recycle bin (recoverable) · the result appears here when it finishes' });
   }
   if (job.activeOperation === 'repair') {
     notices.push({ key: 'verifying', tone: 'info', title: 'Repairing now', detail: 're-copying and re-checking only the files the last verification flagged · the result appears here when it finishes' });
@@ -563,6 +589,88 @@ export default function JobDetail() {
           {v.problemsTruncated && <div className="text-xs text-slate-500 py-1">List capped at 200 files — the full set is in the job log (verify entries).</div>}
         </div>
       ),
+    });
+  }
+  // Target mirror: SharePoint to SharePoint only. Preview first (nothing
+  // changes), then move what the preview listed to the destination recycle
+  // bin. Hidden while another background run is going.
+  const mirrorable = job.status === 'completed' && !backgroundOp
+    && (job.source.provider || 'sharepoint') === 'sharepoint' && (job.target.provider || 'sharepoint') === 'sharepoint';
+  const mp = job.mirrorPreview;
+  const mr = job.mirror;
+  if (mirrorable && mp) {
+    const nFiles = (mp.files || []).length;
+    const nFolders = (mp.topFolders || []).length;
+    const nothing = nFiles === 0 && nFolders === 0;
+    notices.push({
+      key: 'mirror-preview', tone: nothing ? 'ok' : 'warn',
+      title: nothing
+        ? 'Destination already mirrors the source — nothing to remove'
+        : `Mirror preview: ${nFiles.toLocaleString()} file(s)${nFolders ? ` and ${nFolders.toLocaleString()} folder(s)` : ''} at the destination are no longer in the source`,
+      detail: [
+        !nothing && `${formatBytes(mp.bytes || 0)} · deleted, renamed or moved in the source since they were copied`,
+        !nothing && 'they go to the destination site\'s recycle bin, recoverable for ~93 days',
+        (mp.keptEdited || []).length > 0 && `${mp.keptEdited.length.toLocaleString()} edited at the destination since — kept`,
+        mp.keptAddedCount > 0 && `${mp.keptAddedCount.toLocaleString()} added at the destination (not from this source) — kept`,
+        job.mirrorPreviewAt && `checked ${job.mirrorPreviewAt}`,
+      ].filter(Boolean).join(' · '),
+      action: (
+        <>
+          {(nFiles > 0 || nFolders > 0 || (mp.keptEdited || []).length > 0 || mp.keptAddedCount > 0) && (
+            <button type="button" onClick={() => setShowMirror((s) => !s)} className="text-xs font-medium text-blue-600 hover:underline shrink-0">{showMirror ? 'Hide list' : 'Show list'}</button>
+          )}
+          <button type="button" disabled={busy} onClick={() => act('mirror-preview')} className="btn-secondary shrink-0">Check again</button>
+          {!nothing && <button type="button" disabled={busy} onClick={() => act('mirror-apply')} className="btn-danger shrink-0">Move {(nFiles + nFolders).toLocaleString()} to recycle bin…</button>}
+        </>
+      ),
+      expanded: showMirror && (
+        <div className="max-h-64 overflow-y-auto border-t border-slate-100 bg-slate-50/60 pl-11 pr-4 py-1">
+          {(mp.topFolders || []).map((f) => (
+            <div key={`d:${f}`} className="grid grid-cols-[96px_minmax(0,1fr)] gap-3 items-baseline text-xs py-1">
+              <span className="rounded bg-red-100 text-red-700 px-1.5 py-0.5 text-[11px] font-medium text-center">folder</span>
+              <span className="font-mono truncate text-slate-700" title={f}>{f}/</span>
+            </div>
+          ))}
+          {(mp.files || []).map((f) => (
+            <div key={`f:${f.path}`} className="grid grid-cols-[96px_minmax(0,1fr)] gap-3 items-baseline text-xs py-1">
+              <span className="rounded bg-red-100 text-red-700 px-1.5 py-0.5 text-[11px] font-medium text-center">remove</span>
+              <span className="font-mono truncate text-slate-700" title={f.path}>{f.path}</span>
+            </div>
+          ))}
+          {(mp.keptEdited || []).map((f) => (
+            <div key={`e:${f.path}`} className="grid grid-cols-[96px_minmax(0,1fr)] gap-3 items-baseline text-xs py-1">
+              <span className="rounded bg-amber-100 text-amber-800 px-1.5 py-0.5 text-[11px] font-medium text-center">keep · edited</span>
+              <span className="font-mono truncate text-slate-700" title={`${f.path}${f.modifiedBy ? ` — last edited by ${f.modifiedBy}` : ''}`}>{f.path}</span>
+            </div>
+          ))}
+          {(mp.keptAdded || []).map((f) => (
+            <div key={`a:${f.path}`} className="grid grid-cols-[96px_minmax(0,1fr)] gap-3 items-baseline text-xs py-1">
+              <span className="rounded bg-slate-200 text-slate-700 px-1.5 py-0.5 text-[11px] font-medium text-center">keep · added</span>
+              <span className="font-mono truncate text-slate-700" title={f.path}>{f.path}</span>
+            </div>
+          ))}
+          {mp.keptAddedCount > (mp.keptAdded || []).length && <div className="text-xs text-slate-500 py-1">… and {(mp.keptAddedCount - mp.keptAdded.length).toLocaleString()} more added at the destination (kept).</div>}
+        </div>
+      ),
+    });
+  } else if (mirrorable && mr) {
+    notices.push({
+      key: 'mirror', tone: mr.kept > 0 ? 'warn' : 'ok',
+      title: `Mirrored: ${(mr.removed ?? 0).toLocaleString()} file(s) and ${(mr.folders || []).length.toLocaleString()} folder(s) moved to the destination recycle bin`,
+      detail: [
+        'recoverable from the destination site\'s recycle bin for ~93 days',
+        mr.kept > 0 && `${mr.kept.toLocaleString()} kept (see the log)`,
+        (mr.keptEdited || []).length > 0 && `${mr.keptEdited.length.toLocaleString()} edited at the destination kept`,
+        mr.keptAddedCount > 0 && `${mr.keptAddedCount.toLocaleString()} added at the destination kept`,
+        job.mirroredAt,
+      ].filter(Boolean).join(' · '),
+      action: <button type="button" disabled={busy} onClick={() => act('mirror-preview')} className="btn-secondary shrink-0">Check again</button>,
+    });
+  } else if (mirrorable) {
+    notices.push({
+      key: 'mirror-offer', tone: 'info', title: 'Files deleted, renamed or moved in the source since?',
+      detail: 'mirror the source: find what the destination still has that the source no longer does · preview first, nothing changes until you approve',
+      action: <button type="button" disabled={busy} onClick={() => act('mirror-preview')} className="btn-secondary shrink-0">Mirror the source…</button>,
     });
   }
   if (job.cleanup) {

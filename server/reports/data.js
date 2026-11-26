@@ -230,6 +230,30 @@ function displayName(job, mapping) {
   return folderName(job);
 }
 
+// Everything "Mirror the source" removed for this location, across every
+// job of its mapping (the mirror usually runs on the final pass, but an
+// earlier one counts too). Items are relative to the location's folder.
+function mirrorOutcome(db, job) {
+  const rows = job.mapping_id
+    ? db.prepare('SELECT mirror_json FROM jobs WHERE mapping_id = ? AND mirror_json IS NOT NULL ORDER BY mirrored_at').all(job.mapping_id)
+    : (job.mirror_json ? [{ mirror_json: job.mirror_json }] : []);
+  const files = [];
+  const folders = [];
+  let bytes = 0;
+  let at = null;
+  let keptEdited = 0;
+  for (const r of rows) {
+    const m = safeParse(r.mirror_json);
+    if (!m) continue;
+    for (const f of m.files || []) files.push({ path: f.path, size: f.size ?? null, at: m.at });
+    for (const d of m.folders || []) folders.push({ path: d, at: m.at });
+    bytes += m.bytes || 0;
+    keptEdited = (m.keptEdited || []).length;
+    at = m.at || at;
+  }
+  return { files, folders, bytes, at, keptEdited };
+}
+
 function buildClientData(db, jobs) {
   const getMapping = db.prepare('SELECT * FROM mappings WHERE id = ?');
   const folders = pickLatestPerMapping(jobs).map((job) => {
@@ -242,6 +266,7 @@ function buildClientData(db, jobs) {
       target: describeTarget(job, mapping, outcome),
       completedAt: job.completed_at,
       startedAt: job.started_at,
+      mirror: mirrorOutcome(db, job),
     };
   }).sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }));
 
@@ -261,6 +286,9 @@ function buildClientData(db, jobs) {
       contentUnchecked: folders.reduce((s, f) => s + (f.ver.contentUnchecked || 0), 0),
       unverifiedFolders: folders.filter((f) => f.ver.state === 'unverified').length,
       expectedRewrites: folders.reduce((s, f) => s + f.ver.expectedRewrites, 0),
+      mirroredFiles: folders.reduce((s, f) => s + f.mirror.files.length, 0),
+      mirroredFolders: folders.reduce((s, f) => s + f.mirror.folders.length, 0),
+      mirroredBytes: folders.reduce((s, f) => s + f.mirror.bytes, 0),
       // Items whose sharing differed from their parent at the source (from
       // the pre-flight). Permissions are not copied; the client report names
       // no one - the "who had access" CSV is provided separately.
@@ -276,6 +304,6 @@ function buildClientData(db, jobs) {
 
 module.exports = {
   OFFICE_EXTENSIONS, PROBLEM_LABEL, isOfficeFile, extOf, safeParse,
-  sourceRoot, relativizer, folderName, effectiveVerification, jobOutcome,
+  sourceRoot, relativizer, folderName, effectiveVerification, jobOutcome, mirrorOutcome,
   fileTypeBreakdown, pickLatestPerMapping, buildClientData,
 };

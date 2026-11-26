@@ -890,6 +890,18 @@ function consoleEngineEvent(job, event) {
     case 'cleanup_summary':
       clog.ok('cleanup', `${name}: source cleanup done — ${(event.deleted ?? 0).toLocaleString()} file(s) recycled, ${(event.kept ?? 0).toLocaleString()} kept, ${(event.foldersDeleted ?? 0).toLocaleString()} empty folder(s) removed`);
       break;
+    case 'mirror_preview':
+      clog.ok('mirror', `${name}: mirror preview — ${(event.files || []).length.toLocaleString()} file(s) and ${(event.topFolders || []).length.toLocaleString()} folder(s) no longer in the source (nothing changed yet)`);
+      break;
+    case 'target_removed':
+      if (!throttled()) clog.progress('mirror', `${name}: moving leftovers to the target recycle bin…`);
+      break;
+    case 'target_kept':
+      clog.warn('mirror', `${name}: KEPT ${event.targetPath} — ${event.reason}`);
+      break;
+    case 'mirror_summary':
+      clog.ok('mirror', `${name}: mirror done — ${(event.removed ?? 0).toLocaleString()} file(s) and ${(event.foldersRemoved ?? 0).toLocaleString()} folder(s) moved to the target recycle bin, ${(event.kept ?? 0).toLocaleString()} kept`);
+      break;
     case 'purge_summary':
       clog.ok('purge', `${name}: ${(event.purged ?? 0).toLocaleString()} recycled item(s) permanently purged (${fmtBytes(event.bytes)}) — storage freed`);
       break;
@@ -1160,6 +1172,34 @@ function handleEngineEvent(jobId, event, state) {
     }
     case 'source_kept': {
       insertLog(jobId, { event_type: 'source_kept', source_path: event.sourcePath, error_message: event.reason });
+      break;
+    }
+    case 'mirror_preview': {
+      const { type, ...preview } = event;
+      db.prepare(`UPDATE jobs SET mirror_preview_json = ?, mirror_preview_at = datetime('now'), phase_json = NULL WHERE id = ?`).run(
+        JSON.stringify(preview), jobId
+      );
+      insertLog(jobId, {
+        event_type: 'mirror_preview',
+        error_message: `Mirror preview: ${(preview.files || []).length} file(s) and ${(preview.topFolders || []).length} folder(s) at the target are no longer in the source; ${(preview.keptEdited || []).length} edited at the target and ${preview.keptAddedCount || 0} added at the target will be kept. Nothing was changed.`,
+      });
+      break;
+    }
+    case 'target_removed': {
+      insertLog(jobId, { event_type: 'target_removed', target_path: event.targetPath, outcome: 'success', error_message: event.kind === 'folder' ? 'empty folder moved to the target recycle bin' : 'moved to the target recycle bin' });
+      break;
+    }
+    case 'target_kept': {
+      insertLog(jobId, { event_type: 'target_kept', target_path: event.targetPath, error_message: event.reason });
+      break;
+    }
+    case 'mirror_summary': {
+      const { type, ...summary } = event;
+      // The preview has been acted on - a new apply needs a new preview.
+      db.prepare(`UPDATE jobs SET mirror_json = ?, mirrored_at = datetime('now'), mirror_preview_json = NULL, mirror_preview_at = NULL, phase_json = NULL WHERE id = ?`).run(
+        JSON.stringify({ ...summary, at: new Date().toISOString() }), jobId
+      );
+      insertLog(jobId, { event_type: 'mirror_summary', raw_json: summary });
       break;
     }
     case 'cleanup_summary': {
@@ -1693,6 +1733,124 @@ function purgeRecycleBinJob(jobId, actor, tenantId) {
   return updated;
 }
 
+// "Mirror the source": removes from the target what this tool copied earlier
+// but the source no longer has - files deleted, renamed or moved at the
+// source after a test pass - and the folders that leaves empty. Two steps:
+// a preview (nothing changes, mirror_preview_json) and an apply that acts
+// only on what the preview listed, re-checking every file at that moment.
+// Removals go to the TARGET site's recycle bin (recoverable ~93 days).
+// Kept, always: files the tool never copied there (added at the target),
+// copies edited at the target since the tool wrote them, and paths another
+// mapping copied (several sources can share one destination folder).
+function mirrorOwnedFile(job, approved) {
+  const db = getDb();
+  const sqliteToIso = (s) => (s ? `${String(s).replace(' ', 'T')}${/Z$|[+-]\d\d:?\d\d$/.test(s) ? '' : 'Z'}` : null);
+  // Every job of this mapping - soft-deleted ones too: their copies are
+  // still at the target.
+  const ownerClause = job.mapping_id ? 'j.mapping_id = ?' : 'j.id = ?';
+  const ownerKey = job.mapping_id || job.id;
+  const rows = db.prepare(
+    `SELECT ji.target_path AS path, MAX(ji.completed_at) AS at
+     FROM job_items ji JOIN jobs j ON j.id = ji.job_id
+     WHERE ${ownerClause} AND ji.item_type = 'file' AND ji.status IN ('success', 'skipped') AND ji.target_path != ''
+     GROUP BY lower(ji.target_path)`
+  ).all(ownerKey);
+  const foreign = new Set(db.prepare(
+    `SELECT DISTINCT lower(ji.target_path) AS p
+     FROM job_items ji JOIN jobs j ON j.id = ji.job_id
+     WHERE ${job.mapping_id ? '(j.mapping_id IS NULL OR j.mapping_id != ?)' : 'j.id != ?'}
+       AND j.target_site_url = ? AND ji.item_type = 'file' AND ji.status IN ('success', 'skipped')`
+  ).all(ownerKey, job.target_site_url).map((r) => r.p));
+  const owned = rows.filter((r) => !foreign.has(String(r.path).toLowerCase())).map((r) => ({ path: r.path, at: sqliteToIso(r.at) }));
+  const file = controlFilePath(`${job.id}.mirror`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ owned, approvedFiles: approved?.files || [], approvedFolders: approved?.folders || [] }), 'utf8');
+  return { file, ownedCount: owned.length };
+}
+
+function mirrorTargetJob(jobId, actor, tenantId, opts = {}) {
+  const job = getJob(jobId, tenantId);
+  if (!job) throw httpError(404, 'Job not found');
+  if (job.status !== 'completed') throw httpError(409, `Only completed jobs can be mirrored (this one is "${job.status}"). Run the job first so every new and changed file is copied.`);
+  if ((job.source_provider || 'sharepoint') !== 'sharepoint' || (job.target_provider || 'sharepoint') !== 'sharepoint') {
+    throw httpError(409, 'Mirroring the source is available for SharePoint/OneDrive to SharePoint jobs only.');
+  }
+  let approved = null;
+  if (opts.apply) {
+    let preview = null;
+    try { preview = JSON.parse(job.mirror_preview_json || 'null'); } catch {}
+    if (!preview) throw httpError(409, 'Preview the mirror first - only what a preview listed is ever removed.');
+    approved = { files: (preview.files || []).map((f) => f.path), folders: preview.folders || [] };
+    if (approved.files.length === 0 && approved.folders.length === 0) throw httpError(409, 'The preview found nothing to remove - the target already mirrors the source.');
+  }
+  assertNoAuxiliaryRun(jobId);
+  if (runningJobs.has(jobId)) throw httpError(409, 'This job is running - wait for it to finish.');
+
+  const { file: ownedFile, ownedCount } = mirrorOwnedFile(job, approved);
+  const engineIdentity = resolveEngineIdentity(job.tenant_id || config.tenantId);
+  const args = [
+    '-NoProfile',
+    '-NonInteractive',
+    '-File', config.engineScriptPath,
+    '-JobId', jobId,
+    '-ContentCachePath', contentCachePath(job),
+    '-SourceSiteUrl', job.source_site_url || '',
+    '-SourceLibrary', job.source_library || '',
+    '-SourcePath', job.source_path,
+    '-TargetProvider', 'sharepoint',
+    '-TargetSiteUrl', job.target_site_url || '',
+    '-TargetLibrary', job.target_library || '',
+    '-TargetPath', job.target_path,
+    '-Action', job.action,
+    '-ControlFilePath', controlFilePath(jobId),
+    '-ClientId', engineIdentity.clientId,
+    '-TenantId', job.tenant_id || config.tenantId,
+    '-MirrorTarget',
+    '-MirrorOwnedPath', ownedFile,
+    ...(opts.apply ? ['-MirrorApply'] : []),
+  ];
+  if (!engineIdentity.certBase64) args.push('-CertThumbprint', engineIdentity.certThumbprint);
+  // A new preview replaces the old one from the moment it starts, so an
+  // apply can never act on a list from before the latest check.
+  if (!opts.apply) getDb().prepare('UPDATE jobs SET mirror_preview_json = NULL, mirror_preview_at = NULL WHERE id = ?').run(jobId);
+  const child = spawn(config.pwshExecutable, args, { stdio: ['ignore', 'pipe', 'pipe'], env: buildEngineSpawnEnv(job, engineIdentity, null) });
+  cleanupRuns.set(jobId, child);
+  activeOps.set(jobId, opts.apply ? 'mirror' : 'mirror-preview');
+  child.on('error', (err) => insertLog(jobId, { event_type: 'log', level: 'error', error_message: `Failed to start mirror engine process: ${err.message}` }));
+  insertLog(jobId, { event_type: opts.apply ? 'mirror_started' : 'mirror_preview_started', actor_name: actor.name, actor_email: actor.email, actor_upn: actor.upn, error_message: `${ownedCount.toLocaleString()} file(s) copied by this mapping are checked against the source` });
+  if (opts.apply) clog.warn('mirror', `${job.name}: mirror started by ${actor.name} - leftovers are being moved to the target recycle bin`);
+
+  attachNdjsonParser(
+    child.stdout,
+    (event) => {
+      // A failed mirror must not mark the completed copy job failed.
+      if (event.type === 'job_failed') {
+        insertLog(jobId, { event_type: 'log', level: 'error', error_message: `Mirror stopped, nothing more was removed: ${event.error}` });
+        return;
+      }
+      handleEngineEvent(jobId, event, null);
+    },
+    (rawLine) => insertLog(jobId, { event_type: 'log', error_message: `Unparseable engine output: ${rawLine}` })
+  );
+  child.stderr.on('data', (chunk) => {
+    const text = chunk.toString().trim();
+    if (text) insertLog(jobId, { event_type: 'log', error_message: `[mirror stderr] ${text}` });
+  });
+  child.on('close', () => {
+    cleanupRuns.delete(jobId);
+    activeOps.clear(jobId);
+    try { fs.unlinkSync(ownedFile); } catch {}
+    getDb().prepare('UPDATE jobs SET phase_json = NULL WHERE id = ?').run(jobId);
+    const updated = getJob(jobId);
+    emitJob(jobId, { type: 'job_updated', job: updated });
+    emitDashboard({ type: 'job_updated', job: updated }, updated?.tenant_id);
+  });
+
+  const updated = getJob(jobId);
+  emitJob(jobId, { type: 'job_updated', job: updated });
+  return updated;
+}
+
 function pauseJob(jobId, actor, tenantId) {
   const job = getJob(jobId, tenantId);
   if (!job) throw httpError(404, 'Job not found');
@@ -1846,6 +2004,8 @@ module.exports = {
   preflightJob,
   cleanupSourceJob,
   purgeRecycleBinJob,
+  mirrorPreviewJob: (jobId, actor, tenantId) => mirrorTargetJob(jobId, actor, tenantId),
+  mirrorApplyJob: (jobId, actor, tenantId) => mirrorTargetJob(jobId, actor, tenantId, { apply: true }),
   restartJob,
   deleteJob,
   getJob,
