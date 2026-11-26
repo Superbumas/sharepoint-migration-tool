@@ -285,7 +285,7 @@ export default function BulkAddSites({ existingMappings, group, onSaved }) {
                   </span>
                   {s.noAccess && <span className="text-xs font-medium text-amber-700 shrink-0">no access</span>}
                   {s.storageUsed != null && (
-                    <span className="shrink-0 w-24 text-right">
+                    <span className="shrink-0 w-24 text-right" title="SharePoint storage used, as in the admin centre: includes old versions and the recycle bin, so it is usually more than the files that get copied">
                       <span className="block text-xs font-medium text-slate-600 tabular-nums">{formatBytes(s.storageUsed)}</span>
                       <span className="block h-1 mt-1 bg-slate-100 rounded-full overflow-hidden">
                         <span className="block h-full bg-blue-500 rounded-full" style={{ width: `${Math.max(3, (s.storageUsed / maxStorage) * 100)}%` }} />
@@ -299,7 +299,7 @@ export default function BulkAddSites({ existingMappings, group, onSaved }) {
           {sitesError && !loadingSites && <li role="alert" className="text-red-600 text-xs px-2.5 py-3">Couldn't load sites: {sitesError}</li>}
           {shown.length === 0 && !loadingSites && !sitesError && <li className="text-slate-400 text-xs px-2.5 py-3">No sites found. Try a different name, or paste the site's URL.</li>}
         </ul>
-        <p className="text-xs text-slate-400">Ticks are kept while you search, so you can gather sites from several searches.</p>
+        <p className="text-xs text-slate-400">Ticks are kept while you search, so you can gather sites from several searches. Sizes are SharePoint storage used (with old versions and the recycle bin), so the files actually copied are usually smaller.</p>
       </section>
 
       {/* ---- 2. What to take ----------------------------------------------- */}

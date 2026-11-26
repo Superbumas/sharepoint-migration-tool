@@ -24,9 +24,9 @@ function ActionBtn({ onClick, tone = 'default', disabled, children }) {
 
 // Client report builder: pick which finished migrations go into one
 // client-facing report (PDF summary + Excel file list). Defaults to every
-// completed job; the server collapses several jobs of the same mapping to
+// completed job in view (the Project filter above narrows it); the server collapses several jobs of the same mapping to
 // the latest, so re-runs never show twice.
-function ClientReportPanel({ jobs, onClose }) {
+function ClientReportPanel({ jobs, scopeLabel, onClose }) {
   const completed = jobs.filter((j) => j.status === 'completed');
   const [selected, setSelected] = useState(() => new Set(completed.map((j) => j.id)));
   const [client, setClient] = useState('');
@@ -54,7 +54,7 @@ function ClientReportPanel({ jobs, onClose }) {
         <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-600 text-lg leading-none" aria-label="Close">×</button>
       </div>
       {completed.length === 0 ? (
-        <p className="text-sm text-slate-500">No completed migrations yet.</p>
+        <p className="text-sm text-slate-500">No completed migrations{scopeLabel} yet.</p>
       ) : (
         <>
           <label className="block text-xs text-slate-600">
@@ -66,7 +66,7 @@ function ClientReportPanel({ jobs, onClose }) {
           </label>
           <div>
             <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
-              <span>{selected.size} of {completed.length} completed migrations</span>
+              <span>{selected.size} of {completed.length} completed migrations{scopeLabel}</span>
               <button type="button" className="text-blue-600 hover:underline" onClick={() => setSelected(allOn ? new Set() : new Set(completed.map((j) => j.id)))}>
                 {allOn ? 'Select none' : 'Select all'}
               </button>
@@ -207,7 +207,8 @@ export default function JobQueue() {
         </div>
       </div>
 
-      {showReport && <ClientReportPanel jobs={jobs} onClose={() => setShowReport(false)} />}
+      {/* Keyed by project so changing the filter re-selects that project's jobs. */}
+      {showReport && <ClientReportPanel key={project} jobs={shown} scopeLabel={scopeLabel} onClose={() => setShowReport(false)} />}
 
       {error && <div role="alert" className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-md p-3">{error}</div>}
       {notice && <div role="status" className="bg-green-50 border border-green-200 text-green-700 text-sm rounded-md p-3">{notice}</div>}
