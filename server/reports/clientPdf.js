@@ -192,6 +192,11 @@ function renderClientPdf(out, data, { title, client, preparedBy, inventory }) {
       ['From', `${f.source.where}  (${f.source.kind})`],
       ['To', `${f.target.where}  (${f.target.kind})`],
       ['Completed', fmtDay(f.completedAt)],
+      ...(f.archive
+        ? [['Archived', `Only files last modified before ${fmtDay(f.archive.before)}`
+          + (f.archive.newerFiles != null ? ` · ${plural(f.archive.newerFiles, 'newer file')} stayed in the source` : '')
+          + (f.archive.removedFromSource != null ? ` · ${plural(f.archive.removedFromSource, 'archived file')} then moved from the source to its recycle bin` : '')]]
+        : []),
       ...(f.mirror.files.length + f.mirror.folders.length > 0
         ? [['Kept in step', `${plural(f.mirror.files.length, 'file')}${f.mirror.folders.length ? ` and ${plural(f.mirror.folders.length, 'folder')}` : ''} no longer in the source moved to the destination recycle bin (restorable up to 93 days)`]]
         : []),

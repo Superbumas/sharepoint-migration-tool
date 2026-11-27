@@ -78,6 +78,31 @@ function Get-GraphDriveId {
 # than a per-file round trip - so this map doubles as the engine's prefetched
 # skip-check index and source-metadata cache, not just verification input.
 # -IncludeDetails adds Created/Modified timestamps and Author/Editor emails.
+# Graph and the tree cache hand dates back as strings, or as DateTime
+# values of any Kind depending on which JSON parser read them - normalise to
+# UTC before comparing so the archive cut-off means the same instant
+# everywhere (copy, verify, cleanup). $null when there is no usable value.
+function ConvertTo-UtcDateTime($Value) {
+    if ($null -eq $Value -or "$Value" -eq '') { return $null }
+    if ($Value -is [datetimeoffset]) { return $Value.UtcDateTime }
+    if ($Value -is [datetime]) {
+        if ($Value.Kind -eq [System.DateTimeKind]::Local) { return $Value.ToUniversalTime() }
+        return [datetime]::SpecifyKind($Value, [System.DateTimeKind]::Utc)
+    }
+    $parsed = [datetimeoffset]::MinValue
+    if ([datetimeoffset]::TryParse([string]$Value, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal, [ref]$parsed)) { return $parsed.UtcDateTime }
+    return $null
+}
+
+# True when a file's Modified falls strictly before the archive cut-off. A
+# file with no Modified value is never treated as old: the archive filter
+# only ever moves what it can prove is older.
+function Test-ModifiedBefore($Modified, [datetime]$Cutoff) {
+    $m = ConvertTo-UtcDateTime $Modified
+    if ($null -eq $m) { return $false }
+    return $m -lt (ConvertTo-UtcDateTime $Cutoff)
+}
+
 function Get-GraphFileMap {
     param(
         [Parameter(Mandatory)]$Connection,
@@ -97,11 +122,18 @@ function Get-GraphFileMap {
         [switch]$IncludeDownloadUrl,
         # When given, receives the path (relative to RootPath) of every folder
         # found under it - the target mirror needs folders as well as files.
-        [System.Collections.Generic.List[string]]$FolderList
+        [System.Collections.Generic.List[string]]$FolderList,
+        # Archive filter ("only files last modified before"): files whose
+        # Modified (Graph lastModifiedDateTime - the list item's Modified
+        # field, the same value the delta scan filters the copy on) is on or
+        # after this UTC instant are left out of the map, as are files with
+        # no Modified value at all. $null = every file.
+        [Nullable[datetime]]$ModifiedBefore
     )
     $root = $RootPath.Trim('/')
     $select = 'name,size,file,folder'
     if ($IncludeDetails) { $select += ',createdDateTime,lastModifiedDateTime,createdBy,lastModifiedBy' }
+    elseif ($null -ne $ModifiedBefore) { $select += ',lastModifiedDateTime' }
     # Graph drops @microsoft.graph.downloadUrl from children listings
     # whenever $select is used (verified live), so the download-link variant
     # asks for full items.
@@ -134,6 +166,7 @@ function Get-GraphFileMap {
                     if ($null -ne $FolderList) { $FolderList.Add($(if ($root) { $childPath.Substring($root.Length).TrimStart('/') } else { $childPath })) }
                 } else {
                     $rel = if ($root) { $childPath.Substring($root.Length).TrimStart('/') } else { $childPath }
+                    if ($null -ne $ModifiedBefore -and -not (Test-ModifiedBefore -Modified $item.lastModifiedDateTime -Cutoff $ModifiedBefore)) { continue }
                     $entry = @{ Size = [long]$item.size; Hash = $item.file.hashes.quickXorHash }
                     if ($IncludeDownloadUrl) { $entry.DownloadUrl = $item.'@microsoft.graph.downloadUrl' }
                     if ($IncludeDetails) {
@@ -285,4 +318,4 @@ function Compare-BlobMigratedTree {
     }
 }
 
-Export-ModuleMember -Function Test-PnPTargetFileMatches, Compare-PnPMigratedTrees, Compare-MigratedFileMaps, Get-GraphDriveId, Get-GraphFileMap, Compare-BlobMigratedTree
+Export-ModuleMember -Function ConvertTo-UtcDateTime, Test-ModifiedBefore, Test-PnPTargetFileMatches, Compare-PnPMigratedTrees, Compare-MigratedFileMaps, Get-GraphDriveId, Get-GraphFileMap, Compare-BlobMigratedTree

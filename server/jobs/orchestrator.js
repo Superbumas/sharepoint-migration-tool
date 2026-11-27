@@ -346,6 +346,13 @@ function activeJobForMapping(mappingId) {
   ).get(mappingId) || null;
 }
 
+// The archive filter ("only files last modified before"): passed to every
+// engine run of the job - copy, pre-flight, Verify, repair, cleanup and
+// purge - so they all work on the same files.
+function archiveArgs(job) {
+  return job.modified_before ? ['-ModifiedBefore', job.modified_before] : [];
+}
+
 function createJobFromMapping(mapping, actor, overrides = {}) {
   const db = getDb();
   const active = activeJobForMapping(mapping.id);
@@ -380,14 +387,14 @@ function createJobFromMapping(mapping, actor, overrides = {}) {
       source_type, source_provider, source_site_url, source_library, source_path,
       target_type, target_site_url, target_library, target_path,
       target_provider, target_container, target_blob_prefix, target_onedrive_upn, target_onedrive_path, target_onedrive_host_url,
-      action, concurrency,
+      action, concurrency, modified_before,
       created_by_name, created_by_email, created_by_upn
     ) VALUES (
       @id, @mapping_id, @name, 'queued', @tenant_id, @owner_user_id,
       @source_type, @source_provider, @source_site_url, @source_library, @source_path,
       @target_type, @target_site_url, @target_library, @target_path,
       @target_provider, @target_container, @target_blob_prefix, @target_onedrive_upn, @target_onedrive_path, @target_onedrive_host_url,
-      @action, @concurrency,
+      @action, @concurrency, @modified_before,
       @created_by_name, @created_by_email, @created_by_upn
     )`
   ).run({
@@ -420,6 +427,7 @@ function createJobFromMapping(mapping, actor, overrides = {}) {
     target_onedrive_host_url: mapping.target_onedrive_host_url,
     action: mapping.action,
     concurrency: overrides.concurrency || config.defaultJobConcurrency,
+    modified_before: (mapping.source_provider || 'sharepoint') === 'filesystem' ? null : (mapping.modified_before || null),
     created_by_name: actor.name,
     created_by_email: actor.email,
     created_by_upn: actor.upn,
@@ -512,6 +520,7 @@ function runJob(jobId, actor, tenantId) {
     '-SourcePath', job.source_path,
     '-TargetProvider', job.target_provider || 'sharepoint',
     '-Action', job.action,
+    ...archiveArgs(job),
     '-Concurrency', String(effectiveConcurrency),
     '-OneDriveChunkSizeMB', String(config.oneDriveUploadChunkSizeMB),
     '-FsHashConcurrency', String(config.fsSourceHashConcurrency),
@@ -1377,6 +1386,7 @@ function verifyJob(jobId, actor, tenantId, opts = {}) {
     '-SourcePath', job.source_path,
     '-TargetProvider', job.target_provider || 'sharepoint',
     '-Action', job.action,
+    ...archiveArgs(job),
     '-ControlFilePath', controlFilePath(jobId),
     '-ClientId', engineIdentity.clientId,
     '-TenantId', job.tenant_id || config.tenantId,
@@ -1487,6 +1497,7 @@ function preflightJob(jobId, actor, tenantId) {
     '-SourcePath', job.source_path,
     '-TargetProvider', job.target_provider || 'sharepoint',
     '-Action', job.action,
+    ...archiveArgs(job),
     // Its own (never-written) control file: a paused job's real one still
     // says pauseRequested, which would stop the check before it starts.
     '-ControlFilePath', controlFilePath(`${jobId}.preflight`),
@@ -1586,6 +1597,7 @@ function cleanupSourceJob(jobId, actor, tenantId) {
     '-SourcePath', job.source_path,
     '-TargetProvider', job.target_provider || 'sharepoint',
     '-Action', job.action,
+    ...archiveArgs(job),
     '-ControlFilePath', controlFilePath(jobId),
     '-ClientId', engineIdentity.clientId,
     '-TenantId', job.tenant_id || config.tenantId,
@@ -1676,11 +1688,24 @@ function purgeRecycleBinJob(jobId, actor, tenantId) {
     '-SourcePath', job.source_path,
     '-TargetProvider', job.target_provider || 'sharepoint',
     '-Action', job.action,
+    ...archiveArgs(job),
     '-ControlFilePath', controlFilePath(jobId),
     '-ClientId', engineIdentity.clientId,
     '-TenantId', job.tenant_id || config.tenantId,
     '-PurgeRecycleBin',
   ];
+  // An archive job's source site stays in use: purge only the files its own
+  // cleanup recycled (the audit log has each one), never what people there
+  // deleted themselves.
+  if (job.modified_before) {
+    const deleted = getDb().prepare(
+      `SELECT DISTINCT source_path FROM job_log WHERE job_id = ? AND event_type = 'source_deleted' AND source_path IS NOT NULL`
+    ).all(jobId).map((r) => r.source_path);
+    const purgeFile = controlFilePath(`${jobId}.purge`);
+    fs.mkdirSync(path.dirname(purgeFile), { recursive: true });
+    fs.writeFileSync(purgeFile, JSON.stringify(deleted), 'utf8');
+    args.push('-PurgeOnlyPath', purgeFile);
+  }
   // Certificate secrets travel via buildEngineSpawnEnv, not argv; the
   // thumbprint is a public identifier, so it may stay an argument.
   if (!engineIdentity.certBase64) {
@@ -1775,6 +1800,9 @@ function mirrorTargetJob(jobId, actor, tenantId, opts = {}) {
   if ((job.source_provider || 'sharepoint') !== 'sharepoint' || (job.target_provider || 'sharepoint') !== 'sharepoint') {
     throw httpError(409, 'Mirroring the source is available for SharePoint/OneDrive to SharePoint jobs only.');
   }
+  if (job.modified_before) {
+    throw httpError(409, 'Mirroring the source is not available for an archive job: the newer files it leaves in the source would look like leftovers.');
+  }
   let approved = null;
   if (opts.apply) {
     let preview = null;
@@ -1802,6 +1830,7 @@ function mirrorTargetJob(jobId, actor, tenantId, opts = {}) {
     '-TargetLibrary', job.target_library || '',
     '-TargetPath', job.target_path,
     '-Action', job.action,
+    ...archiveArgs(job),
     '-ControlFilePath', controlFilePath(jobId),
     '-ClientId', engineIdentity.clientId,
     '-TenantId', job.tenant_id || config.tenantId,

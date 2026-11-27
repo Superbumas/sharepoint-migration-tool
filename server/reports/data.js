@@ -254,6 +254,22 @@ function mirrorOutcome(db, job) {
   return { files, folders, bytes, at, keptEdited };
 }
 
+// The archive filter, for the reports: the cut-off date, how many newer
+// files stayed in the source (from the last pre-flight), and how many
+// archived files the source cleanup recycled. null for a normal job.
+function archiveOutcome(job) {
+  if (!job.modified_before) return null;
+  const pf = safeParse(job.preflight_json);
+  const cleanup = safeParse(job.cleanup_json);
+  return {
+    // As a full UTC instant, so fmtDay/parseDate read it.
+    before: `${job.modified_before}T00:00:00Z`,
+    newerFiles: pf?.archive?.newerFiles ?? null,
+    newerBytes: pf?.archive?.newerBytes ?? null,
+    removedFromSource: cleanup ? (cleanup.deleted ?? 0) : null,
+  };
+}
+
 function buildClientData(db, jobs) {
   const getMapping = db.prepare('SELECT * FROM mappings WHERE id = ?');
   const folders = pickLatestPerMapping(jobs).map((job) => {
@@ -267,6 +283,7 @@ function buildClientData(db, jobs) {
       completedAt: job.completed_at,
       startedAt: job.started_at,
       mirror: mirrorOutcome(db, job),
+      archive: archiveOutcome(job),
     };
   }).sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }));
 
@@ -304,6 +321,6 @@ function buildClientData(db, jobs) {
 
 module.exports = {
   OFFICE_EXTENSIONS, PROBLEM_LABEL, isOfficeFile, extOf, safeParse,
-  sourceRoot, relativizer, folderName, effectiveVerification, jobOutcome, mirrorOutcome,
+  sourceRoot, relativizer, folderName, effectiveVerification, jobOutcome, mirrorOutcome, archiveOutcome,
   fileTypeBreakdown, pickLatestPerMapping, buildClientData,
 };

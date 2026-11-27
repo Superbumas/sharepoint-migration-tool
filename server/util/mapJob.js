@@ -28,6 +28,9 @@ function mapJob(row) {
       onedriveUpn: row.target_onedrive_upn, onedrivePath: row.target_onedrive_path, onedriveHostUrl: row.target_onedrive_host_url,
     },
     action: row.action,
+    // Archive filter: only source files last modified before this date
+    // (YYYY-MM-DD) are in the job. null = every file.
+    modifiedBefore: row.modified_before || null,
     concurrency: row.concurrency,
     totals: { items: row.total_items, bytes: row.total_bytes },
     progress: { itemsDone: row.items_done, bytesDone: row.bytes_done, itemsFailed: row.items_failed, itemsSkipped: row.items_skipped, retriesTotal: row.retries_total },

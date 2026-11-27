@@ -14,3 +14,16 @@ export function formatBytes(n) {
 export function jobTitle(name) {
   return String(name || '').replace(/ -> /g, ' → ');
 }
+
+// 'YYYY-MM-DD' -> 'dd/mm/yyyy' (UK), for the archive filter's date.
+export function formatDay(isoDay) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(isoDay || ''));
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : '';
+}
+
+// Today minus N whole years, as 'YYYY-MM-DD' (the archive quick picks).
+export function yearsAgo(n) {
+  const d = new Date();
+  d.setFullYear(d.getFullYear() - n);
+  return d.toISOString().slice(0, 10);
+}

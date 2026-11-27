@@ -7,6 +7,7 @@ import OneDriveSourcePicker from './OneDriveSourcePicker';
 import FileSharePicker from './FileSharePicker';
 import BulkAddSites from './mappings/BulkAddSites';
 import MappingsGrid from './mappings/MappingsGrid';
+import ArchiveDateField from './mappings/ArchiveDateField';
 
 const ADD_MODES = [
   { id: 'hand', label: 'Pick by hand' },
@@ -30,6 +31,8 @@ export default function MappingsPage() {
   const [blobArchivingEnabled, setBlobArchivingEnabled] = useState(false);
   const [onedriveTargetEnabled, setOnedriveTargetEnabled] = useState(false);
   const [notes, setNotes] = useState('');
+  // Archive filter for the next save: 'YYYY-MM-DD' or '' (every file).
+  const [modifiedBefore, setModifiedBefore] = useState('');
   const [message, setMessage] = useState(null);
   const [importResult, setImportResult] = useState(null);
   const [addMode, setAddMode] = useState('hand');
@@ -68,6 +71,7 @@ export default function MappingsPage() {
   function switchSourceKind(kind) {
     setSourceKind(kind);
     setSource(null);
+    if (kind === 'filesystem') setModifiedBefore('');
     // A file-share source can only migrate into SharePoint or a OneDrive (no
     // share-to-blob path in the engine) - snap the target back if blob was
     // selected.
@@ -108,6 +112,7 @@ export default function MappingsPage() {
           ...sourceFields,
           ...targetFields,
           action: 'Migrate', notes, group: projectName || undefined,
+          modifiedBefore: !isFsSource && modifiedBefore ? modifiedBefore : undefined,
         })),
       });
       if (saved.items.length === 0) throw new Error(saved.failed[0]?.message || 'Nothing was saved.');
@@ -276,6 +281,7 @@ export default function MappingsPage() {
                 ? <OneDriveTargetPicker onSelect={setTarget} />
                 : <SharePointPicker label="Target folder" onSelect={setTarget} allowCreateFolder />}
             </div>
+            {sourceKind !== 'filesystem' && <ArchiveDateField value={modifiedBefore} onChange={setModifiedBefore} idPrefix="add-archive" />}
             <div className="flex items-center gap-3">
               <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes (optional)…" aria-label="Mapping notes" autoComplete="off" className="flex-1 min-w-0 border border-slate-300 rounded-md px-2 py-1 text-sm" />
               <button onClick={saveMapping} className="btn-primary">{source?.multi && source.items.length > 1 ? `Save ${source.items.length} mappings` : 'Save mapping'}</button>
