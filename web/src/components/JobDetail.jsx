@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import PermissionsSettings from './PermissionsSettings';
-import { formatBytes, jobTitle } from '../lib/format';
+import { formatBytes, formatDay, jobTitle } from '../lib/format';
 import { socket } from '../lib/socket';
 import StatusPill from './StatusPill';
 
@@ -297,8 +297,9 @@ export default function JobDetail() {
         return;
       }
       if (action === 'cleanup-source') {
-        const answer = prompt(
-          'DELETE SOURCE FILES?\n\nEvery source file whose migrated copy re-verifies RIGHT NOW will be moved to the source site\'s RECYCLE BIN (recoverable for ~93 days). Files that do not verify are kept and reported. Emptied folders are recycled too.\n\nType DELETE to proceed.'
+        const answer = prompt(job.modifiedBefore
+          ? `DELETE THE ARCHIVED FILES FROM THE SOURCE?\n\nOnly files last modified before ${formatDay(job.modifiedBefore)} are touched. Each one whose archived copy re-verifies RIGHT NOW is moved to the source site's RECYCLE BIN (recoverable for ~93 days). Newer files, files edited since they were archived, and files that do not verify all stay where they are. A folder is only recycled if this leaves it empty.\n\nType DELETE to proceed.`
+          : 'DELETE SOURCE FILES?\n\nEvery source file whose migrated copy re-verifies RIGHT NOW will be moved to the source site\'s RECYCLE BIN (recoverable for ~93 days). Files that do not verify are kept and reported. Emptied folders are recycled too.\n\nType DELETE to proceed.'
         );
         if (answer !== 'DELETE') return;
         await api.post(`/api/jobs/${id}/cleanup-source`);
@@ -318,7 +319,10 @@ export default function JobDetail() {
       }
       if (action === 'purge-recycle-bin') {
         const answer = prompt(
-          'PERMANENTLY DELETE RECYCLED ITEMS?\n\nThis permanently removes the recycle-bin items this job\'s cleanup created (only items from this job\'s source folder - nothing else). They can NOT be recovered afterwards.\n\nThis is how the SharePoint storage actually gets freed - recycled items count toward quota for 93 days otherwise.\n\nType PURGE to proceed.'
+          (job.modifiedBefore
+            ? 'PERMANENTLY DELETE THE ARCHIVED FILES FROM THE RECYCLE BIN?\n\nThis permanently removes only the files this job\'s cleanup recycled - anything people deleted themselves stays in the recycle bin. They can NOT be recovered afterwards.'
+            : 'PERMANENTLY DELETE RECYCLED ITEMS?\n\nThis permanently removes the recycle-bin items this job\'s cleanup created (only items from this job\'s source folder - nothing else). They can NOT be recovered afterwards.')
+          + '\n\nThis is how the SharePoint storage actually gets freed - recycled items count toward quota for 93 days otherwise.\n\nType PURGE to proceed.'
         );
         if (answer !== 'PURGE') return;
         await api.post(`/api/jobs/${id}/purge-recycle-bin`);
@@ -442,6 +446,7 @@ export default function JobDetail() {
         `longest target path ${pf.longestPath} of ${pf.maxPathLength} characters (${pf.prefixLength} used by the target location)`,
         perms?.checked && perms.count > 0 && !job.permissions?.copy && `${perms.count.toLocaleString()} item(s) with their own permissions (not copied)`,
         perms?.checked && perms.count === 0 && 'no items with their own permissions',
+        pf.archive && `archive: ${pf.archive.files.toLocaleString()} file(s) (${formatBytes(pf.archive.bytes)}) last modified before ${formatDay(job.modifiedBefore)}, ${pf.archive.newerFiles.toLocaleString()} newer file(s) (${formatBytes(pf.archive.newerBytes)}) stay in the source`,
         perms && !perms.checked && 'permission check could not run',
         job.preflightAt && `checked ${job.preflightAt}`,
       ].filter(Boolean).join(' · '),
@@ -594,7 +599,7 @@ export default function JobDetail() {
   // Target mirror: SharePoint to SharePoint only. Preview first (nothing
   // changes), then move what the preview listed to the destination recycle
   // bin. Hidden while another background run is going.
-  const mirrorable = job.status === 'completed' && !backgroundOp
+  const mirrorable = job.status === 'completed' && !backgroundOp && !job.modifiedBefore
     && (job.source.provider || 'sharepoint') === 'sharepoint' && (job.target.provider || 'sharepoint') === 'sharepoint';
   const mp = job.mirrorPreview;
   const mr = job.mirror;
@@ -702,13 +707,15 @@ export default function JobDetail() {
   const contentProven = v && (v.contentVerified != null || !(v.officeRewritten > 0)) && !(v.contentUnchecked > 0);
   if (job.status === 'completed' && !backgroundOp && v?.ok && contentProven && !job.cleanup && job.source.provider !== 'filesystem') {
     notices.push({
-      key: 'archive', tone: 'info', title: 'Archive complete?',
+      key: 'archive', tone: 'info', title: job.modifiedBefore ? `Archive complete? Files last modified before ${formatDay(job.modifiedBefore)}` : 'Archive complete?',
       detail: [
-        'every file verified at the target (hash, or content for files SharePoint rewrote)',
+        job.modifiedBefore ? 'every archived file verified at the target' : 'every file verified at the target (hash, or content for files SharePoint rewrote)',
         v.contentUnchecked > 0 && `${v.contentUnchecked} file(s) not content-checked will be kept`,
-        'move the source files to the site\'s recycle bin (recoverable ~93 days), each re-verified once more at deletion time',
+        job.modifiedBefore
+          ? 'move only those files to the source site\'s recycle bin (recoverable ~93 days), each re-verified once more · newer files stay'
+          : 'move the source files to the site\'s recycle bin (recoverable ~93 days), each re-verified once more at deletion time',
       ].filter(Boolean).join(' · '),
-      action: <button type="button" onClick={() => act('cleanup-source')} className="btn-danger shrink-0">Delete source files…</button>,
+      action: <button type="button" onClick={() => act('cleanup-source')} className="btn-danger shrink-0">{job.modifiedBefore ? 'Delete archived files from source…' : 'Delete source files…'}</button>,
     });
   }
   // A Verify / clean-up / purge in progress starts from a clean page: the
@@ -773,6 +780,11 @@ export default function JobDetail() {
                 {job.target.library}/{job.target.path}
               </span>
             )} · {job.action}
+          {job.modifiedBefore && (
+            <span className="ml-2 text-xs rounded bg-amber-100 text-amber-800 px-1.5 py-0.5 font-medium" title="Only source files last modified before this date are in this job">
+              archive · older than {formatDay(job.modifiedBefore)}
+            </span>
+          )}
         </div>
       </div>
 

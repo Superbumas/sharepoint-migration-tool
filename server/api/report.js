@@ -2,8 +2,8 @@ const express = require('express');
 const PDFDocument = require('pdfkit');
 const { requireAuth, getActor, getTenantId, getProjectId, ownerScope, canAccessRow } = require('../auth/middleware');
 const { getDb } = require('../db');
-const { COLORS, Report, formatBytes, fmtDate, fmtDuration, parseDate } = require('../reports/pdf');
-const { jobOutcome, fileTypeBreakdown, buildClientData, PROBLEM_LABEL, sourceRoot, mirrorOutcome } = require('../reports/data');
+const { COLORS, Report, formatBytes, fmtDate, fmtDay, fmtDuration, parseDate } = require('../reports/pdf');
+const { jobOutcome, fileTypeBreakdown, buildClientData, PROBLEM_LABEL, sourceRoot, mirrorOutcome, archiveOutcome } = require('../reports/data');
 const { renderClientPdf } = require('../reports/clientPdf');
 const { renderClientXlsx } = require('../reports/clientXlsx');
 
@@ -153,6 +153,18 @@ router.get('/jobs/:id/report.pdf', (req, res, next) => {
       ]);
     } else {
       r.kv([['Result', 'Not verified yet', COLORS.amber]]);
+    }
+
+    // --- Archive filter ----------------------------------------------------
+    const archive = archiveOutcome(job);
+    if (archive) {
+      r.section('Archive filter');
+      r.kv([
+        ['Scope', `Only source files last modified before ${fmtDay(archive.before)} were copied, verified and offered for removal`],
+        ['Left in the source', archive.newerFiles != null
+          ? `${archive.newerFiles.toLocaleString()} newer file(s) (${formatBytes(archive.newerBytes || 0)}) - untouched`
+          : 'Newer files - untouched (counted by the pre-flight check)'],
+      ]);
     }
 
     // --- Source cleanup ----------------------------------------------------

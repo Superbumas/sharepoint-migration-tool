@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { cleanPath, joinPath, pathProblem } from '../../lib/mappingPaths';
+import { formatDay } from '../../lib/format';
+import ArchiveDateField from './ArchiveDateField';
 
 const NO_GROUP = '\u0000none';
 
@@ -96,7 +98,8 @@ export default function MappingsGrid({ mappings, groupNames, refresh }) {
   const [collapsed, setCollapsed] = useState(new Set());
   const [editing, setEditing] = useState(null); // { id, value, error }
   const [renaming, setRenaming] = useState(null); // { group, value }
-  const [panel, setPanel] = useState(null); // null | 'project' | 'target'
+  const [panel, setPanel] = useState(null); // null | 'project' | 'target' | 'archive'
+  const [archiveValue, setArchiveValue] = useState('');
   const [projectValue, setProjectValue] = useState('');
   const [targetMode, setTargetMode] = useState('replace'); // 'replace' | 'prefix' | 'set'
   const [findText, setFindText] = useState('');
@@ -205,7 +208,7 @@ export default function MappingsGrid({ mappings, groupNames, refresh }) {
           targetLibrary: m.targetLibrary, targetPath: m.targetPath,
           targetContainer: m.targetContainer, targetBlobPrefix: m.targetBlobPrefix,
           targetOnedriveUpn: m.targetOnedriveUpn, targetOnedrivePath: m.targetOnedrivePath,
-          action: 'Migrate', notes: m.notes, group: m.group,
+          action: 'Migrate', notes: m.notes, group: m.group, modifiedBefore: m.modifiedBefore || undefined,
         }],
       });
       if (r.failed.length > 0) throw new Error(r.failed[0].message);
@@ -285,6 +288,25 @@ export default function MappingsGrid({ mappings, groupNames, refresh }) {
     });
   }
 
+  // Sets (or clears, with '') the archive date on every selected mapping
+  // that isn't a file share. A job already created keeps its own date.
+  function applyArchive() {
+    const ids = selected.filter((m) => m.sourceProvider !== 'filesystem').map((m) => m.id);
+    return run(async () => {
+      const r = await api.post('/api/mappings/bulk-update', { updates: ids.map((id) => ({ id, modifiedBefore: archiveValue || null })) });
+      await refresh();
+      setPanel(null);
+      setMessage({
+        type: r.failed.length > 0 ? 'error' : 'success',
+        text: (archiveValue
+          ? `${r.updatedCount} mapping${r.updatedCount === 1 ? '' : 's'} now only archive files last modified before ${formatDay(archiveValue)}.`
+          : `${r.updatedCount} mapping${r.updatedCount === 1 ? '' : 's'} copy every file again.`)
+          + (r.failed.length > 0 ? ` ${r.failed.length} failed: ${r.failed[0].message}` : '')
+          + (selected.length > ids.length ? ` ${selected.length - ids.length} file-share mapping(s) left as they are.` : ''),
+      });
+    });
+  }
+
   // The new target folder a bulk change gives one mapping.
   function changedPath(m) {
     const old = cleanPath(m.targetPath);
@@ -330,6 +352,13 @@ export default function MappingsGrid({ mappings, groupNames, refresh }) {
                 {m.sourceLibrary}/{m.sourcePath}
               </span>
             )}
+          {m.modifiedBefore && (
+            <div className="mt-0.5">
+              <span className="inline-block text-xs rounded bg-amber-100 text-amber-800 px-1.5 py-0.5 font-medium" title="Archive: only files last modified before this date are copied, checked and offered for removal from the source">
+                archive · older than {formatDay(m.modifiedBefore)}
+              </span>
+            </div>
+          )}
           {m.notes && <div className="text-xs text-slate-400 truncate max-w-xs" title={m.notes}>{m.notes}</div>}
         </td>
         <td className="px-4 py-2 text-slate-700">
@@ -480,6 +509,13 @@ export default function MappingsGrid({ mappings, groupNames, refresh }) {
             <span className="w-px h-5 bg-blue-200 mx-1" aria-hidden />
             <button onClick={() => setPanel(panel === 'project' ? null : 'project')} aria-expanded={panel === 'project'} className="btn-secondary bg-white border border-slate-200">Move to project…</button>
             <button onClick={() => setPanel(panel === 'target' ? null : 'target')} aria-expanded={panel === 'target'} className="btn-secondary bg-white border border-slate-200">Change target folder…</button>
+            <button
+              onClick={() => { if (panel !== 'archive') setArchiveValue(selected.find((m) => m.modifiedBefore)?.modifiedBefore || ''); setPanel(panel === 'archive' ? null : 'archive'); }}
+              aria-expanded={panel === 'archive'}
+              className="btn-secondary bg-white border border-slate-200"
+            >
+              Archive older files…
+            </button>
             <button onClick={removeSelected} disabled={busy} className="btn-danger">Delete</button>
             <button onClick={() => { setSelectedIds(new Set()); setPanel(null); }} className="text-xs text-slate-600 hover:underline ml-auto">Clear selection</button>
           </div>
@@ -499,6 +535,18 @@ export default function MappingsGrid({ mappings, groupNames, refresh }) {
               />
               <datalist id="mapping-projects">{groupNames.map((g) => <option key={g} value={g} />)}</datalist>
               <button type="submit" disabled={busy} className="btn-primary">{projectValue.trim() ? `Move ${selected.length}` : `Take ${selected.length} out of their project`}</button>
+            </form>
+          )}
+
+          {panel === 'archive' && (
+            <form onSubmit={(e) => { e.preventDefault(); applyArchive(); }} className="space-y-2">
+              <ArchiveDateField value={archiveValue} onChange={setArchiveValue} idPrefix="bulk-archive" />
+              <div className="flex flex-wrap items-center gap-2">
+                <button type="submit" disabled={busy} className="btn-primary">
+                  {archiveValue ? `Set on ${selected.length}` : `Copy every file on ${selected.length}`}
+                </button>
+                <span className="text-xs text-slate-600">Jobs already created keep the date they had. The next Create job or Run again uses this one.</span>
+              </div>
             </form>
           )}
 

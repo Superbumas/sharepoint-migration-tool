@@ -12,11 +12,12 @@ function renderClientXlsx(data, { title, client }) {
     [client || title],
     [`Migration report · issued ${fmtDay(new Date())}`],
     [],
-    ['Location', 'From', 'To', 'Files migrated', 'Size', 'Size (bytes)', 'Subfolders', 'Status', 'Completed', 'Link', 'Removed to match source (in recycle bin)'],
+    ['Location', 'From', 'To', 'Files migrated', 'Size', 'Size (bytes)', 'Subfolders', 'Status', 'Completed', 'Link', 'Removed to match source (in recycle bin)', 'Archived: files last modified before'],
     ...folders.map((f) => [
       f.name, f.source.where, f.target.where, f.migrated.length, formatBytes(f.bytes), f.bytes, f.folderCount,
       f.notMigrated.length > 0 ? `${f.notMigrated.length} file${f.notMigrated.length === 1 ? '' : 's'} to review` : f.ver.state === 'verified' ? 'Complete · verified' : 'Complete',
       fmtDay(f.completedAt), f.target.url || '', f.mirror.files.length + f.mirror.folders.length,
+      f.archive ? fmtDay(f.archive.before) : '',
     ]),
     ['Total', '', '', totals.files, formatBytes(totals.bytes), totals.bytes, totals.subfolders, '', ''],
   ];
@@ -29,7 +30,7 @@ function renderClientXlsx(data, { title, client }) {
 
   const wb = XLSX.utils.book_new();
   const s1 = XLSX.utils.aoa_to_sheet(summary);
-  s1['!cols'] = [{ wch: 26 }, { wch: 48 }, { wch: 48 }, { wch: 14 }, { wch: 10 }, { wch: 14 }, { wch: 11 }, { wch: 22 }, { wch: 16 }, { wch: 60 }, { wch: 22 }];
+  s1['!cols'] = [{ wch: 26 }, { wch: 48 }, { wch: 48 }, { wch: 14 }, { wch: 10 }, { wch: 14 }, { wch: 11 }, { wch: 22 }, { wch: 16 }, { wch: 60 }, { wch: 22 }, { wch: 22 }];
   XLSX.utils.book_append_sheet(wb, s1, 'Summary');
   const s2 = XLSX.utils.aoa_to_sheet(files);
   s2['!cols'] = [{ wch: 22 }, { wch: 90 }, { wch: 40 }, { wch: 8 }, { wch: 10 }, { wch: 14 }];

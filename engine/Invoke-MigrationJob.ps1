@@ -189,7 +189,19 @@ param(
     # delta or the folder-by-folder walk per Select-SharePointScanMethod;
     # 'delta' / 'folders' force one - for troubleshooting a scan, or to
     # compare the two on a real library.
-    [ValidateSet('auto', 'delta', 'folders')][string]$SourceScanMethod = 'auto'
+    [ValidateSet('auto', 'delta', 'folders')][string]$SourceScanMethod = 'auto',
+    # Archive filter ("Only files last modified before" on the mapping): an
+    # ISO date/time; empty = every file. When set, the copy, the pre-flight,
+    # Verify and "Delete source files" all work on the same set - SharePoint
+    # source files whose Modified is strictly before this instant (UTC). The
+    # cut-off is fixed per job, so a file edited since it was archived simply
+    # drops out of the set and is never deleted from the source.
+    [string]$ModifiedBefore,
+    # -PurgeRecycleBin on an archive job: a JSON array of the server-relative
+    # paths its source cleanup recycled. Only those recycle-bin items are
+    # purged - the source site stays in use, so whatever its people deleted
+    # themselves keeps its 93 days.
+    [string]$PurgeOnlyPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -349,6 +361,7 @@ function Invoke-VerificationPhase {
         $isFsSource = $SourceProvider -eq 'filesystem'
         $hashLabel = if ($isBlob) { 'MD5' } else { 'QuickXorHash' }
         Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Verifying migration: comparing existence, size and content hash ($hashLabel) of every source file against its copy..." }
+        if ($archiveCutoff) { Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Archive job: only source files last modified before $archiveLabel are checked - newer files stay in the source and are not part of this job." } }
         # Listing both trees can take minutes on a big library: heartbeat the
         # job page's progress card on every Graph page, and put a line in the
         # live log at most every 15 s so the log doesn't look frozen.
@@ -376,7 +389,7 @@ function Invoke-VerificationPhase {
                 }
             } else {
                 $srcDriveId = Get-GraphDriveId -Connection $SourceConn -SiteUrl $SourceSite -Library $SourceLib
-                Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib -IncludeDownloadUrl -OnProgress $idxSrc
+                Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib -IncludeDownloadUrl -ModifiedBefore $archiveCutoff -OnProgress $idxSrc
             }
             $tgtMap = Get-GraphFileMap -Connection $OneDriveCtx.Connection -DriveId $OneDriveCtx.DriveId -RootPath $OneDriveCtx.PathRoot -IncludeDownloadUrl -OnProgress $idxTgt
             Compare-MigratedFileMaps -SourceMap $srcMap -TargetMap $tgtMap
@@ -393,7 +406,7 @@ function Invoke-VerificationPhase {
             Compare-MigratedFileMaps -SourceMap $srcMap -TargetMap $tgtMap
         } elseif ($isBlob) {
             $srcDriveId = Get-GraphDriveId -Connection $SourceConn -SiteUrl $SourceSite -Library $SourceLib
-            $srcMap = Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib -OnProgress $idxSrc
+            $srcMap = Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib -ModifiedBefore $archiveCutoff -OnProgress $idxSrc
             $tgtMap = Get-BlobKeyMap -BlobEndpoint $BlobCtx.BlobEndpoint -Container $BlobCtx.Container -Sas $BlobCtx.Sas -Prefix $BlobCtx.Prefix
             Compare-BlobMigratedTree -SourceMap $srcMap -TargetMap $tgtMap
         } else {
@@ -401,7 +414,7 @@ function Invoke-VerificationPhase {
             # download links included) for the rewritten-file content check.
             $srcDriveId = Get-GraphDriveId -Connection $SourceConn -SiteUrl $SourceSite -Library $SourceLib
             $tgtDriveId = Get-GraphDriveId -Connection $TargetConn -SiteUrl $TargetSite -Library $TargetLib
-            $srcMap = Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib -IncludeDownloadUrl -OnProgress $idxSrc
+            $srcMap = Get-GraphFileMap -Connection $SourceConn -DriveId $srcDriveId -RootPath $SourcePathInLib -IncludeDownloadUrl -ModifiedBefore $archiveCutoff -OnProgress $idxSrc
             $tgtMap = Get-GraphFileMap -Connection $TargetConn -DriveId $tgtDriveId -RootPath $TargetPathInLib -IncludeDownloadUrl -OnProgress $idxTgt
             Compare-MigratedFileMaps -SourceMap $srcMap -TargetMap $tgtMap
         }
@@ -543,6 +556,14 @@ try {
     $isBlobTarget = $TargetProvider -eq 'azure_blob'
     $isOneDriveTarget = $TargetProvider -eq 'onedrive'
     $isFsSource = $SourceProvider -eq 'filesystem'
+    $archiveCutoff = $null
+    if ($ModifiedBefore) {
+        $archiveCutoff = ConvertTo-UtcDateTime $ModifiedBefore
+        if ($null -eq $archiveCutoff) { throw "ModifiedBefore '$ModifiedBefore' is not a valid date." }
+        if ($isFsSource) { throw 'The "only files last modified before" archive filter is available for SharePoint and OneDrive sources only.' }
+        if ($MirrorTarget) { throw 'Mirroring the source is not available for an archive job (one that only copies files older than a date): the newer files that stay in the source would look like leftovers.' }
+    }
+    $archiveLabel = if ($archiveCutoff) { $archiveCutoff.ToString('dd/MM/yyyy', [cultureinfo]::InvariantCulture) } else { $null }
     if ($isBlobTarget -and -not $BlobConnectionString) {
         throw 'Azure Blob archiving is not configured on this server (AZURE_BLOB_CONNECTION_STRING is empty). Set it and restart the server before running this job.'
     }
@@ -929,6 +950,17 @@ try {
         $rootDir = "$sourceSiteServerRelative/$sourceRoot".Replace('//', '/').TrimStart('/')
         $all = @(Get-PnPRecycleBinItem -Connection $sourceConn)
         $mine = @($all | Where-Object { $_.DirName -eq $rootDir -or $_.DirName -like "$rootDir/*" })
+        if ($archiveCutoff) {
+            # Archive job: the source site is still in use, so only the files
+            # this job's cleanup recycled are purged - never what people
+            # there deleted themselves.
+            $ownDeleted = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            if ($PurgeOnlyPath -and (Test-Path -LiteralPath $PurgeOnlyPath)) {
+                foreach ($p in @(Get-Content -LiteralPath $PurgeOnlyPath -Raw | ConvertFrom-Json)) { if ($p) { $null = $ownDeleted.Add(([string]$p).TrimStart('/')) } }
+            }
+            $mine = @($mine | Where-Object { $ownDeleted.Contains("$($_.DirName)/$($_.LeafName)".TrimStart('/')) })
+            Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Archive job: only the $($ownDeleted.Count) file(s) this job's cleanup recycled are candidates - anything else in the recycle bin is left alone." }
+        }
         Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Recycle bin holds $($all.Count) item(s); $($mine.Count) originated under '$rootDir' and will be purged." }
         $purged = 0; [long]$purgedBytes = 0
         foreach ($item in $mine) {
@@ -1125,7 +1157,8 @@ try {
 
         $srcDriveId = Get-GraphDriveId -Connection $sourceConn -SiteUrl $SourceSiteUrl -Library $SourceLibrary
         # Download links are kept for the content check of rewritten files.
-        $srcMap = Get-GraphFileMap -Connection $sourceConn -DriveId $srcDriveId -RootPath $SourcePath -IncludeDownloadUrl:(-not $isBlobTarget) -OnProgress {
+        if ($archiveCutoff) { Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Archive job: only source files last modified before $archiveLabel are candidates. Newer files, and files edited since they were archived, stay where they are." } }
+        $srcMap = Get-GraphFileMap -Connection $sourceConn -DriveId $srcDriveId -RootPath $SourcePath -IncludeDownloadUrl:(-not $isBlobTarget) -ModifiedBefore $archiveCutoff -OnProgress {
             param($count)
             Write-PhaseProgress -Phase 'indexing_source' -Data @{ files = $count }
         }
@@ -1209,6 +1242,10 @@ try {
         # web page only if the content check above proved it identical.
         $deleted = 0; $kept = 0
         $keptList = [System.Collections.Generic.List[string]]::new()
+        # Folders that held a recycled file (and their ancestors): on an
+        # archive job only these may be recycled once empty - a folder that
+        # was already empty before belongs to the people still using the site.
+        $touchedFolders = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         foreach ($rel in @($srcMap.Keys)) {
             $src = $srcMap[$rel]
             $tgt = $tgtMap[$rel]
@@ -1233,6 +1270,8 @@ try {
                     # stdout, which is reserved for NDJSON events.
                     Remove-PnPFile -ServerRelativeUrl $serverRel -Recycle -Force -Connection $sourceConn -ErrorAction Stop | Out-Null
                     $deleted++
+                    $dparts = @(($rel -split '/') | Where-Object { $_ })
+                    for ($i = 1; $i -lt $dparts.Count; $i++) { $null = $touchedFolders.Add(($dparts[0..($i - 1)] -join '/')) }
                     Write-EngineEvent -Type 'source_deleted' -Data @{ sourcePath = $serverRel }
                 } catch {
                     $kept++; $keptList.Add($rel)
@@ -1262,6 +1301,15 @@ try {
             foreach ($f in @($treeAfter.Files)) {
                 $parts = @(($f.RelativeFromRoot -split '/') | Where-Object { $_ })
                 for ($i = 1; $i -le $parts.Count; $i++) { $null = $protected.Add(($parts[0..($i - 1)] -join '/')) }
+            }
+            if ($archiveCutoff) {
+                # An empty folder this job never touched is kept - and so is
+                # every folder above it, or recycling the parent would take it.
+                foreach ($d in @($treeAfter.Folders)) {
+                    if (-not $d -or $touchedFolders.Contains($d)) { continue }
+                    $parts = @(($d -split '/') | Where-Object { $_ })
+                    for ($i = 1; $i -le $parts.Count; $i++) { $null = $protected.Add(($parts[0..($i - 1)] -join '/')) }
+                }
             }
             $candidates = @($treeAfter.Folders) | Where-Object { $_ -and -not $protected.Contains($_) } |
                 Sort-Object { ($_ -split '/').Count } -Descending
@@ -1404,6 +1452,9 @@ try {
     # original format so caches from jobs paused before this feature existed
     # still validate on resume.
     $sourceKey = if ($isFsSource) { "filesystem|$SourcePath" } else { "$SourceSiteUrl|$SourceLibrary|$SourcePath" }
+    # An archive job needs Graph's Modified on every file (only the delta
+    # scan has it), so it never reuses a scan made without the filter.
+    if ($archiveCutoff) { $sourceKey += "|archive-delta" }
     $targetKey = if ($isBlobTarget) { 'blob' } elseif ($isOneDriveTarget) { "onedrive|$TargetOneDriveUpn|$($oneDriveCtx.PathRoot)" } else { "$effTargetSite|$effTargetLib|$targetPathInLib" }
     $tree = $null
     $treeFromCache = $false
@@ -1465,6 +1516,11 @@ try {
                 try { $libItemCount = [long](Get-PnPList -Identity $SourceLibrary -Connection $sourceConn -ErrorAction Stop).ItemCount } catch {}
                 $scan = Select-SharePointScanMethod -Connection $sourceConn -DriveId $scanDriveId -PathInLibrary $SourcePath -LibraryItemCount $libItemCount
                 if ($SourceScanMethod -ne 'auto') { $scan.Method = $SourceScanMethod; $scan.Reason = "forced by -SourceScanMethod $SourceScanMethod" }
+                # The archive filter goes by Graph's Modified (the list item's
+                # Modified field), which only the delta scan returns - the
+                # folder walk's TimeLastModified can differ from it, and Verify
+                # and the source cleanup filter by Graph's value.
+                if ($archiveCutoff -and $scan.Method -ne 'delta') { $scan.Method = 'delta'; $scan.Reason = 'archive job - filters on each file''s Modified date' }
                 if ($scan.Method -eq 'delta') {
                     Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Enumerating source tree under '$sourceRoot' with a Graph delta scan ($($scan.Reason))" }
                     $tree = Get-GraphDeltaTree -Connection $sourceConn -DriveId $scanDriveId -RootSiteRelativeUrl $sourceRoot -ScopeFolderId $scan.FolderId -OnProgress {
@@ -1479,6 +1535,7 @@ try {
                     Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Enumerating source tree under '$sourceRoot' folder by folder ($($scan.Reason), so a whole-library delta scan would read more than it saves)" }
                 }
             } catch {
+                if ($archiveCutoff) { throw "The source scan failed ($($_.Exception.Message)). An archive job needs it to read each file's Modified date, so nothing was copied - run the job again." }
                 Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Graph delta scan unavailable ($($_.Exception.Message)) - enumerating folder by folder instead." }
                 $tree = $null
             }
@@ -1501,6 +1558,39 @@ try {
                 Write-EngineEvent -Type 'log' -Data @{ level = 'warn'; message = "Could not persist the tree scan cache ($($_.Exception.Message)) - harmless, the next run just re-enumerates." }
             }
         }
+    }
+    # --- Archive filter ------------------------------------------------------
+    # Only files last modified before the cut-off take part; newer ones stay
+    # in the source untouched. Folders are kept only where an archived file
+    # lives (and above it), so the archive gets no empty folders.
+    $archiveSummary = $null
+    if ($archiveCutoff) {
+        $allFiles = @($tree.Files)
+        $oldFiles = [System.Collections.Generic.List[object]]::new()
+        $keepDirs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        [long]$newerBytes = 0
+        foreach ($f in $allFiles) {
+            if (Test-ModifiedBefore -Modified $f.Modified -Cutoff $archiveCutoff) {
+                $oldFiles.Add($f)
+                $parts = @(([string]$f.RelativeFromRoot -split '/') | Where-Object { $_ })
+                for ($i = 1; $i -le $parts.Count; $i++) { $null = $keepDirs.Add(($parts[0..($i - 1)] -join '/')) }
+            } else {
+                $newerBytes += [long]$f.Size
+            }
+        }
+        $tree = [pscustomobject]@{
+            Files   = $oldFiles
+            Folders = @(@($tree.Folders) | Where-Object { $keepDirs.Contains([string]$_) })
+        }
+        [long]$oldBytes = ($oldFiles | Measure-Object -Property Size -Sum).Sum
+        $archiveSummary = @{
+            modifiedBefore = $archiveCutoff.ToString('o')
+            files          = $oldFiles.Count
+            bytes          = $oldBytes
+            newerFiles     = $allFiles.Count - $oldFiles.Count
+            newerBytes     = $newerBytes
+        }
+        Write-EngineEvent -Type 'log' -Data @{ level = 'info'; message = "Archive filter: $($oldFiles.Count) of $($allFiles.Count) file(s) were last modified before $archiveLabel ($([Math]::Round($oldBytes / 1MB)) MB) and are in this job. $($allFiles.Count - $oldFiles.Count) newer file(s) ($([Math]::Round($newerBytes / 1MB)) MB) stay in the source untouched." }
     }
     $totalItems = @($tree.Files).Count
     $totalBytes = ($tree.Files | Measure-Object -Property Size -Sum).Sum
@@ -1542,7 +1632,26 @@ try {
                     Write-PhaseProgress -Phase 'preflight' -Data @{ step = 'permissions'; scanned = $scanned; found = $found }
                 }
         }
+        if ($archiveCutoff -and $uniquePerms -and $uniquePerms.Checked) {
+            # Only the archived items matter: their files, and the folders
+            # the archive recreates.
+            $archFileSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($f in @($tree.Files)) { $null = $archFileSet.Add($(if ($f.RelativeFromRoot) { "$($f.RelativeFromRoot)/$($f.Name)" } else { [string]$f.Name })) }
+            $archDirSet = [System.Collections.Generic.HashSet[string]]::new([string[]]@($tree.Folders | ForEach-Object { [string]$_ }), [System.StringComparer]::OrdinalIgnoreCase)
+            $keptItems = @($uniquePerms.Items | Where-Object { if ($_.isFolder) { $archDirSet.Contains([string]$_.path) } else { $archFileSet.Contains([string]$_.path) } })
+            $byDir = @{}
+            foreach ($it in $keptItems) {
+                $dir = if ($it.isFolder) { [string]$it.path } elseif (([string]$it.path).Contains('/')) { ([string]$it.path).Substring(0, ([string]$it.path).LastIndexOf('/')) } else { '' }
+                $key = @(($dir -split '/') | Where-Object { $_ } | Select-Object -First 2) -join '/'
+                $byDir[$key] = 1 + [int]$byDir[$key]
+            }
+            $uniquePerms = [pscustomobject]@{
+                Checked = $true; Count = $keptItems.Count; Scanned = $uniquePerms.Scanned; Error = $null; Items = $keptItems
+                Folders = @($byDir.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 15 | ForEach-Object { [pscustomobject]@{ path = $(if ($_.Key) { $_.Key } else { '(top level)' }); count = $_.Value } })
+            }
+        }
         $preflight = New-PreflightReport -Content $content -UniquePerms $uniquePerms -TargetProvider $TargetProvider
+        if ($archiveSummary) { $preflight.archive = $archiveSummary }
         if ($permsSkipped) { $preflight.uniquePermissions = @{ skipped = $true } }
         # "Who had access": the grants of every item with its own permissions,
         # read from Graph (read-only) and saved for the CSV export. Capped so a

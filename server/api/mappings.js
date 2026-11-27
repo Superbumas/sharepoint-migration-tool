@@ -47,6 +47,7 @@ function mapRow(row) {
     crosswalkRowRef: row.crosswalk_row_ref,
     notes: row.notes,
     group: row.group_name || null,
+    modifiedBefore: row.modified_before || null,
     createdByName: row.created_by_name,
     createdByEmail: row.created_by_email,
     ownerUserId: row.owner_user_id,
@@ -151,6 +152,20 @@ function cleanGroup(value) {
   const name = String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, 120);
   return name || null;
 }
+
+// The archive filter ("only files last modified before"): a calendar date,
+// YYYY-MM-DD, or null for every file. Returns undefined for anything else.
+function cleanModifiedBefore(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const text = String(value).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return undefined;
+  const d = new Date(`${text}T00:00:00Z`);
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== text) return undefined;
+  if (d.getUTCFullYear() < 1990) return undefined;
+  return text;
+}
+const BAD_DATE = { error: 'invalid_date', message: 'The "older than" date must be a real date (YYYY-MM-DD).' };
+const FS_NO_ARCHIVE = { error: 'archive_not_supported', message: 'The "only files older than" filter works for SharePoint and OneDrive sources only, not file shares.' };
 
 const VALID_TARGET_PROVIDERS = new Set(['sharepoint', 'azure_blob', 'onedrive']);
 const VALID_SOURCE_PROVIDERS = new Set(['sharepoint', 'filesystem']);
@@ -305,6 +320,9 @@ async function insertMapping(req, b, driveChecks) {
   if (b.action && !VALID_ACTIONS.has(b.action)) {
     return fail(400, { error: `action must be one of ${[...VALID_ACTIONS].join(', ')}` });
   }
+  const modifiedBefore = cleanModifiedBefore(b.modifiedBefore);
+  if (modifiedBefore === undefined) return fail(400, BAD_DATE);
+  if (modifiedBefore && sourceProvider === 'filesystem') return fail(400, FS_NO_ARCHIVE);
   const actor = getActor(req);
   const db = getDb();
   const id = uuid();
@@ -321,12 +339,12 @@ async function insertMapping(req, b, driveChecks) {
       id, tenant_id, owner_user_id, source_type, source_provider, source_site_url, source_site_name, source_library, source_path,
       target_type, target_site_url, target_site_name, target_library, target_path,
       target_provider, target_container, target_blob_prefix, target_onedrive_upn, target_onedrive_path, target_onedrive_host_url,
-      action, confidence, origin, notes, group_name, created_by_name, created_by_email
+      action, confidence, origin, notes, group_name, modified_before, created_by_name, created_by_email
     ) VALUES (
       @id, @tenantId, @ownerUserId, @sourceType, @sourceProvider, @sourceSiteUrl, @sourceSiteName, @sourceLibrary, @sourcePath,
       @targetType, @targetSiteUrl, @targetSiteName, @targetLibrary, @targetPath,
       @targetProvider, @targetContainer, @targetBlobPrefix, @targetOnedriveUpn, @targetOnedrivePath, @targetOnedriveHostUrl,
-      @action, @confidence, 'manual', @notes, @groupName, @createdByName, @createdByEmail
+      @action, @confidence, 'manual', @notes, @groupName, @modifiedBefore, @createdByName, @createdByEmail
     )`
   ).run({
     id,
@@ -353,6 +371,7 @@ async function insertMapping(req, b, driveChecks) {
     confidence: b.confidence || null,
     notes: b.notes || null,
     groupName: cleanGroup(b.group),
+    modifiedBefore,
     createdByName: actor.name,
     createdByEmail: actor.email,
   });
@@ -401,7 +420,16 @@ function applyMappingUpdate(req, id, b) {
     targetPath: row.target_path,
     notes: b.notes !== undefined ? (String(b.notes || '').trim() || null) : row.notes,
     groupName: b.group !== undefined ? cleanGroup(b.group) : row.group_name,
+    modifiedBefore: row.modified_before,
   };
+  // The archive date can change at any time: a job already created keeps
+  // its own copy, so only the next run uses the new date.
+  if (b.modifiedBefore !== undefined) {
+    const value = cleanModifiedBefore(b.modifiedBefore);
+    if (value === undefined) return { error: { status: 400, body: BAD_DATE } };
+    if (value && row.source_provider === 'filesystem') return { error: { status: 400, body: FS_NO_ARCHIVE } };
+    next.modifiedBefore = value;
+  }
   if (touchesTarget) {
     if ((row.target_provider || 'sharepoint') !== 'sharepoint') {
       return { error: { status: 400, body: { error: 'not_editable', message: 'Only a SharePoint target can be edited here.' } } };
@@ -434,7 +462,8 @@ function applyMappingUpdate(req, id, b) {
   }
   db.prepare(
     `UPDATE mappings SET target_site_url = @targetSiteUrl, target_site_name = @targetSiteName,
-       target_library = @targetLibrary, target_path = @targetPath, notes = @notes, group_name = @groupName WHERE id = @id`
+       target_library = @targetLibrary, target_path = @targetPath, notes = @notes, group_name = @groupName,
+       modified_before = @modifiedBefore WHERE id = @id`
   ).run(next);
   return { id: row.id, sites: b.targetSiteUrl !== undefined ? [next.targetSiteUrl] : [] };
 }
